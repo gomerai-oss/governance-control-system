@@ -1,0 +1,73 @@
+name: Mission Router
+
+# Carries each mission's PRs through A1 -> A2 -> A3: merges the expected stage
+# PR and hands the mission to the next role (tracking issue labels + comment).
+# It also owns main's required status check, route-handoff-block: on every open
+# PR into main it publishes success only for a mission whose A3 PASS cleared
+# every routing check.
+# Spec: tools/agent_workflow/specs/MISSION-ROUTER-001.md
+#
+# Security model:
+# - Runs only the default branch's copy of this file and of the router code.
+#   pull_request_target is limited to PRs into main (its workflow file comes
+#   from main); PRs into mission integration branches are picked up by the
+#   schedule, which also runs from main. No PR code is ever checked out.
+# - Every trigger runs the same idempotent sweep; event payloads are not read,
+#   so no PR-controlled text reaches a shell.
+# - On a handoff to A2 or A3 whose plan names a runtime it starts the Mission
+#   Agent workflow (mission-agent.yml) on the default branch; that is its only
+#   use of actions: write.
+# - /mission comments on PRs and on tracking issues (approve, cancel) trigger a
+#   sweep; the sweep reads the comments back from the API, not the payload.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+    branches: [main]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Decide and log, but write nothing to GitHub
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: mission-router
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: mission-router
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/mission '))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: write  # start mission-agent.yml on a handoff; nothing else
+    steps:
+      - name: Check out the default branch only
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          persist-credentials: false
+
+      - name: Sweep missions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PYTHONPATH: tools/agent_workflow
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python3 -m mission_router --repo "$GITHUB_REPOSITORY" $DRY_RUN

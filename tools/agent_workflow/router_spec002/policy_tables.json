@@ -1,0 +1,186 @@
+{
+  "description": "ROUTER-POLICY-SPEC-002 policy tables (sections 3a-3d). This file is itself an AUTHORITY path.",
+  "schema_version": 1,
+  "family_precedence": ["AUTHORITY", "AGENT_POLICY", "TOOL_CONFIG", "PROBE_EVIDENCE", "INERT"],
+  "fallback_family": "CODE",
+  "families": {
+    "AUTHORITY": [
+      {"exact": "governance/reviewer_execution/sal3/temporary-review-waiver.yaml"},
+      {"prefix": "governance/reviewer_execution/sal3/"},
+      {"prefix": "tools/reviewer_execution/sal3/"},
+      {"exact": "POLICIES/ENTERPRISE-DELEGATED-MERGE-STANDING-AUTHORITY-001.md"},
+      {"exact": "CODEOWNERS"},
+      {"exact": ".github/CODEOWNERS"},
+      {"exact": "docs/CODEOWNERS"},
+      {"prefix": ".cursor/approval-policies/"},
+      {"prefix": "tools/agent_workflow/router_spec002/"},
+      {"prefix": "tools/agent_workflow/mission_router/"},
+      {"exact": "tools/agent_workflow/specs/MISSION-ROUTER-001.md"},
+      {"prefix": "tools/agent_workflow/mission_dispatch/"},
+      {"exact": "tools/agent_workflow/specs/MISSION-DISPATCH-001.md"},
+      {"glob": "missions/*/mission.json"},
+      {"exact": "tools/agent_workflow/specs/ROUTER-POLICY-SPEC-002.md"},
+      {"exact": "tools/agent_workflow/sal3_merge_dispatch.py"},
+      {"exact": "tools/agent_workflow/merge_delegation_evaluator.py"},
+      {"exact": ".github/workflows/pr-handoff-router.yml"},
+      {"exact": ".github/workflows/vrt-delegated-merge-dispatch.yml"},
+      {"prefix": ".github/workflows/"},
+      {"prefix": ".github/actions/"},
+      {"exact": ".github/settings.yml"},
+      {"prefix": "UPG/delegation/"},
+      {"prefix": "docs/delegation/"},
+      {"prefix": "tools/vrt/tests/"},
+      {"prefix": "tools/policy/"},
+      {"exact": "tools/a2a_plane/run_boundary_tests.py"},
+      {"exact": "tools/a2a_plane/validators.py"},
+      {"exact": "tools/offline_validation/pilot_grant.py"},
+      {"exact": "tools/offline_validation/production_grant.py"},
+      {"exact": "tools/offline_validation/version.py"},
+      {"exact": "tools/pms_drift_review/pms_drift_review.py"},
+      {"exact": "tools/reviewer_execution/conformance.py"},
+      {"exact": "tools/reviewer_execution/contracts.py"},
+      {"prefix": "tools/reviewer_execution/lifecycle/"},
+      {"prefix": "tools/reviewer_execution/runtime/"},
+      {"prefix": "tools/reviewer_execution/sal4/"},
+      {"glob": "*.py*"},
+      {"glob": "*.so"},
+      {"glob": "*/__init__.*"},
+      {"glob": "tools/*.py*"},
+      {"glob": "tools/*.so"},
+      {"glob": "tools/*/__init__.*"},
+      {"glob": "tools/agent_workflow/*.py*"},
+      {"glob": "tools/agent_workflow/*.so"},
+      {"glob": "tools/agent_workflow/*/__init__.*"},
+      {"glob": "tools/vrt/*.py*"},
+      {"glob": "tools/vrt/*.so"},
+      {"glob": "tools/vrt/*/__init__.*"}
+    ],
+    "AGENT_POLICY": [
+      {"basename": "AGENTS.md"},
+      {"basename": "AGENTS.override.md"},
+      {"basename": "CLAUDE.md"},
+      {"basename": "CLAUDE.local.md"},
+      {"basename": "GEMINI.md"},
+      {"basename": "SKILL.md"},
+      {"basename": ".cursorrules"},
+      {"basename": ".windsurfrules"},
+      {"basename": "copilot-instructions.md"},
+      {"suffix": [".mdc", ".prompt.md", ".instructions.md"]},
+      {"segment_path": ".cursor/rules"},
+      {"segment_path": ".cursor/bootstrap"},
+      {"segment_path": ".cursor/skills"},
+      {"segment_path": ".cursor/commands"},
+      {"segment_path": ".github/instructions"},
+      {"segment_path": ".github/prompts"},
+      {"segment_path": ".github/agents"},
+      {"segment": ".claude"},
+      {"prefix": "AGENT_CONTEXT_PACK/"},
+      {"prefix": "AGENT_SKILLS_LIBRARY/"},
+      {"prefix": "governance/doctrine/"},
+      {"prefix": "governance/agent-workflows/"},
+      {"basename": "pull_request_template.md"},
+      {"segment": "PULL_REQUEST_TEMPLATE"}
+    ],
+    "TOOL_CONFIG": [
+      {"segment": ".github"},
+      {"segment": ".cursor"},
+      {"segment": ".vscode"},
+      {"segment": ".devcontainer"},
+      {"segment": ".idea"},
+      {"basename": ".gitattributes"},
+      {"basename": ".gitmodules"},
+      {"basename": ".pre-commit-config.yaml"},
+      {"basename": ".envrc"},
+      {"basename": ".npmrc"},
+      {"basename": ".mcp.json"},
+      {"basename": "devcontainer.json"}
+    ],
+    "PROBE_EVIDENCE": [
+      {"prefix": "CCP_UPGRADES/", "segment": "evidence", "suffix": [".json", ".log", ".err", ".txt", ".md", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".pdf"]},
+      {"prefix": "UPG/", "segment": "evidence", "suffix": [".json", ".log", ".err", ".txt", ".md", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".pdf"]}
+    ],
+    "INERT": [
+      {"suffix": [".md", ".txt", ".rst", ".adoc", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"]}
+    ]
+  },
+  "classes": {
+    "PLAN_ONLY": {
+      "permitted_families": ["INERT"],
+      "waiver_eligible": true
+    },
+    "DOC_WORKFLOW": {
+      "permitted_families": ["INERT", "PROBE_EVIDENCE"],
+      "waiver_eligible": true
+    },
+    "BOUNDED_IMPLEMENT": {
+      "permitted_families": ["AGENT_POLICY", "TOOL_CONFIG", "CODE", "PROBE_EVIDENCE", "INERT"],
+      "waiver_eligible": true
+    },
+    "IMPLEMENT_ONLY": {
+      "permitted_families": ["AGENT_POLICY", "TOOL_CONFIG", "CODE", "PROBE_EVIDENCE", "INERT"],
+      "waiver_eligible": true
+    }
+  },
+  "block_types": {
+    "NEXT_VQT_REVIEW_REQUEST": {
+      "pr_type": "VQT_REVIEW_REQUEST",
+      "pr_type_by_class": {"PLAN_ONLY": "PLAN"},
+      "class_policy": "required",
+      "implicit_class": null,
+      "permitted_families": null,
+      "waiver_applies": true,
+      "mismatch_reason": "CLASS_MISMATCH"
+    },
+    "PLAN": {
+      "pr_type": "PLAN",
+      "pr_type_by_class": {},
+      "class_policy": "optional",
+      "implicit_class": "PLAN_ONLY",
+      "permitted_families": ["INERT"],
+      "waiver_applies": true,
+      "mismatch_reason": "CLASS_MISMATCH"
+    },
+    "CLOSEOUT": {
+      "pr_type": "CLOSEOUT",
+      "pr_type_by_class": {},
+      "class_policy": "optional",
+      "implicit_class": null,
+      "permitted_families": ["INERT"],
+      "waiver_applies": false,
+      "mismatch_reason": "CLASS_MISMATCH"
+    },
+    "STOP_ESCALATE_TO_HITL": {
+      "pr_type": "ESCALATION",
+      "pr_type_by_class": {},
+      "class_policy": "optional",
+      "implicit_class": null,
+      "permitted_families": ["INERT"],
+      "waiver_applies": false,
+      "mismatch_reason": "CLASS_MISMATCH"
+    },
+    "STOP_ESCALATE": {
+      "pr_type": "ESCALATION",
+      "pr_type_by_class": {},
+      "class_policy": "optional",
+      "implicit_class": null,
+      "permitted_families": ["INERT"],
+      "waiver_applies": false,
+      "mismatch_reason": "CLASS_MISMATCH"
+    }
+  },
+  "absent_block": {
+    "pr_type": "DOCS_ONLY",
+    "pr_type_by_class": {},
+    "class_policy": "optional",
+    "implicit_class": "DOC_WORKFLOW",
+    "permitted_families": ["INERT", "PROBE_EVIDENCE"],
+    "waiver_applies": false,
+    "mismatch_reason": "NO_BLOCK"
+  },
+  "merge_allowlist": [
+    {"pr_type": "VQT_REVIEW_REQUEST", "disposition": "WAIVED"},
+    {"pr_type": "PLAN", "disposition": "WAIVED"},
+    {"pr_type": "DOCS_ONLY", "disposition": "ACKNOWLEDGED"},
+    {"pr_type": "CLOSEOUT", "disposition": "ACKNOWLEDGED"}
+  ]
+}

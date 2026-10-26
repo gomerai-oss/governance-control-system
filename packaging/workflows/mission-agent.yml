@@ -1,0 +1,409 @@
+name: Mission Agent
+
+# Starts the agent a mission waits on (A2 build or A3 review) and opens its PR as
+# that agent's GitHub App. The mission router starts this workflow on every handoff;
+# the schedule is the fallback. Every run re-derives the missions itself, so a
+# trigger is only a nudge and nothing in an event payload is read.
+# Spec: tools/agent_workflow/specs/MISSION-DISPATCH-001.md
+#
+# Security model (no job holds both agent-written content and a credential that
+# could act on it):
+# - plan: read-only token. Lists the jobs due from the router's own derivation,
+#   skipping any lane another run of this workflow still owns.
+# - checks (A3 only): its own VM with no credential at all. Runs the plan's
+#   HITL-approved checks on the commit A3 reviews as a separate unprivileged
+#   account, killed before anything is uploaded; the results are evidence for A3.
+# - agent: its own VM. The runtime (pinned by SHA-256) gets only its model login
+#   (environment mission-runtime); the read-only token is used in earlier steps and
+#   is never in the agent's process tree. It can only edit files in the checkout.
+#   A change containing the model login is refused; the agent log is scrubbed of it.
+# - publish: a separate VM running only the default branch's code. Its environment
+#   (mission-agent-<agent>, deployable from the default branch only) holds that one
+#   agent's App key. It re-checks the patch on a fresh clone, then pushes the stage
+#   branch and opens the PR as the App. It never merges.
+# - report: if a due job did not end in an open PR, it says so on the tracking
+#   issue. The next run starts it again; after 3 failures in a row the router
+#   records the stage as blocked until HITL comments /mission retry.
+# - land: when every mission of a stack that lands as a whole has passed, it opens
+#   the PR from the stack branch into the default branch as an A3 agent's App
+#   (environment mission-agent-<agent>). No agent content runs there; the router
+#   checks the stack and merges it.
+# - No agent App may hold the Workflows permission, so no agent can change this file.
+
+on:
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions: {}
+
+env:
+  PYTHONPATH: tooling/tools/agent_workflow
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  # Runtimes, pinned by exact version and SHA-256 of the package. Changing either is a reviewed PR.
+  CLAUDE_CODE_VERSION: 2.1.305
+  CLAUDE_CODE_SHA256: 6d123d2953b9623e5f3e399f9984dd137dcad992aab2f810c0eac0040cae894a
+  CURSOR_CLI_VERSION: 2026.10.19-6bbf2c4
+  CURSOR_CLI_SHA256: cf80cc18d8b33bf33e762353977ca1868cfc45290c92c0ffdcef83bb8b37b44f
+
+jobs:
+  plan:
+    name: plan
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name != 'issue_comment' ||
+       (!github.event.issue.pull_request && startsWith(github.event.comment.body, '/mission retry')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Plans run one at a time, so each sees every lane the others started.
+    concurrency:
+      group: mission-agent-plan
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      land_count: ${{ steps.plan.outputs.land_count }}
+      land_matrix: ${{ steps.plan.outputs.land_matrix }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: List the jobs due
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m mission_dispatch plan --repo "$GITHUB_REPOSITORY"
+
+  checks:
+    name: checks ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      JOB: ${{ toJSON(matrix.job) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Is this lane still due?
+        id: due
+        if: matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
+
+      - name: Check out the commit under review
+        if: steps.due.outputs.due == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ matrix.job.base_sha }}
+          path: review
+          persist-credentials: false
+
+      # The code under review must not reach the runner's processes: their environment
+      # holds the token Actions uses for artifacts, which could plant a forged change.
+      - name: Run the plan's checks as an unprivileged account (no credential)
+        if: steps.due.outputs.due == 'true'
+        run: |
+          sudo useradd --create-home --shell /bin/bash mission-checks
+          sudo cp -a review /home/mission-checks/review
+          sudo chown -R mission-checks:mission-checks /home/mission-checks/review
+          python3 -m mission_dispatch checks --root /home/mission-checks/review --out "$RUNNER_TEMP/checks" --run-as mission-checks
+          sudo pkill -KILL -u mission-checks || true
+          if pgrep -u mission-checks >/dev/null; then echo "::error::check processes survived"; exit 1; fi
+
+      - name: Hand the results to the agent job
+        if: steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/checks
+          if-no-files-found: error
+          retention-days: 7
+
+  agent:
+    name: agent ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+    needs: [plan, checks]
+    if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: mission-runtime
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      JOB: ${{ toJSON(matrix.job) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Is this lane still due?
+        id: due
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
+
+      - name: Fetch the checks results
+        if: steps.due.outputs.due == 'true' && matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
+        continue-on-error: true  # without them A3 is told every check is "not run"
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/checks
+
+      - name: Install Claude Code (pinned by SHA-256)
+        if: steps.due.outputs.due == 'true' && matrix.job.runtime == 'claude-code'
+        run: |
+          pkg="$RUNNER_TEMP/claude-code.tgz"
+          curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-${CLAUDE_CODE_VERSION}.tgz" -o "$pkg"
+          echo "${CLAUDE_CODE_SHA256}  $pkg" | sha256sum --check --strict
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$pkg" -C "$HOME/.local/bin" --strip-components=1 package/claude
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+
+      - name: Install Cursor CLI (pinned by SHA-256)
+        if: steps.due.outputs.due == 'true' && matrix.job.runtime == 'cursor-cli'
+        run: |
+          pkg="$RUNNER_TEMP/cursor-cli.tgz"
+          curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_CLI_VERSION}/linux/x64/agent-cli-package.tar.gz" -o "$pkg"
+          echo "${CURSOR_CLI_SHA256}  $pkg" | sha256sum --check --strict
+          dest="$HOME/.local/share/cursor-agent/versions/${CURSOR_CLI_VERSION}"
+          mkdir -p "$dest" "$HOME/.local/bin"
+          tar -xzf "$pkg" -C "$dest" --strip-components=1
+          ln -sf "$dest/cursor-agent" "$HOME/.local/bin/agent"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/agent" --version
+
+      - name: Prepare the checkout (read-only token, this step only)
+        if: steps.due.outputs.due == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m mission_dispatch prepare --repo "$GITHUB_REPOSITORY"
+          --root "$RUNNER_TEMP/mission" --checks-report "$RUNNER_TEMP/checks"
+
+      - name: Run the agent (no GitHub token)
+        if: steps.due.outputs.due == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
+        run: python3 -m mission_dispatch run --root "$RUNNER_TEMP/mission" --timeout 3600
+
+      - name: Check and collect the change (no GitHub token; refuses one containing the model login)
+        if: steps.due.outputs.due == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
+        run: python3 -m mission_dispatch collect --root "$RUNNER_TEMP/mission" --out "$RUNNER_TEMP/out"
+
+      - name: Hand the change to the publish job
+        if: steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: change-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Keep the agent log (scrubbed of the model login)
+        if: always() && steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-log-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/mission/agent.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Hand an out-of-compute record to the report job (pipeline queue)
+        if: always() && steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: capacity-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/mission/capacity.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  publish:
+    name: publish ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+    needs: [plan, agent]
+    if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: mission-agent-${{ matrix.job.agent }}
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      JOB: ${{ toJSON(matrix.job) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Fetch the agent's change
+        id: fetch
+        continue-on-error: true  # none when the agent failed or the lane was not due; report handles it
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: change-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/artifact
+
+      - name: Name this repository
+        id: repo
+        if: steps.fetch.outcome == 'success'
+        run: echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint the agent's App token (this repository, contents + pull requests only)
+        id: token
+        if: steps.fetch.outcome == 'success'
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Re-check, push the stage branch and open the PR as the agent
+        if: steps.fetch.outcome == 'success'
+        env:
+          READ_TOKEN: ${{ github.token }}
+          AGENT_TOKEN: ${{ steps.token.outputs.token }}
+          AGENT_SLUG: ${{ steps.token.outputs.app-slug }}
+        run: >-
+          python3 -m mission_dispatch publish --repo "$GITHUB_REPOSITORY"
+          --root "$RUNNER_TEMP/publish" --artifact "$RUNNER_TEMP/artifact"
+
+  report:
+    name: report ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+    needs: [plan, checks, agent, publish]
+    if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      checks: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      JOB: ${{ toJSON(matrix.job) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Fetch an out-of-compute record
+        continue-on-error: true  # none unless the runtime ran out of compute; the run is then reported as a failure
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: capacity-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/capacity
+
+      - name: Record a job that did not end in an open PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m mission_dispatch report --repo "$GITHUB_REPOSITORY" --capacity "$RUNNER_TEMP/capacity/capacity.json"
+
+  land:
+    name: land ${{ matrix.land.stack_id }}
+    needs: [plan]
+    if: ${{ !cancelled() && needs.plan.outputs.land_count != '0' && needs.plan.outputs.land_count != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: mission-agent-${{ matrix.land.agent }}
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.land_matrix) }}
+    env:
+      LAND_JOB: ${{ toJSON(matrix.land) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Name this repository
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint the agent's App token (this repository, contents + pull requests only)
+        id: token
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Re-check the stack and open its landing PR as the agent
+        env:
+          READ_TOKEN: ${{ github.token }}
+          AGENT_TOKEN: ${{ steps.token.outputs.token }}
+          AGENT_SLUG: ${{ steps.token.outputs.app-slug }}
+        run: python3 -m mission_dispatch land --repo "$GITHUB_REPOSITORY"
