@@ -1969,7 +1969,7 @@ class AuthorityTests(unittest.TestCase):
         cfg = load_config()
         self.assertTrue(cfg["hitl_logins"])
         self.assertEqual(cfg["bot_login"], BOT)
-        self.assertEqual(sorted(cfg["agents"]), ["a1", "a2", "a3"])
+        self.assertLessEqual({"a2", "a3"}, set(cfg["agents"]))  # A1 is a HITL seat; an a1 App is optional (Amendment 001)
         self.assertTrue(all(login.endswith("[bot]") for login in cfg["agents"].values()))
         statuses = parse_identity_registry(Path(__file__).resolve().parents[3].joinpath(cfg["identity_registry"]).read_text())
         self.assertTrue(all(statuses.get(agent) == "ACTIVE" for agent in cfg["agents"]))

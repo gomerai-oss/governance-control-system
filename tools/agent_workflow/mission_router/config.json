@@ -4,7 +4,6 @@
   "default_branch": "main",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "agents": {
-    "a1": "yourorg-agent-a1[bot]",
     "a2": "yourorg-agent-a2[bot]",
     "a3": "yourorg-agent-a3[bot]"
   }
