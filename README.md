@@ -157,8 +157,9 @@ it before your first mission: it decides which paths are `AUTHORITY` in your rep
 
 ## Contributing and security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) (contributions are signed off under the Developer Certificate of Origin) and
-[SECURITY.md](SECURITY.md) (report vulnerabilities privately, never in a public issue).
+See [CONTRIBUTING.md](CONTRIBUTING.md) (contributions are signed off under the Developer Certificate of Origin),
+[SECURITY.md](SECURITY.md) (report vulnerabilities privately, never in a public issue) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

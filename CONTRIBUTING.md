@@ -1,6 +1,7 @@
 # Contributing
 
 Thank you for helping. Bug reports, fixes, documentation and support for more runtimes and forges are all welcome.
+Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you start
 
