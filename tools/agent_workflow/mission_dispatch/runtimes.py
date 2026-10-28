@@ -15,6 +15,11 @@ from loading.
 Cursor agent: ``{workspace}/.cursor/cli.json`` with ``--trust``. Deny is checked
 before allow; only Read *deny* rules bound reads; writes outside the workspace need
 an approval that ``-p`` without ``--force`` refuses. Its shell is read-only git.
+
+With a runtime binding (Amendment 011, ``binding.py``) each runtime is narrowed to the
+seat's admitted surface and gets the governed MCP gateway: Claude Code through
+``--mcp-config`` (``--strict-mcp-config`` stays), Cursor through a dispatcher-written
+``.cursor/mcp.json`` and ``--approve-mcps``. Without one, every argument is as before.
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
+
+from .binding import GATEWAY_SERVER as GATEWAY, Bound
 
 CLAUDE_CODE = "claude-code"
 CURSOR_CLI = "cursor-cli"
@@ -105,15 +112,18 @@ def claude_path(path: Path, home: Path) -> str:
     return "~" if rel == Path(".") else "~/" + rel.as_posix()
 
 
-def claude_argv(checkout: Path, prompt: str, home: Path, binary: str = "claude", model: str = "") -> List[str]:
+def claude_argv(checkout: Path, prompt: str, home: Path, binary: str = "claude", model: str = "",
+                bound: Optional[Bound] = None) -> List[str]:
     ws = claude_path(checkout, home)
-    allowed = [f"Read({ws}/**)", f"Edit({ws}/**)"]
+    allowed = [f"Read({ws}/**)", f"Edit({ws}/**)"] if bound is None else [*bound.path_rules(ws), *bound.mcp_rules()]
+    tools = "Read,Edit,Write,Glob,Grep" if bound is None else ",".join(bound.tools)
     denied = [
         *(f"Read(~/{rel})" for rel in HOME_SECRET_PATHS),
         *(f"Edit(~/{rel})" for rel in HOME_SECRET_PATHS),
         f"Edit({ws}/.git)",
         f"Edit({ws}/.git/**)",
         "Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit",
+        *(bound.denied if bound is not None else ()),
     ]
     return [
         binary, "-p",
@@ -122,7 +132,8 @@ def claude_argv(checkout: Path, prompt: str, home: Path, binary: str = "claude",
         "--permission-prompts", "none",
         "--setting-sources", "user",
         "--strict-mcp-config",
-        "--tools", "Read,Edit,Write,Glob,Grep",
+        *(("--mcp-config", bound.mcp_config) if bound is not None and bound.mcp_config else ()),
+        "--tools", tools,
         f"--allowedTools={','.join(allowed)}",
         *(f"--disallowedTools={rule}" for rule in denied),
         *(("--model", model) if model else ()),
@@ -130,10 +141,18 @@ def claude_argv(checkout: Path, prompt: str, home: Path, binary: str = "claude",
     ]
 
 
-def cursor_permissions(checkout: Path, home: Path) -> Dict[str, List[str]]:
+def cursor_permissions(checkout: Path, home: Path, bound: Optional[Bound] = None) -> Dict[str, List[str]]:
     ws = _safe(checkout)
     home_s = _safe(home)
     allow = [f"Read({ws}/**)", *(f"Shell({cmd})" for cmd in GIT_READONLY_COMMANDS)]
+    narrowed: List[str] = []
+    if bound is not None:
+        allow += [f"Mcp({GATEWAY}:{name})" for name in bound.mcp_tools]
+        if "Read" not in bound.tools:
+            allow.remove(f"Read({ws}/**)")
+            narrowed.append(f"Read({ws}/**)")
+        if not {"Edit", "Write"} & set(bound.tools):
+            narrowed.append(f"Write({ws}/**)")
     deny = [
         *(f"Shell({cmd})" for cmd in GIT_WRITE_COMMANDS),
         *(f"Shell(git *{needle}*)" for needle in GIT_READONLY_DENY_SUBSTRINGS),
@@ -146,6 +165,7 @@ def cursor_permissions(checkout: Path, home: Path) -> Dict[str, List[str]]:
         *(f"Write({root}/**)" for root in CURSOR_DEFAULT_WRITABLE_ROOTS if not ws.startswith(root + "/")),
         *(f"Read({home_s}/{rel})" for rel in HOME_SECRET_PATHS),
         *(f"Write({home_s}/{rel})" for rel in HOME_SECRET_PATHS),
+        *narrowed,
     ]
     for rule in allow + deny:
         if rule.startswith("Shell(") and ":" in rule:
@@ -153,16 +173,19 @@ def cursor_permissions(checkout: Path, home: Path) -> Dict[str, List[str]]:
     return {"allow": allow, "deny": deny}
 
 
-def cursor_argv(checkout: Path, prompt: str, binary: str = "agent", model: str = "") -> List[str]:
-    return [binary, "-p", "--trust", "--workspace", _safe(checkout), *(("--model", model) if model else ()), prompt]
+def cursor_argv(checkout: Path, prompt: str, binary: str = "agent", model: str = "",
+                bound: Optional[Bound] = None) -> List[str]:
+    approve = ("--approve-mcps",) if bound is not None and bound.mcp_tools else ()
+    return [binary, "-p", "--trust", *approve, "--workspace", _safe(checkout),
+            *(("--model", model) if model else ()), prompt]
 
 
-def write_cursor_config(checkout: Path, home: Path) -> Path:
+def write_cursor_config(checkout: Path, home: Path, bound: Optional[Bound] = None) -> Path:
     """Write the run's permissions to {checkout}/.cursor/cli.json and make it read-only."""
     path = checkout / CURSOR_CONFIG
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"permissions": cursor_permissions(checkout, home)}, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8")
+    path.write_text(json.dumps({"permissions": cursor_permissions(checkout, home, bound)}, indent=2, sort_keys=True)
+                    + "\n", encoding="utf-8")
     path.chmod(0o444)
     return path
 
@@ -177,13 +200,13 @@ def remove_cursor_config(checkout: Path) -> None:
 
 
 def argv_for(runtime: str, checkout: Path, prompt: str, home: Path, binaries: Mapping[str, str] = BINARIES,
-             model: str = "") -> List[str]:
+             model: str = "", bound: Optional[Bound] = None) -> List[str]:
     if model and model.startswith("-"):  # the plan parser never allows it; a flag must not reach the runtime
         raise SandboxError(f"model {model!r} would read as a flag")
     if runtime == CLAUDE_CODE:
-        return claude_argv(checkout, prompt, home, binaries[CLAUDE_CODE], model)
+        return claude_argv(checkout, prompt, home, binaries[CLAUDE_CODE], model, bound)
     if runtime == CURSOR_CLI:
-        return cursor_argv(checkout, prompt, binaries[CURSOR_CLI], model)
+        return cursor_argv(checkout, prompt, binaries[CURSOR_CLI], model, bound)
     raise SandboxError(f"unknown runtime {runtime!r}")
 
 

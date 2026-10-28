@@ -25,6 +25,11 @@ stack's landing PR into the stack's branch instead of `main`. The workflow itsel
 **Amendment 010 (2026-10-26):** A2 deletes a file by listing it in `.mission-dispatch/DELETE`; the dispatcher deletes
 the listed files before it checks the change (§3c). Claude Code has no shell, so it could only empty a file the plan
 said to delete (M-CCSYNC-AUDIT-003, A3 BLOCKED, governance #1116). The runtimes' sandboxes are unchanged.
+**Amendment 011 (2026-10-28, HITL direction, HITL pipeline patch):** live runtime binding. With
+`"runtime_binding": "enforce"` in the repository's `config.json`, each run is narrowed to its seat's admitted tool
+surface (`tool_selection.runtime_binding`) and gets one MCP server, the governed retrieval gateway (`mcp_gateway`),
+whose every call the MCP authorization fabric decides (§3b). The default is `"off"`, under which every runtime argument
+is as before. Binding never widens the dispatcher's own ceiling.
 
 ## 1. Purpose
 
@@ -86,6 +91,22 @@ Top-level permissions are empty.
   None of these tools removes a file; A2 deletes by listing (§3c, Amendment 010).
 - **Cursor CLI.** `.cursor/cli.json` written by the dispatcher (read-only): read-only git as its only shell, writes
   in the checkout only, and secrets and `.git` denied.
+- **Runtime binding (Amendment 011, `binding.py`).** Off unless `config.json` sets `"runtime_binding": "enforce"`;
+  any other value fails the job. Enforced, `prepare` calls `tool_selection.runtime_binding.bind` from the tooling
+  tree (never the checkout's copy) and holds the result to the dispatcher's ceiling: built-in tools only from
+  `Read, Edit, Write, Glob, Grep`; allow rules only `Read(<glob>)` / `Edit(<glob>)` relative to the checkout, with no
+  absolute path and no `..`, which the dispatcher renders inside the checkout; extra denials are added to, never
+  replace, the dispatcher's own; gateway tools only as plain names. A refusal, a missing library, or anything over
+  the ceiling fails the job before an agent starts. The session file, the MCP config and the binding record are
+  written read-only under `<job root>/binding/`, beside the checkout, and the dispatcher writes the MCP config
+  itself: one server, `governed-retrieval`, `python3 -m mcp_gateway` with `PYTHONPATH` set to the tooling tree.
+  `run_agent` re-reads and re-checks the record and refuses a missing or altered one. Claude Code gets `--tools`
+  from the binding, the rendered allow rules plus `mcp__governed-retrieval__<tool>`, and `--mcp-config` beside
+  `--strict-mcp-config`. Cursor gets `Mcp(governed-retrieval:<tool>)` allow rules, read or write denied in the
+  checkout when the binding admits neither, a dispatcher-written read-only `.cursor/mcp.json` removed after the run,
+  and `--approve-mcps`; a `~/.cursor/mcp.json` on the runner fails the job, since that flag would approve it too.
+  `collect` keeps the binding record and the gateway's evidence log (capped at 4 MiB) in `binding/` beside the patch,
+  so they stay with the run's artifact; `publish` never reads them.
 - **Refusal.** A checkout that carries runtime configuration (`.claude`, `.mcp.json`, `.cursor/{cli,hooks,mcp,environment,sandbox}.json`,
   `.vscode/settings.json`) is refused before any agent starts.
 
@@ -240,6 +261,10 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 - **Pinned.** Actions are pinned by commit SHA. Both runtimes are pinned by exact version and SHA-256.
 - **Model logins stay in the agent job.** A change or message containing one is refused, and the uploaded log is
   scrubbed. Agents have no shell and cannot read outside the checkout, so they do not see the value in the first place.
+- **Bound runs cannot widen themselves (Amendment 011).** The binding library is ordinary code that missions may
+  change, so the dispatcher treats its output as a request inside a fixed ceiling, and writes the one MCP command
+  itself. The gateway and the library run from the default branch's tooling, never from the checkout the agent edits.
+  The gateway's session file and evidence live outside the checkout, where neither runtime may write.
 - **Code under review runs isolated.** It runs only in the `checks` job, which has no credential, under an account
   that cannot reach the runner's processes.
 
@@ -270,6 +295,10 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 4. **The agent log is a workflow artifact**, kept 7 days and readable by anyone who can read the repository's Actions.
    It is scrubbed of the model login.
 5. **The Cursor CLI sandbox rules were verified live on 2026.10.16.** The pinned version is 2026.10.19-6bbf2c4.
+6. **Runtime binding is verified against a stand-in library (Amendment 011).** Until `tool_selection.runtime_binding`
+   and `mcp_gateway` land (stack EPAP-ISAL-002), `"enforce"` fails every job, by design; leave it `"off"` until both
+   are on the default branch. `Mcp(server:tool)` rules and `--approve-mcps` follow the Cursor CLI's documented
+   options and have not yet been exercised live on the pinned version.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -316,3 +345,12 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 44 | A2 lists an in-scope file in `.mission-dispatch/DELETE` | The file is deleted in A2's PR (not emptied); the listing is not committed; a deletion alone is a build |
 | 45 | A2 lists a path outside `build_scope`, under `missions/`, missing, a directory, absolute, with `.`/`..`, or behind a symbolic link | The run is refused and no listed file is deleted, even when other listed paths are valid |
 | 46 | A3 writes `.mission-dispatch/DELETE` | Ignored; A3 may still only add its verdict |
+| 47 | `runtime_binding` absent or `"off"` | Every runtime argument as before; no `binding/` directory |
+| 48 | `runtime_binding` set to anything but `"off"` or `"enforce"` | The job fails |
+| 49 | Enforced, Claude Code | `--tools`, allow rules and `mcp__governed-retrieval__*` from the binding; `--mcp-config` beside `--strict-mcp-config`; the dispatcher's denials all still present |
+| 50 | Enforced, the binding names `Bash`, an allow rule outside the checkout, or refuses | The job fails before any agent starts |
+| 51 | Enforced, the binding library is missing | The job fails before any agent starts |
+| 52 | Enforced, the binding record is missing or altered when the agent starts | The job fails; no agent starts |
+| 53 | Enforced, Cursor | `Mcp(governed-retrieval:*)` rules, `--approve-mcps`, `.cursor/mcp.json` naming only the gateway and removed after the run; refused when `~/.cursor/mcp.json` exists |
+| 54 | Enforced, the MCP config | One server; `python3 -m mcp_gateway`; `PYTHONPATH` the tooling tree; session and evidence read-only and outside the checkout |
+| 55 | Enforced, `collect` | The binding record and the gateway's evidence log are kept in `binding/` beside the patch; `publish` ignores them |

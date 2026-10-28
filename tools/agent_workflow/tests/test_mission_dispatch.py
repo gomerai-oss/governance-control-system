@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +44,7 @@ from mission_dispatch.dispatch import (
     still_wanted,
     task_text,
 )
+from mission_dispatch import binding, runtimes
 from mission_dispatch.runtimes import CLAUDE_CODE, CURSOR_CLI, INBOX_DIR, SandboxError, agent_env, argv_for
 from mission_dispatch.workspace import git_env
 
@@ -947,6 +949,202 @@ class LandTests(unittest.TestCase):
         for change in ({"stack_id": "../x"}, {"login": "hitl-user"}, {"head_sha": "main"}, {"extra": 1}):
             with self.subTest(change), self.assertRaises(DispatchError):
                 LandJob.from_dict({**good, **change})
+
+
+class FakeBinder:
+    """Stands in for tool_selection.runtime_binding (loop 4 of EPAP-ISAL-002): the interface the dispatcher calls."""
+
+    class BindingRefused(ValueError):
+        pass
+
+    def __init__(self, tools=("Read", "Edit", "Write", "Glob", "Grep"), mcp_tools=("retrieve", "search", "cite"),
+                 allowed=None, denied=(), refuse=None):
+        self.tools, self.mcp_tools, self.allowed, self.denied, self.refuse = tools, mcp_tools, allowed, denied, refuse
+        self.calls = []
+
+    def bind(self, seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now):
+        self.calls.append((seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now))
+        if self.refuse:
+            raise self.BindingRefused(self.refuse)
+        allowed = self.allowed if self.allowed is not None else ["Read(**)", "Edit(**)"]
+        return SimpleNamespace(
+            tools=list(self.tools), allowed_rules=list(allowed), denied_rules=list(self.denied),
+            mcp_tools=list(self.mcp_tools),
+            session={"principal": mission["agent"], "acting_identity": mission["agent"], "role": seat,
+                     "mission": {"id": mission["id"]}, "issued_at": now, "expires_at": now + 3600},
+            audit={"seat": seat, "runtime": runtime, "tools": list(self.tools), "mcp_tools": list(self.mcp_tools)})
+
+
+class BindingTests(unittest.TestCase):
+    """Amendment 011: off by default; enforced, the run is narrowed to the bound surface and gets the gateway."""
+
+    NOW = 1_800_000_000
+    RECORD_ARGV = """
+        pathlib.Path(".mission-dispatch/COMMIT_MSG").write_text("Build\\n\\nWhy.\\n")
+        pathlib.Path("tools/demo/app.py").write_text("print('v2')\\n")
+        pathlib.Path(os.environ["HOME"], "argv.json").write_text(json.dumps(sys.argv[1:]))
+        mcp = pathlib.Path(".cursor/mcp.json")
+        pathlib.Path(os.environ["HOME"], "cursor-mcp.json").write_text(mcp.read_text() if mcp.exists() else "")
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.remote = Remote(self.root)
+        self.base = self.remote.head
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.root), "GITHUB_TOKEN": "ghs_secret_value"}
+        self.work = self.root / "work"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def job(self, role="A2", runtime="claude-code"):
+        stage = AWAIT_A2 if role == "A2" else AWAIT_A3
+        survey = survey_for(stage, head=self.base, review=self.base if role == "A3" else None,
+                            m=manifest(a2_runtime=runtime, a3_runtime=runtime))
+        return plan(survey)[0][0]
+
+    def prepare(self, job, binder, mode=binding.ENFORCE):
+        return prepare(job, self.work, self.remote.url, "", self.env, self.root, "main",
+                       binding_mode=mode, now=self.NOW, binder=binder)
+
+    def run_job(self, job, binder, mode=binding.ENFORCE):
+        self.prepare(job, binder, mode)
+        run_agent(job, self.work, self.env, self.root, timeout=60,
+                  binaries=fake_runtime(self.root, self.RECORD_ARGV), binding_mode=mode)
+        return json.loads((self.root / "argv.json").read_text())
+
+    def test_mode_is_off_unless_config_enforces_it(self):
+        self.assertEqual(binding.mode({}), binding.OFF)
+        self.assertEqual(binding.mode({"runtime_binding": "enforce"}), binding.ENFORCE)
+        with self.assertRaises(binding.BindingError):
+            binding.mode({"runtime_binding": "on"})
+
+    def test_off_leaves_the_command_line_as_before(self):
+        job = self.job()
+        argv = self.run_job(job, FakeBinder(), mode=binding.OFF)
+        self.assertIn("Read,Edit,Write,Glob,Grep", argv)
+        self.assertNotIn("--mcp-config", argv)
+        self.assertFalse((self.work / binding.BINDING_DIR).exists(), "nothing is bound when the mode is off")
+
+    def test_enforced_claude_run_gets_the_bound_surface_and_the_gateway(self):
+        job = self.job()
+        binder = FakeBinder(tools=("Read", "Glob", "Grep"))
+        argv = self.run_job(job, binder)
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertIn("--strict-mcp-config", argv)
+        config_path = argv[argv.index("--mcp-config") + 1]
+        allowed = next(a for a in argv if a.startswith("--allowedTools="))
+        for name in ("retrieve", "search", "cite"):
+            self.assertIn(f"mcp__governed-retrieval__{name}", allowed)
+        for hard in ("--disallowedTools=Bash", "--disallowedTools=WebFetch", "--disallowedTools=Task"):
+            self.assertIn(hard, argv, "the dispatcher's own denials stay")
+        checkout = (self.work / "checkout").resolve()
+        config = json.loads(Path(config_path).read_text())
+        server = config["mcpServers"]["governed-retrieval"]
+        self.assertEqual(list(config["mcpServers"]), ["governed-retrieval"])
+        self.assertEqual(server["args"][:2], ["-m", "mcp_gateway"])
+        self.assertEqual(server["env"]["PYTHONPATH"], str(binding.gateway_root()), "the gateway runs from the tooling tree")
+        session = Path(server["args"][server["args"].index("--session") + 1])
+        for path in (Path(config_path), session):
+            self.assertNotIn(checkout, path.resolve().parents, "binding files live outside the checkout")
+            self.assertFalse(path.stat().st_mode & 0o222, "binding files are read-only")
+        seat, runtime, mission, *_rest, now = binder.calls[0]
+        self.assertEqual((seat, runtime, mission["id"], now), ("A2", "claude-code", MID, self.NOW))
+
+    def test_a_tool_beyond_the_ceiling_never_reaches_the_runtime(self):
+        job = self.job()
+        with self.assertRaisesRegex(DispatchError, "beyond the dispatcher's ceiling: Bash"):
+            self.prepare(job, FakeBinder(tools=("Read", "Bash")))
+        self.assertFalse((self.work / binding.BINDING_DIR / binding.BINDING_FILE).exists())
+
+    def test_an_allow_rule_outside_the_checkout_is_refused(self):
+        job = self.job()
+        with self.assertRaisesRegex(DispatchError, "not a read or edit rule inside the checkout"):
+            self.prepare(job, FakeBinder(allowed=["Read(~/.ssh/**)"]))
+        for bad in ("Read(/etc/**)", "Edit(../other/**)", "Write(**)", "Read(a/../../x)"):
+            with self.assertRaises(binding.BindingError, msg=bad):
+                binding.check(["Read"], [bad], [], [])
+
+    def test_a_refused_binding_fails_the_job_before_any_agent_starts(self):
+        job = self.job()
+        with self.assertRaisesRegex(DispatchError, "could not be bound \\(refused\\): no admitted surface"):
+            self.prepare(job, FakeBinder(refuse="no admitted surface"))
+
+    def test_enforced_without_the_binding_library_fails_closed(self):
+        job = self.job()
+        with mock.patch.dict(sys.modules, {"tool_selection.runtime_binding": None}):
+            with self.assertRaisesRegex(DispatchError, "runtime_binding is missing"):
+                self.prepare(job, None)
+
+    def test_run_refuses_when_prepare_left_no_binding(self):
+        job = self.job()
+        self.prepare(job, FakeBinder(), mode=binding.OFF)
+        with self.assertRaisesRegex(DispatchError, "prepare left no binding"):
+            run_agent(job, self.work, self.env, self.root, timeout=60,
+                      binaries=fake_runtime(self.root, self.RECORD_ARGV), binding_mode=binding.ENFORCE)
+
+    def test_a_tampered_binding_record_is_refused(self):
+        job = self.job()
+        self.prepare(job, FakeBinder())
+        record = self.work / binding.BINDING_DIR / binding.BINDING_FILE
+        doc = json.loads(record.read_text())
+        doc["bound"]["mcp_config"] = str(self.root / "elsewhere.json")
+        record.chmod(0o644)
+        record.write_text(json.dumps(doc))
+        with self.assertRaisesRegex(DispatchError, "did not write"):
+            run_agent(job, self.work, self.env, self.root, timeout=60,
+                      binaries=fake_runtime(self.root, self.RECORD_ARGV), binding_mode=binding.ENFORCE)
+
+    def test_enforced_cursor_run_gets_mcp_rules_and_a_removed_mcp_file(self):
+        job = self.job(runtime="cursor-cli")
+        argv = self.run_job(job, FakeBinder(tools=("Read", "Write")))
+        self.assertIn("--approve-mcps", argv)
+        seen = json.loads((self.root / "cursor-mcp.json").read_text())
+        self.assertEqual(list(seen["mcpServers"]), ["governed-retrieval"], "the agent saw only the gateway")
+        self.assertFalse((self.work / "checkout" / ".cursor" / "mcp.json").exists(), "the MCP file is removed")
+
+    def test_cursor_permissions_carry_the_gateway_and_narrow_writes(self):
+        checkout = self.root / "co"
+        checkout.mkdir()
+        bound = binding.Bound(("Read",), (), (), ("search",), "")
+        perms = runtimes.cursor_permissions(checkout, self.root, bound)
+        self.assertIn("Mcp(governed-retrieval:search)", perms["allow"])
+        self.assertIn(f"Write({checkout.resolve()}/**)", perms["deny"], "no Edit/Write admitted: writes denied")
+
+    def test_cursor_with_a_user_mcp_file_is_refused(self):
+        (self.root / ".cursor").mkdir()
+        (self.root / ".cursor" / "mcp.json").write_text("{}")
+        job = self.job(runtime="cursor-cli")
+        with self.assertRaisesRegex(DispatchError, "--approve-mcps would approve its servers too"):
+            self.prepare(job, FakeBinder())
+
+    def test_collect_keeps_the_binding_record_and_gateway_evidence(self):
+        job = self.job()
+        self.run_job(job, FakeBinder())
+        evidence = self.work / binding.BINDING_DIR / binding.EVIDENCE_DIR / "decisions.jsonl"
+        evidence.write_text('{"disposition": "ALLOW"}\n{"disposition": "DENY"}\n')
+        result = collect(job, self.work, self.root / "out", self.env)
+        self.assertEqual(result["binding"], {"evidence_lines": 2, "evidence_truncated": False})
+        kept = self.root / "out" / binding.OUT_DIR
+        self.assertEqual(len((kept / "gateway-evidence.jsonl").read_text().splitlines()), 2)
+        self.assertEqual(json.loads((kept / binding.BINDING_FILE).read_text())["audit"]["seat"], "A2")
+
+    def test_a_reviewer_write_rule_is_rendered_inside_the_checkout_only(self):
+        checkout = self.root / "co"
+        checkout.mkdir()
+        bound = binding.Bound(("Read", "Write"), ("Read(**)", f"Edit(missions/{MID}/reviews/**)"), (), (), "")
+        argv = runtimes.claude_argv(checkout, "go", self.root, bound=bound)
+        allowed = next(a for a in argv if a.startswith("--allowedTools="))
+        self.assertEqual(allowed, f"--allowedTools=Read(~/co/**),Edit(~/co/missions/{MID}/reviews/**)")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Write")
+        self.assertNotIn("--mcp-config", argv, "no gateway tool admitted: no MCP server")
+
+    def test_a_second_bind_in_the_same_root_is_refused(self):
+        job = self.job()
+        self.prepare(job, FakeBinder())
+        with self.assertRaisesRegex(binding.BindingError, "refusing to reuse"):
+            binding.bind(job, self.work, self.work / "checkout", self.root, self.NOW, FakeBinder())
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +67,7 @@ from mission_router.model import (
 from mission_router.github import GitHubError
 from mission_router.state import AWAIT_A2, AWAIT_A3, MissionState
 
+from . import binding
 from .runtimes import (
     BINARIES,
     CURSOR_CLI,
@@ -566,8 +568,13 @@ def pr_body(job: Job, message: str, run_url: str) -> str:
 
 # ------------------------------------------------------------ the job steps
 def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapping[str, str], home: Path,
-            default_branch: str, checks_report: Optional[Path] = None) -> Checkout:
-    """Fresh checkout of ``job.base_sha`` on the stage branch, with the task (and any checks report) written."""
+            default_branch: str, checks_report: Optional[Path] = None, binding_mode: str = binding.OFF,
+            now: Optional[int] = None, binder: object = None) -> Checkout:
+    """Fresh checkout of ``job.base_sha`` on the stage branch, with the task (and any checks report) written.
+
+    With ``binding_mode`` ``enforce`` (Amendment 011) the seat's tool surface is bound here, before any agent
+    starts; a surface that cannot be bound fails the job.
+    """
     checkout = Checkout(root)
     try:
         checkout.prepare(clone_url, job.branch, job.base_sha, author(job), git_env(environ, read_token))
@@ -591,22 +598,32 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
         else:
             text = report.read_bytes()[:CHECKS_MD_MAX_BYTES].decode("utf-8", "replace")
         (checkout.tree / CHECKS_FILE).write_text(text, encoding="utf-8")
+    bound = None
     try:
+        if binding_mode == binding.ENFORCE:
+            when = int(time.time()) if now is None else now
+            bound = binding.bind(job, root, checkout.tree, home, when, binder)
         if job.runtime == CURSOR_CLI:
-            write_cursor_config(checkout.tree, home)
-    except SandboxError as exc:
+            write_cursor_config(checkout.tree, home, bound)
+            if bound is not None:
+                binding.write_cursor_mcp(checkout.tree, bound)
+    except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
     return checkout
 
 
 def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, timeout: float = DEFAULT_TIMEOUT,
-              binaries: Mapping[str, str] = BINARIES, now: Optional[datetime] = None) -> Path:
+              binaries: Mapping[str, str] = BINARIES, now: Optional[datetime] = None,
+              binding_mode: str = binding.OFF) -> Path:
     """Start the runtime in the prepared checkout with no GitHub credential. Returns the log path."""
     checkout = Checkout(root)
     log_path = root / "agent.log"
     try:
-        argv = argv_for(job.runtime, checkout.tree, prompt_text(job), home, binaries, job.model)
-    except SandboxError as exc:
+        bound = None
+        if binding_mode == binding.ENFORCE:
+            bound = binding.load(root)
+        argv = argv_for(job.runtime, checkout.tree, prompt_text(job), home, binaries, job.model, bound)
+    except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
     env = agent_env(environ, checkout.tree, checkout.git_dir, checkout.empty)
     try:
@@ -620,6 +637,7 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
     finally:
         if job.runtime == CURSOR_CLI:
             remove_cursor_config(checkout.tree)
+            binding.remove_cursor_mcp(checkout.tree)
         scrub(log_path, secret_values(environ))
     if done.returncode != 0:
         raise DispatchError(f"{job.runtime} exited {done.returncode}")
@@ -655,6 +673,9 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     (out_dir / PATCH_FILE).write_text(patch, encoding="utf-8")
     (out_dir / MESSAGE_OUT).write_text(message, encoding="utf-8")
     result = {"job": job.key, "verdict": verdict or "", "paths": sorted(c.path for c in changes)}
+    kept = binding.keep_evidence(root, out_dir)
+    if kept:
+        result["binding"] = kept
     (out_dir / RESULT_FILE).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
 
