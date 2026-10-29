@@ -1447,9 +1447,9 @@ class RouterLoopTests(unittest.TestCase):
 
 
     # ---- stacks that land as a whole (option 2): one approval, nothing on main until the whole stack passed
-    def open_plan(self, mid, stack, depends_on=None):
+    def open_plan(self, mid, stack, depends_on=None, scope=None):
         extra = {"depends_on": depends_on} if depends_on else {}
-        doc = manifest_doc(scope=(f"tools/{mid.lower()}/**",), stack=stack, **extra).replace(MID, mid)
+        doc = manifest_doc(scope=scope or (f"tools/{mid.lower()}/**",), stack=stack, **extra).replace(MID, mid)
         branch = f"mission/{mid}/a1"
         self.gh.push(branch, {f"missions/{mid}/mission.json": doc, f"missions/{mid}/PLAN.md": "plan"}, base="main")
         return self.gh.open_pr(branch, "main", A1B)
@@ -1568,6 +1568,23 @@ class RouterLoopTests(unittest.TestCase):
         n = self.open_plan("M-LEG-009", {"id": "S-9", "kind": "ISAL"})
         self.sweep()
         self.assertTrue(any("restart the plans as a new stack" in c for c in self.bot_comments(n)))
+
+    def test_closed_review_releases_the_stacks_files_to_a_new_stack(self):
+        p1, p2, p3 = self.open_isal()
+        self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
+        self.sweep()
+        self.run_loop("M-LEG-001", "S-9")
+        self.run_loop("M-LEG-002", "S-9", "BLOCKED")
+        self.sweep()
+        self.stack_issue("S-9")["state"] = "closed"  # HITL closes the review
+        self.gh.prs[p3]["state"] = "closed"  # the plan that never started is withdrawn
+        self.sweep()
+        self.sweep()  # the members' issues are closed now, so the closed stack has no open member left
+        n = self.open_plan("M-NEW-002", {"id": "S-10", "kind": "ISAL"}, scope=("tools/m-leg-002/**", "tools/m-leg-001/x.py"))
+        self.sweep()
+        self.assertFalse(any("overlaps" in c for c in self.bot_comments(n)),
+                         "a closed review frees the files of its passed and blocked missions")
+        self.stack_fingerprint(n)
 
     def test_sal_stack_records_a_blocker_and_carries_on(self):
         stack = {"id": "S-8", "kind": "SAL"}
