@@ -35,6 +35,7 @@ from mission_router.gate import classify_or_raise
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
+from . import binding
 from .dispatch import (
     DispatchError,
     busy_lanes,
@@ -167,18 +168,27 @@ def cmd_checks(args) -> int:
     return 0
 
 
+def _binding_mode(config: dict) -> str:
+    try:
+        return binding.mode(config)
+    except binding.BindingError as exc:
+        raise DispatchError(str(exc)) from None
+
+
 def cmd_prepare(args) -> int:
     job = _job()
     config = load_config()
     prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), _env("GITHUB_TOKEN"), os.environ, Path.home(),
-            config["default_branch"], Path(args.checks_report) if args.checks_report else None)
+            config["default_branch"], Path(args.checks_report) if args.checks_report else None,
+            binding_mode=_binding_mode(config))
     _log(f"{job.key}: checkout ready at {job.base_sha}")
     return 0
 
 
 def cmd_run(args) -> int:
     job = _job()
-    log_path = run_agent(job, Path(args.root), os.environ, Path.home(), timeout=args.timeout)
+    log_path = run_agent(job, Path(args.root), os.environ, Path.home(), timeout=args.timeout,
+                         binding_mode=_binding_mode(load_config()))
     _log(f"{job.key}: {job.runtime} finished (log: {log_path})")
     return 0
 
