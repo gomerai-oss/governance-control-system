@@ -647,7 +647,9 @@ class MissionRouter:
             agent = first.roles["A3"].agent
             login = self.identities().get(agent)
             lander = (agent, login) if login else None
-        issue = self._resolve_stack_issue(stack_id, members) if members else None
+        # Also with no member left: once a closed review has closed every member's issue, the stack is found by its
+        # own issue, so its passed and blocked missions stop holding their files.
+        issue = self._resolve_stack_issue(stack_id, members)
         dismissed = bool(issue and issue.get("state") == "closed"
                          and "mission:blocked" in {l["name"] for l in issue.get("labels") or []})
         # Approved plans agree on the branch (checked at start); while none is approved, the proposed ones count.
