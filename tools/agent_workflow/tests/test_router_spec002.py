@@ -576,6 +576,27 @@ class EnforcementSurfaceTests(unittest.TestCase):
             with self.subTest(workflow=rel):
                 self.assertEqual(tables.classify(normalize_path(rel)), "AUTHORITY")
 
+    def test_dispatcher_gateway_closure_is_authority(self):
+        """The MCP gateway the dispatcher launches for agent runs, its import closure and the permission data it and
+        the runtime binding read are AUTHORITY: a mission cannot change what an agent may reach."""
+        from mission_dispatch import binding
+        from router_spec002.policy import normalize_path
+
+        aw = self.REPO / "tools" / "agent_workflow"
+        entry = aw / binding.GATEWAY_MODULE / "__main__.py"
+        if not entry.is_file():
+            self.skipTest("this tree does not ship the gateway yet")
+        closure = self._import_closure([entry])
+        self.assertGreater(len(closure), 1)
+        data = [aw / "mcp_auth" / "policy.json", aw / "retrieval" / "corpus.json", aw / "mcp_gateway" / "tools.json",
+                aw / "tool_selection" / "matrix.json", aw / "tool_selection" / "seats.json",
+                aw / "tool_selection" / "runtime_registry.json"]
+        tables = load_tables()
+        for path in sorted(closure) + [p for p in data if p.is_file()]:
+            rel = path.relative_to(self.REPO).as_posix()
+            with self.subTest(path=rel):
+                self.assertEqual(tables.classify(normalize_path(rel)), "AUTHORITY")
+
 
 class GitHubSourceTests(unittest.TestCase):
     BASE = "c" * 40
