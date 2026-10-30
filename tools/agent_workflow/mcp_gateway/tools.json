@@ -1,0 +1,108 @@
+{
+  "schema": "mcp-gateway-tools-v1",
+  "catalog_version": "mcp-gateway-tools-2026-10-29.1",
+  "tools": [
+    {
+      "name": "retrieve",
+      "description": "Structure-first retrieval over the governance doctrine corpus. Returns the retrieval result record and its citations.",
+      "action": "rag.retrieve",
+      "resource": "corpus:governance-doctrine",
+      "corpus_scope": ["corpus:governance-doctrine"],
+      "retrieval_method": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string", "description": "What the caller is looking for, recorded as the claim text"},
+          "document_id": {"type": "string", "description": "Exact document id (file-name stem)"},
+          "path": {"type": "string", "description": "Exact repo-relative path"},
+          "status": {"type": "string"},
+          "title": {"type": "string"},
+          "date": {"type": "string"},
+          "alias": {"type": "string"},
+          "keywords": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+        },
+        "required": [],
+        "additionalProperties": false,
+        "minProperties": 1
+      }
+    },
+    {
+      "name": "search",
+      "description": "Deterministic keyword search (BM25) over the governance doctrine corpus.",
+      "action": "rag.search",
+      "resource": "corpus:governance-doctrine",
+      "corpus_scope": ["corpus:governance-doctrine"],
+      "retrieval_method": "lexical",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"},
+          "keywords": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+        },
+        "required": ["keywords"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cite",
+      "description": "The citations for one governance doctrine document, named by id or path; a superseded document resolves to its current version.",
+      "action": "rag.cite",
+      "resource": "corpus:governance-doctrine",
+      "corpus_scope": ["corpus:governance-doctrine"],
+      "retrieval_method": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"},
+          "document_id": {"type": "string"},
+          "path": {"type": "string"}
+        },
+        "required": [],
+        "additionalProperties": false,
+        "minProperties": 1
+      }
+    },
+    {
+      "name": "evidence_chain",
+      "description": "Structure-first retrieval over the EPAP evidence corpus. Returns the retrieval result record and its citations.",
+      "action": "epap.evidence_chain",
+      "resource": "index:epap-evidence",
+      "corpus_scope": ["corpus:epap-evidence"],
+      "retrieval_method": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"},
+          "document_id": {"type": "string"},
+          "path": {"type": "string"},
+          "status": {"type": "string"},
+          "title": {"type": "string"},
+          "date": {"type": "string"},
+          "keywords": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+        },
+        "required": [],
+        "additionalProperties": false,
+        "minProperties": 1
+      }
+    },
+    {
+      "name": "artifact_status",
+      "description": "The current version and status of one EPAP evidence artifact, named by id or path.",
+      "action": "epap.artifact_status",
+      "resource": "index:epap-evidence",
+      "corpus_scope": ["corpus:epap-evidence"],
+      "retrieval_method": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"},
+          "document_id": {"type": "string"},
+          "path": {"type": "string"}
+        },
+        "required": [],
+        "additionalProperties": false,
+        "minProperties": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "retrieval-corpus-v1",
+  "registry_version": "retrieval-corpus-2026-10-29.1",
+  "corpora": [
+    {
+      "id": "corpus:governance-doctrine",
+      "roots": [
+        "governance/doctrine/**/*.md",
+        "tools/agent_workflow/specs/*.md"
+      ],
+      "deny_patterns": [
+        "*.pem",
+        "*.key",
+        "*secret*",
+        "*token*",
+        "*credential*",
+        "id_rsa*",
+        ".env*"
+      ],
+      "authority": {
+        "governance/doctrine/": "doctrine",
+        "tools/agent_workflow/specs/": "spec",
+        "missions/": "plan",
+        "evidence/": "evidence"
+      },
+      "vocabulary": {}
+    },
+    {
+      "id": "corpus:epap-evidence",
+      "roots": [
+        "EPAP/EVIDENCE/**/*.md"
+      ],
+      "deny_patterns": [
+        "*.pem",
+        "*.key",
+        "*secret*",
+        "*token*",
+        "*credential*",
+        "id_rsa*",
+        ".env*"
+      ],
+      "authority": {
+        "EPAP/EVIDENCE/": "evidence"
+      },
+      "vocabulary": {}
+    }
+  ]
+}

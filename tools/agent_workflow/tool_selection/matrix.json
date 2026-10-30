@@ -1,0 +1,96 @@
+{
+  "schema": "tool-selection-matrix-v1",
+  "matrix_version": "doctrine-s4-v2",
+  "spec": "GOVERNED-TOOL-SELECTION-SPEC-001",
+  "admission_threshold": "1.0",
+  "capabilities": {
+    "file_edit": "write",
+    "branch_create": "write",
+    "commit": "write",
+    "pr_create": "write",
+    "artifact_create": "write",
+    "doctrine_draft": "write",
+    "architecture_map": "write",
+    "local_test": "execute",
+    "repo_read": "read",
+    "diff_review": "read",
+    "evidence_inspect": "read",
+    "doctrine_lookup": "read",
+    "benchmark_review": "read",
+    "disposition_draft": "draft",
+    "artifact_lookup": "read",
+    "evidence_class_routing": "read",
+    "citation_extract": "read",
+    "corpus_search": "read",
+    "implementation_repair": "write",
+    "epap_write": "write",
+    "index_update": "write",
+    "review_disposition": "elevated",
+    "self_approval": "elevated",
+    "merge": "elevated",
+    "credential_access": "elevated",
+    "production_runtime": "elevated"
+  },
+  "roles": {
+    "writer": {
+      "doctrine_row": "CCA / CCP Writer",
+      "read_only": false,
+      "separation_rule": null,
+      "evidence_classes": ["read", "draft", "write", "execute"],
+      "admit": ["file_edit", "branch_create", "commit", "pr_create", "local_test", "artifact_create",
+                "doctrine_draft", "architecture_map", "repo_read", "doctrine_lookup", "corpus_search",
+                "citation_extract", "artifact_lookup"],
+      "blocked": {
+        "review_disposition": "final review authority and reviewer disposition are not on the writer surface",
+        "self_approval": "self-review and self-approval are prohibited (doctrine section 4.1)",
+        "merge": "merge authority is not on the writer surface",
+        "credential_access": "credential access is not on the writer surface",
+        "production_runtime": "production runtime is not on the writer surface"
+      }
+    },
+    "reviewer": {
+      "doctrine_row": "VQT Reviewer",
+      "read_only": true,
+      "separation_rule": "WRITER_REVIEWER_SEPARATION",
+      "evidence_classes": ["read", "draft"],
+      "admit": ["repo_read", "diff_review", "evidence_inspect", "doctrine_lookup", "benchmark_review",
+                "disposition_draft", "corpus_search", "citation_extract", "artifact_lookup"],
+      "blocked": {
+        "file_edit": "file mutation is not on the reviewer surface",
+        "implementation_repair": "implementation repair is not on the reviewer surface",
+        "self_approval": "self-review and self-approval are prohibited (doctrine section 4.1)",
+        "merge": "merge authority is not on the reviewer surface",
+        "credential_access": "credential access is not on the reviewer surface",
+        "epap_write": "EPAP write/update is not on the reviewer surface"
+      }
+    },
+    "router": {
+      "doctrine_row": "EPAP / RAG Router",
+      "read_only": true,
+      "separation_rule": "ROUTER_NO_MUTATION",
+      "evidence_classes": ["read"],
+      "admit": ["artifact_lookup", "doctrine_lookup", "evidence_class_routing", "citation_extract",
+                "corpus_search"],
+      "blocked": {
+        "implementation_repair": "implementation is not on the router surface",
+        "review_disposition": "final authority is not on the router surface",
+        "epap_write": "artifact mutation is not on the router surface",
+        "index_update": "index update needs elevated authorization outside the router surface"
+      }
+    }
+  },
+  "mission_types": {
+    "CAPTURE": ["read", "draft", "write"],
+    "PLAN": ["read", "draft", "write"],
+    "IMPLEMENT": ["read", "draft", "write", "execute"],
+    "VERIFY": ["read", "draft"],
+    "CLOSEOUT": ["read", "draft"]
+  },
+  "fallback_routes": {
+    "role_resolved": "HITL_GATE",
+    "mission_type_resolved": "HITL_GATE",
+    "resource_in_scope": "BOUNDED_CLARIFICATION",
+    "registry_entry_valid": "BOUNDED_CLARIFICATION",
+    "evidence_class_resolved": "BOUNDED_CLARIFICATION"
+  }
+}

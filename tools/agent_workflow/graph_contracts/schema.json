@@ -1,0 +1,66 @@
+{
+  "schema": "ge-contract-schema-v1",
+  "spec": "GRAPH-ENGINEERING-CONTRACT-SPEC-001",
+  "contract_schema": "ge-graph-contract-v1",
+  "graph_id_prefix": "GE-",
+  "contract_fields": ["schema", "graph_id", "version", "entry", "nodes", "edges", "state", "artifacts"],
+  "node_fields": ["id", "kind", "input_schema", "output_schema"],
+  "free_text_fields": ["description"],
+  "node_kinds": {
+    "AGENT_TASK": [],
+    "DETERMINISTIC_TASK": [],
+    "ROUTER": [],
+    "HITL_GATE": ["gate"],
+    "VERIFICATION_GATE": ["gate"],
+    "SUBGRAPH": ["subgraph"]
+  },
+  "gate_fields": {
+    "HITL_GATE": ["guards", "satisfied_by", "boundary"],
+    "VERIFICATION_GATE": ["guards", "satisfied_by", "exact_head", "session_independent", "completion_state"]
+  },
+  "gate_stages": {
+    "HITL_GATE": "8.6",
+    "VERIFICATION_GATE": "8.5"
+  },
+  "subgraph_fields": ["graph_id", "version"],
+  "edge_kinds": {
+    "static": ["kind", "from", "to"],
+    "conditional": ["kind", "from", "route_key", "routes"]
+  },
+  "router_kinds": ["ROUTER"],
+  "state_fields": ["scope", "store", "keys", "transitions"],
+  "state_scopes": ["GRAPH_RUN", "CROSS_RUN", "TENANT"],
+  "state_store": "CONTROL_PLANE",
+  "transition_fields": ["id", "node", "writes"],
+  "artifact_fields": ["id", "version", "media_type", "produced_by", "role"],
+  "artifact_role": "EVIDENCE",
+  "io_types": ["object", "array", "string", "integer", "number", "boolean", "null"],
+  "io_fields": ["type", "properties", "required", "items", "enum", "additionalProperties"],
+  "vendor_tokens": [
+    "adk", "googleadk", "langgraph", "langchain", "langsmith", "llamaindex", "crewai", "autogen",
+    "semantickernel", "openai", "anthropic", "vertexai", "gemini", "gpt", "claude", "bedrock",
+    "pydantic", "dagster", "airflow"
+  ],
+  "vendor_constructs": [
+    "LlmAgent", "SequentialAgent", "ParallelAgent", "LoopAgent", "BaseAgent", "AgentTool",
+    "RequestInput", "EventActions", "ToolContext", "InvocationContext", "BaseArtifactService",
+    "InMemorySessionService", "DatabaseSessionService", "VertexAiSessionService", "GcsArtifactService",
+    "StateGraph", "MessageGraph", "BaseModel"
+  ],
+  "rules": {
+    "CONTRACT_SHAPE": "The contract has exactly the declared envelope, node, edge, gate, state and artifact fields, with well-formed values (directive section 7).",
+    "NO_VENDOR_LOCK_IN": "No vendor-, framework-, provider- or model-specific construct appears anywhere in the contract (directive sections 5 and 9).",
+    "NODE_KIND": "Every node is one of AGENT_TASK, DETERMINISTIC_TASK, ROUTER, HITL_GATE, VERIFICATION_GATE, SUBGRAPH (directive section 7).",
+    "UNIQUE_IDS": "Node, transition and artifact identifiers are unique within their table.",
+    "TYPED_IO": "Every node declares a framework-neutral input_schema and output_schema, and every edge carries a value its target's input_schema accepts (directive section 7).",
+    "NO_DANGLING_ROUTES": "The entry, every edge endpoint and every route-map target name a declared node.",
+    "DECLARED_REFERENCES": "Gate guards, state transitions and artifact producers name declared nodes; a subgraph does not reference its own graph.",
+    "NO_SELF_SATISFIED_GATES": "No gate routes into itself, guards itself, or is satisfied by anyone but its external principal; no gates satisfy each other (directive section 9).",
+    "SELF_CHECK_NEVER_EQUALS_INDEPENDENT_REVIEW": "A verification gate requires exact-head, session-independent review completed as REVIEW_COMPLETED (directive sections 8.5 and 9).",
+    "HITL_BOUNDARY": "A HITL gate names one of the consequential boundaries listed in the gate-criteria table (directive section 8.6).",
+    "DETERMINISTIC_ROUTING": "Conditional edges leave routers only; a router has exactly one total, typed route-map; any other node has at most one static successor (directive section 7).",
+    "REACHABILITY": "Every node is reachable from the entry and the graph has at least one terminal node.",
+    "STATE_VIA_TRANSITIONS": "State is scoped, held by the control plane, and written only through declared, typed transitions (directive section 7).",
+    "ARTIFACTS_ARE_EVIDENCE": "Artifacts are versioned evidence; no artifact is a state store, a state key or a transition target (directive section 7)."
+  }
+}

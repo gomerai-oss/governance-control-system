@@ -1,0 +1,144 @@
+{
+  "schema": "ge-gate-criteria-v1",
+  "spec": "GRAPH-ENGINEERING-CONTRACT-SPEC-001",
+  "stages": [
+    {
+      "stage": "8.1",
+      "id": "CONCEPTUAL_PLANNING",
+      "activity": "Author a graph-shaped workflow description (nodes, edges, intended routing).",
+      "control": "Governed by an admitted SAL/UPG mission contract (parent L2 section 2); not a standalone artifact.",
+      "control_kind": "POLICY",
+      "invariants": ["NO_DUPLICATE_CANONICAL_ARCHITECTURE"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.2",
+      "id": "GRAPH_CONTRACT_AUTHORING",
+      "activity": "Translate the conceptual plan into the provider-neutral workflow contract, using vendor vocabulary as naming reference only.",
+      "control": "Independent schema/contract review before any code is written.",
+      "control_kind": "VERIFICATION",
+      "invariants": ["NO_VENDOR_LOCK_IN", "SELF_CHECK_NEVER_EQUALS_INDEPENDENT_REVIEW"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.3",
+      "id": "TRANSFER_HANDOFF",
+      "activity": "Move the contract and any implementation PR through the existing transfer bus / PR handoff router.",
+      "control": "The repository's PR-body handoff template; no GE-specific bypass.",
+      "control_kind": "POLICY",
+      "invariants": ["NO_TRANSFER_BUS_BYPASS"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.4",
+      "id": "AUTHORIZATION_GATES",
+      "activity": "Deterministic and policy gates: scope, budget, worker independence, approved tool/model class.",
+      "control": "Parent L2 section 3.6 Gate Engine; SAL/UPG authority envelope.",
+      "control_kind": "DETERMINISTIC",
+      "invariants": ["NO_SELF_SATISFIED_GATES"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.5",
+      "id": "INDEPENDENT_VQT_REVIEW",
+      "activity": "Exact-head, session-independent review of the implementation and of graph behavior under test.",
+      "control": "mission_state.py invariant: REVIEW_REQUESTED != REVIEW_COMPLETED; a builder's own adversarial self-check is never independent review.",
+      "control_kind": "VERIFICATION",
+      "invariants": ["SELF_CHECK_NEVER_EQUALS_INDEPENDENT_REVIEW", "NO_SELF_SATISFIED_GATES"],
+      "node_output_satisfies": false,
+      "review": {
+        "satisfied_by": "INDEPENDENT_REVIEW",
+        "exact_head": true,
+        "session_independent": true,
+        "completion_state": "REVIEW_COMPLETED",
+        "non_completion_states": ["REVIEW_REQUESTED", "REVIEW_QUEUED", "REVIEW_COMMENT_PENDING"],
+        "self_check_satisfies": false
+      }
+    },
+    {
+      "stage": "8.6",
+      "id": "HITL_GATES",
+      "activity": "Human approval at every consequential boundary (merge, activation, capital/production reliance).",
+      "control": "Parent L1 Constitutional Invariant 9; cannot be satisfied by any node's own output.",
+      "control_kind": "HITL",
+      "invariants": ["NO_SELF_SATISFIED_GATES", "HITL_GATES_UNCHANGED"],
+      "node_output_satisfies": false,
+      "hitl": {
+        "satisfied_by": "HITL",
+        "boundaries": ["MERGE", "ACTIVATION", "RELIANCE"]
+      }
+    },
+    {
+      "stage": "8.7",
+      "id": "EPAP_PROVENANCE",
+      "activity": "Every node's evidence (claims, artifacts, tests, exceptions) recorded in the Evidence Bus and bound to EPAP/PAP.",
+      "control": "Parent L2 section 3.5; EPAP-ENTERPRISE-DOCTRINE-FOUNDATION.",
+      "control_kind": "VERIFICATION",
+      "invariants": ["NO_DESIGN_REFERENCE_AS_PRODUCTION_EVIDENCE"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.8",
+      "id": "BOUNDED_RECOVERY",
+      "activity": "Retry/fallback/escalation policy per node, with explicit max attempts and budget ceilings.",
+      "control": "Parent L2 sections 3.7-3.8; no unbounded agent persistence.",
+      "control_kind": "DETERMINISTIC",
+      "invariants": [],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.9",
+      "id": "DURABLE_CONTINUATION",
+      "activity": "Graph run state persists independently of any one chat session or worker process, and survives restart without duplicated execution.",
+      "control": "Parent L2 sections 3.2 and 3.10; the Enterprise persistence contract governs regardless of engine; a vendor checkpointing feature is a reference pattern only.",
+      "control_kind": "DETERMINISTIC",
+      "invariants": ["NO_VENDOR_LOCK_IN"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.10",
+      "id": "EVALUATION",
+      "activity": "Trajectory- and outcome-level evaluation of graph runs before any reliance claim.",
+      "control": "Vendor evaluation vocabulary as reference; Enterprise acceptance thresholds are a future L2/implementation decision.",
+      "control_kind": "VERIFICATION",
+      "invariants": ["NO_DESIGN_REFERENCE_AS_PRODUCTION_EVIDENCE"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.11",
+      "id": "SECURITY",
+      "activity": "Identity/authorization, guardrails, sandboxed execution, network perimeter.",
+      "control": "Six-ring security doctrine (SAL-ENTERPRISE-6-RING-SECURITY-IMPLEMENTATION-STACKED-001 and addenda), controlling.",
+      "control_kind": "POLICY",
+      "invariants": ["NO_SECURITY_MODEL_FORK"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.12",
+      "id": "DEPLOYMENT",
+      "activity": "Runtime/environment selection for any eventually-approved engine.",
+      "control": "Separate HITL-gated activation decision; no activation is granted by a contract.",
+      "control_kind": "HITL",
+      "invariants": ["HITL_GATES_UNCHANGED"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.13",
+      "id": "OBSERVABILITY",
+      "activity": "Trace/log every node execution, gate evaluation and state transition.",
+      "control": "Parent L2 section 3.10 and existing Enterprise observability doctrine; vendor telemetry integration is a reference pattern, not an adopted dependency.",
+      "control_kind": "POLICY",
+      "invariants": ["NO_VENDOR_LOCK_IN"],
+      "node_output_satisfies": false
+    },
+    {
+      "stage": "8.14",
+      "id": "LIVE_DASHBOARD",
+      "activity": "Operator-visible projection of actual graph/node runtime state.",
+      "control": "Extend L1-ENTERPRISE-L1-L4-WORKFLOW-OPERATOR-DASHBOARD-001; the dashboard shows where work stands, it does not decide where work moves.",
+      "control_kind": "POLICY",
+      "invariants": ["NO_DUPLICATE_DASHBOARD"],
+      "node_output_satisfies": false
+    }
+  ]
+}
