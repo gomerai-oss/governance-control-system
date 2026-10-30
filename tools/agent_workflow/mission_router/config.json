@@ -2,6 +2,7 @@
   "hitl_logins": ["your-github-login"],
   "bot_login": "github-actions[bot]",
   "default_branch": "main",
+  "runtime_binding": "enforce",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "agents": {
     "a2": "yourorg-agent-a2[bot]",
