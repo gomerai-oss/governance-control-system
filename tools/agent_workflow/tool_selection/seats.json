@@ -1,0 +1,19 @@
+{
+  "schema": "mission-seats-v1",
+  "seats": {
+    "A2": {
+      "role": "writer",
+      "mission_type": "IMPLEMENT",
+      "fabric_role": "CCP",
+      "principal": "a2",
+      "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
+    },
+    "A3": {
+      "role": "reviewer",
+      "mission_type": "VERIFY",
+      "fabric_role": "VQT",
+      "principal": "a3",
+      "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
+    }
+  }
+}

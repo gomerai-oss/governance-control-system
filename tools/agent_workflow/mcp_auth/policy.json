@@ -1,0 +1,107 @@
+{
+  "schema": "mcp-auth-policy-v1",
+  "policy_version": "MCP-AUTH-POLICY-2026-10-28.1",
+  "session": {
+    "max_ttl_seconds": 3600
+  },
+  "actions": {
+    "rag.retrieve": {"kind": "read"},
+    "rag.search": {"kind": "read"},
+    "rag.summarize": {"kind": "read"},
+    "rag.cite": {"kind": "read"},
+    "rag.memory_lookup": {"kind": "read"},
+    "rag.retrieve_no_write": {"kind": "read"},
+    "rag.corpus_write": {"kind": "write"},
+    "rag.memory_write": {"kind": "write"},
+    "epap.artifact_lookup": {"kind": "read"},
+    "epap.artifact_status": {"kind": "read"},
+    "epap.evidence_chain": {"kind": "read"},
+    "epap.artifact_create": {"kind": "write"},
+    "epap.artifact_update": {"kind": "write"},
+    "epap.index_update": {"kind": "write"},
+    "epap.closure_publish": {"kind": "write"},
+    "tool.execute": {"kind": "execute"}
+  },
+  "classes": {
+    "rag": {
+      "read": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+      "mutation": []
+    },
+    "epap": {
+      "read": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+      "mutation": ["epap.artifact_create", "epap.artifact_update", "epap.index_update", "epap.closure_publish"]
+    }
+  },
+  "authority_refs": {
+    "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001": {
+      "kind": "UPG",
+      "source": "governance/doctrine/L1-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001.md",
+      "missions": []
+    },
+    "MISSION-ROUTER-001": {
+      "kind": "HITL",
+      "source": "tools/agent_workflow/specs/MISSION-ROUTER-001.md",
+      "missions": []
+    }
+  },
+  "roles": ["CCA", "CCP", "VQT", "PR_AUTHORITY", "PMS", "EA_BRIDGE"],
+  "principals": {
+    "a2": {"kind": "agent", "acting_identities": ["a2"], "roles": ["CCP"]},
+    "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["VQT"]}
+  },
+  "resources": {
+    "corpus:governance-doctrine": {"class": "rag", "restricted": false, "credential_bearing": false},
+    "index:epap-evidence": {"class": "epap", "restricted": false, "credential_bearing": false}
+  },
+  "missions": {},
+  "grants": [
+    {"id": "G-CCA-RAG-READ", "effect": "allow", "role": "CCA", "class": "rag",
+     "resources": ["corpus:governance-doctrine"],
+     "actions": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "none"},
+    {"id": "G-CCA-EPAP-READ", "effect": "allow", "role": "CCA", "class": "epap",
+     "resources": ["index:epap-evidence"],
+     "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "audit_record"},
+    {"id": "G-CCP-RAG-READ", "effect": "allow", "role": "CCP", "class": "rag",
+     "resources": ["corpus:governance-doctrine"],
+     "actions": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "none"},
+    {"id": "G-CCP-EPAP-READ", "effect": "allow", "role": "CCP", "class": "epap",
+     "resources": ["index:epap-evidence"],
+     "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "audit_record"},
+    {"id": "G-VQT-RAG-READ", "effect": "allow", "role": "VQT", "class": "rag",
+     "resources": ["corpus:governance-doctrine"],
+     "actions": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "none"},
+    {"id": "G-VQT-EPAP-READ", "effect": "allow", "role": "VQT", "class": "epap",
+     "resources": ["index:epap-evidence"],
+     "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "audit_record"},
+    {"id": "G-PR_AUTHORITY-RAG-READ", "effect": "allow", "role": "PR_AUTHORITY", "class": "rag",
+     "resources": ["corpus:governance-doctrine"],
+     "actions": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "none"},
+    {"id": "G-PR_AUTHORITY-EPAP-READ", "effect": "allow", "role": "PR_AUTHORITY", "class": "epap",
+     "resources": ["index:epap-evidence"],
+     "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001", "evidence": "audit_record"},
+    {"id": "G-MISSION-CCP-RAG-READ", "effect": "allow", "role": "CCP", "class": "rag",
+     "resources": ["corpus:governance-doctrine"],
+     "actions": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+     "authority_ref": "MISSION-ROUTER-001", "evidence": "none"},
+    {"id": "G-MISSION-CCP-EPAP-READ", "effect": "allow", "role": "CCP", "class": "epap",
+     "resources": ["index:epap-evidence"],
+     "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "MISSION-ROUTER-001", "evidence": "audit_record"},
+    {"id": "G-MISSION-VQT-RAG-READ", "effect": "allow", "role": "VQT", "class": "rag",
+     "resources": ["corpus:governance-doctrine"],
+     "actions": ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"],
+     "authority_ref": "MISSION-ROUTER-001", "evidence": "none"},
+    {"id": "G-MISSION-VQT-EPAP-READ", "effect": "allow", "role": "VQT", "class": "epap",
+     "resources": ["index:epap-evidence"],
+     "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "MISSION-ROUTER-001", "evidence": "audit_record"}
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "schema": "tool-registry-v1",
+  "registry_version": "runtime-tools-2026-10-29.1",
+  "tools": [
+    {
+      "name": "Read",
+      "capability": "repo_read",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}
+    },
+    {
+      "name": "Glob",
+      "capability": "repo_read",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}
+    },
+    {
+      "name": "Grep",
+      "capability": "repo_read",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}
+    },
+    {
+      "name": "Edit",
+      "capability": "file_edit",
+      "evidence_class": "write",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object",
+                       "properties": {"file_path": {"type": "string"}, "old_string": {"type": "string"},
+                                      "new_string": {"type": "string"}},
+                       "required": ["file_path", "old_string", "new_string"]}
+    },
+    {
+      "name": "Write",
+      "capability": "file_edit",
+      "evidence_class": "write",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}},
+                       "required": ["file_path", "content"]}
+    },
+    {
+      "name": "Write:reviews",
+      "capability": "disposition_draft",
+      "evidence_class": "draft",
+      "resource": {"repo": "checkout", "path": "missions/{mission_id}/reviews"},
+      "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}},
+                       "required": ["file_path", "content"]}
+    },
+    {
+      "name": "mcp__governed-retrieval__retrieve",
+      "capability": "corpus_search",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": true}
+    },
+    {
+      "name": "mcp__governed-retrieval__search",
+      "capability": "corpus_search",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"keywords": {"type": "array"}}, "required": ["keywords"],
+                       "additionalProperties": true}
+    },
+    {
+      "name": "mcp__governed-retrieval__cite",
+      "capability": "citation_extract",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"document_id": {"type": "string"}, "path": {"type": "string"}},
+                       "additionalProperties": true}
+    },
+    {
+      "name": "mcp__governed-retrieval__evidence_chain",
+      "capability": "artifact_lookup",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": true}
+    },
+    {
+      "name": "mcp__governed-retrieval__artifact_status",
+      "capability": "artifact_lookup",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"document_id": {"type": "string"}, "path": {"type": "string"}},
+                       "additionalProperties": true}
+    }
+  ]
+}
