@@ -47,7 +47,7 @@ def session_doc(seat="a2", resources=ALL_RESOURCES, now=NOW, **overrides):
     doc_ = {
         "principal": seat,
         "acting_identity": seat,
-        "role": {"a2": "CCP", "a3": "VQT"}[seat],
+        "role": {"a2": "BUILDER", "a3": "REVIEWER"}[seat],
         "mission": {"id": MISSION, "authority_ref": "MISSION-ROUTER-001", "base_sha": BASE_SHA, "round": 1},
         "resources": list(resources),
         "issued_at": now - 60,
@@ -153,7 +153,7 @@ class VectorTests(GatewayCase):
         self.assertFalse(result["isError"], result)
         body = result["structuredContent"]
         self.assertEqual(body["disposition"], "ALLOW")
-        self.assertEqual(body["grant"], "G-MISSION-CCP-RAG-READ")
+        self.assertEqual(body["grant"], "G-MISSION-BUILDER-RAG-READ")
         self.assertEqual(body["result"]["source_id"], "ALPHA-001")
         self.assertEqual(body["result"]["stop_reason"], "RESOLVED")
         self.assertEqual([c["source_path"] for c in body["citations"]], ["governance/doctrine/ALPHA-001.md"])
@@ -184,7 +184,7 @@ class VectorTests(GatewayCase):
         result = responses[2]["result"]
         self.assertFalse(result["isError"], result)
         body = result["structuredContent"]
-        self.assertEqual(body["grant"], "G-MISSION-VQT-EPAP-READ")
+        self.assertEqual(body["grant"], "G-MISSION-REVIEWER-EPAP-READ")
         self.assertEqual(body["result"]["source_id"], "CLOSURE-001")
         self.assertEqual(body["result"]["source_authority"], "evidence")
         self.assertEqual(body["result"]["provenance"]["corpus_scope"], ["corpus:epap-evidence"])
@@ -194,13 +194,13 @@ class VectorTests(GatewayCase):
         self.assertEqual(len(self.entries("decision")), 1)
         self.assertEqual(len(self.entries("retrieval")), 1)
         self.assertEqual(self.entries("decision")[0]["record"]["answers"]["sot_authority"]["grant"]["id"],
-                         "G-MISSION-VQT-EPAP-READ")
+                         "G-MISSION-REVIEWER-EPAP-READ")
 
     def test_vector2_an_unbindable_session_lists_nothing_and_denies_every_call_with_stop_13(self):
         extra = session_doc("a2")
         extra["approval"] = {"restricted": ["corpus:governance-doctrine"]}
         other_ref = session_doc("a2")
-        other_ref["mission"]["authority_ref"] = "UPG-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001"
+        other_ref["mission"]["authority_ref"] = "SPEC-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001"
         cases = {
             "missing": self.outside / "absent.json",
             "expired": self.write_session(session_doc("a2", issued_at=NOW - 7200, expires_at=NOW - 3600),
@@ -305,7 +305,7 @@ class VectorTests(GatewayCase):
         responses = self.run_messages(gateway, [initialize(), call(2, "search", {"keywords": ["quorum"]})])
         result = responses[1]["result"]
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["structuredContent"]["grant"], "G-MISSION-VQT-RAG-READ")
+        self.assertEqual(result["structuredContent"]["grant"], "G-MISSION-REVIEWER-RAG-READ")
         self.assertEqual(result["structuredContent"]["result"]["provenance"]["resolved_stage"], "lexical")
 
         for action in ("epap.artifact_update", "epap.closure_publish", "tool.execute"):
@@ -358,13 +358,22 @@ class HardeningTests(GatewayCase):
         if not manifests:
             self.skipTest("no release manifest in this tree; the source repository runs this check")
         self.assertEqual(len(manifests), 1)
-        terms = [re.compile(t) for t in json.loads(manifests[0].read_text(encoding="utf-8"))["deny_terms"]]
+        doc = json.loads(manifests[0].read_text(encoding="utf-8"))
+        terms = [re.compile(t) for t in doc["deny_terms"]]
+        rules = doc.get("translate", [])
         self.assertTrue(terms)
         files = [p for p in sorted(PKG.iterdir()) if p.is_file()] + [
             P.DEFAULT_PATH, corpus_mod.default_registry_path(), Path(__file__).resolve(),
             AW / "tests" / "test_mcp_auth.py"]
+
+        def published(path):
+            text = path.read_text(encoding="utf-8")
+            for rule in rules:
+                text = re.sub(rule["pattern"], lambda m, replace=rule["replace"]: replace, text)
+            return text
+
         hits = [(path.name, number, term.pattern) for path in files
-                for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1)
+                for number, line in enumerate(published(path).split("\n"), start=1)
                 for term in terms if term.search(line)]
         self.assertEqual(hits, [])
 
@@ -499,12 +508,12 @@ class ShippedDataTests(unittest.TestCase):
                          {"kind": "HITL", "source": "tools/agent_workflow/specs/MISSION-ROUTER-001.md",
                           "missions": []})
         self.assertEqual(policy["principals"], {
-            "a2": {"kind": "agent", "acting_identities": ["a2"], "roles": ["CCP"]},
-            "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["VQT"]}})
+            "a2": {"kind": "agent", "acting_identities": ["a2"], "roles": ["BUILDER"]},
+            "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["REVIEWER"]}})
         grants = {g["id"]: g for g in policy["grants"]}
         mission_grants = sorted(g["id"] for g in policy["grants"] if g["authority_ref"] == "MISSION-ROUTER-001")
-        self.assertEqual(mission_grants, ["G-MISSION-CCP-EPAP-READ", "G-MISSION-CCP-RAG-READ",
-                                          "G-MISSION-VQT-EPAP-READ", "G-MISSION-VQT-RAG-READ"])
+        self.assertEqual(mission_grants, ["G-MISSION-BUILDER-EPAP-READ", "G-MISSION-BUILDER-RAG-READ",
+                                          "G-MISSION-REVIEWER-EPAP-READ", "G-MISSION-REVIEWER-RAG-READ"])
         for gid in mission_grants:
             twin = grants[gid.replace("G-MISSION-", "G-")]
             mine = dict(grants[gid])

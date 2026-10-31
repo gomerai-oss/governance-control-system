@@ -36,7 +36,7 @@ DEFAULT_PATH = Path(__file__).resolve().parent / "policy.json"
 
 CLASSES = ("rag", "epap")
 ACTION_KINDS = ("read", "write", "execute")
-AUTHORITY_KINDS = ("UPG", "ABC", "HITL", "DOCTRINE", "POLICY")
+AUTHORITY_KINDS = ("SPEC", "ABC", "HITL", "DOCTRINE", "POLICY")
 PRINCIPAL_KINDS = ("human", "agent", "service")
 EVIDENCE = ("none", "audit_record", "epap_packet", "pr_evidence")
 IMPLICATIONS = ("runtime_bridge", "trading_system", "production_system", "external_exposure")

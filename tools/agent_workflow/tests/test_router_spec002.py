@@ -23,12 +23,12 @@ INERT_FILE = "docs/notes.md"
 CODE_FILE = "tools/example/thing.py"
 AGENTS_FILE = "AGENTS.md"
 CURSOR_RULE = ".cursor/rules/x.md"
-WAIVER_CONFIG = "governance/reviewer_execution/sal3/temporary-review-waiver.yaml"
-EVIDENCE_FILE = "CCP_UPGRADES/UPG/UPG-X-001/evidence/run.json"
+WAIVER_CONFIG = "governance/reviewer_execution/merge/temporary-review-waiver.yaml"
+EVIDENCE_FILE = "change-specs/SPEC-X-001/evidence/run.json"
 TOOL_CONFIG_FILE = ".vscode/settings.json"
 WORKFLOW_FILE = ".github/workflows/policy-ci.yml"
 
-VQT = "NEXT_VQT_REVIEW_REQUEST"
+REVIEWER = "NEXT_REVIEW_REQUEST"
 ALL_CLASSES = ("PLAN_ONLY", "DOC_WORKFLOW", "BOUNDED_IMPLEMENT", "IMPLEMENT_ONLY")
 
 
@@ -56,7 +56,7 @@ class RaisingSource:
 
 
 def vqt(pr_class=None, **extra):
-    block = {"handoff_block_id": VQT}
+    block = {"handoff_block_id": REVIEWER}
     if pr_class is not None:
         block["pr_class"] = pr_class
     block.update(extra)
@@ -74,15 +74,15 @@ class SpecVectorTests(unittest.TestCase):
         (1, lambda: run([INERT_FILE], vqt("PLAN_ONLY"), False), ("PLAN", "ACKNOWLEDGED", "POLICY_PASS", 0, False)),
         (2, lambda: run([INERT_FILE, CODE_FILE], vqt("PLAN_ONLY"), True), ("PLAN", "DENIED", "CLASS_MISMATCH", 1, False)),
         (3, lambda: run([AGENTS_FILE], vqt("DOC_WORKFLOW"), True),
-         ("VQT_REVIEW_REQUEST", "HITL_REQUIRED", "AGENT_POLICY_CHANGE", 0, False)),
+         ("REVIEW_REQUEST", "HITL_REQUIRED", "AGENT_POLICY_CHANGE", 0, False)),
         (4, lambda: run([CODE_FILE], vqt("DOC_WORKFLOW"), True),
-         ("VQT_REVIEW_REQUEST", "DENIED", "CLASS_MISMATCH", 1, False)),
+         ("REVIEW_REQUEST", "DENIED", "CLASS_MISMATCH", 1, False)),
         (5, lambda: run([INERT_FILE], vqt("DOC_WORKFLOW"), True),
-         ("VQT_REVIEW_REQUEST", "WAIVED", "OPERATOR_WAIVER", 0, True)),
+         ("REVIEW_REQUEST", "WAIVED", "OPERATOR_WAIVER", 0, True)),
         (6, lambda: run([CODE_FILE, "tools/example/other.py"], vqt("BOUNDED_IMPLEMENT"), True),
-         ("VQT_REVIEW_REQUEST", "WAIVED", "OPERATOR_WAIVER", 0, True)),
+         ("REVIEW_REQUEST", "WAIVED", "OPERATOR_WAIVER", 0, True)),
         (7, lambda: run([WAIVER_CONFIG], vqt("BOUNDED_IMPLEMENT"), True),
-         ("VQT_REVIEW_REQUEST", "DENIED", "AUTHORITY_VIOLATION", 1, False)),
+         ("REVIEW_REQUEST", "DENIED", "AUTHORITY_VIOLATION", 1, False)),
         (8, lambda: run([INERT_FILE], None, False), ("DOCS_ONLY", "ACKNOWLEDGED", "POLICY_PASS", 0, True)),
         (9, lambda: run([CODE_FILE], None, False), ("DOCS_ONLY", "DENIED", "NO_BLOCK", 1, False)),
         (10, lambda: run([INERT_FILE], {"handoff_block_id": "STOP_ESCALATE"}, False),
@@ -92,8 +92,8 @@ class SpecVectorTests(unittest.TestCase):
         (12, lambda: run([INERT_FILE], vqt("DOC_WORKFLOW"), False, shas=(SHA, SHA2)),
          ("UNKNOWN", "DENIED", "DIFF_UNKNOWN", 1, False)),
         (13, lambda: run([INERT_FILE], vqt("SOMETHING_NEW"), False),
-         ("VQT_REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
-        (14, lambda: run([INERT_FILE], vqt(), False), ("VQT_REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
+         ("REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
+        (14, lambda: run([INERT_FILE], vqt(), False), ("REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
     ]
 
     def test_all_fourteen_vectors(self):
@@ -190,9 +190,9 @@ class InvariantTests(unittest.TestCase):
     def test_5_self_modification_denied(self):
         authority_paths = [
             WAIVER_CONFIG,
-            "governance/reviewer_execution/sal3/other.yaml",
-            "tools/reviewer_execution/sal3/review_waiver.py",
-            "POLICIES/ENTERPRISE-DELEGATED-MERGE-STANDING-AUTHORITY-001.md",
+            "governance/reviewer_execution/merge/other.yaml",
+            "tools/reviewer_execution/merge/review_waiver.py",
+            "POLICIES/DELEGATED-MERGE-STANDING-AUTHORITY-001.md",
             ".github/CODEOWNERS",
             "CODEOWNERS",
             "docs/CODEOWNERS",
@@ -208,7 +208,7 @@ class InvariantTests(unittest.TestCase):
             ".github/actions/merge/action.yml",
             ".github/settings.yml",
             # live delegation grants read by the merge evaluators
-            "UPG/delegation/ENTERPRISE-GOVERNED-DELEGATED-DOCS-ONLY-MERGE-LIVE-DELEGATION-RENEWAL-003.md",
+            "change-specs/delegation/GOVERNED-DELEGATED-DOCS-ONLY-MERGE-LIVE-DELEGATION-RENEWAL-003.md",
             "docs/delegation/OFFLINE-NON-RUNTIME-VALIDATION-TOOLING-PRODUCTION-GRANT-LIVE-001.md",
             # enforcement code run by write-token workflows
             "tools/agent_workflow/pr_handoff_router.py",
@@ -227,7 +227,7 @@ class InvariantTests(unittest.TestCase):
             "subprocess.py",
             "yaml/__init__.py",
             # case aliasing on case-insensitive checkouts
-            "Governance/Reviewer_Execution/SAL3/Temporary-Review-Waiver.YAML",
+            "Governance/Reviewer_Execution/MERGE/Temporary-Review-Waiver.YAML",
             ".GITHUB/codeowners",
         ]
         for path in authority_paths:
@@ -252,8 +252,8 @@ class InvariantTests(unittest.TestCase):
             ("unknown block", lambda: run([INERT_FILE], {"handoff_block_id": "NEXT_HITL_THING"}), "UNKNOWN_BLOCK"),
             ("malformed block", lambda: run([INERT_FILE], {}), "INVALID_INPUT"),
             ("block id wrong type", lambda: run([INERT_FILE], {"handoff_block_id": 3}), "INVALID_INPUT"),
-            ("block not a mapping", lambda: run([INERT_FILE], "NEXT_VQT_REVIEW_REQUEST"), "INVALID_INPUT"),
-            ("block id case", lambda: run([INERT_FILE], {"handoff_block_id": VQT.lower(), "pr_class": "PLAN_ONLY"}),
+            ("block not a mapping", lambda: run([INERT_FILE], "NEXT_REVIEW_REQUEST"), "INVALID_INPUT"),
+            ("block id case", lambda: run([INERT_FILE], {"handoff_block_id": REVIEWER.lower(), "pr_class": "PLAN_ONLY"}),
              "UNKNOWN_BLOCK"),
             ("waiver missing", lambda: run([INERT_FILE], None, None), "INVALID_INPUT"),
             ("waiver string", lambda: run([INERT_FILE], None, "true"), "INVALID_INPUT"),
@@ -387,7 +387,7 @@ class EvaluationOrderTests(unittest.TestCase):
 
     def test_evidence_takes_precedence_over_inert(self):
         # A1 decision S-3: PROBE_EVIDENCE ranks above INERT, so plans cannot carry evidence Markdown.
-        evidence_md = "CCP_UPGRADES/UPG/UPG-X-001/evidence/notes.md"
+        evidence_md = "change-specs/SPEC-X-001/evidence/notes.md"
         d = run([evidence_md], vqt("PLAN_ONLY"), True)
         self.assertEqual((d.reason, d.merge_allowed), ("CLASS_MISMATCH", False))
         d = run([evidence_md], vqt("DOC_WORKFLOW"), True)
@@ -446,9 +446,9 @@ class PathAttackTests(unittest.TestCase):
             "docs/.gitattributes": "TOOL_CONFIG",
             "docs/notes.md.py": "CODE",
             "tools/evidence/run.json": "CODE",
-            "CCP_UPGRADES/UPG/X/evidence/run.py": "CODE",
-            "CCP_UPGRADES/UPG/X/evidence/run.json": "PROBE_EVIDENCE",
-            "CCP_UPGRADES/UPG/X/evidence/run.md": "PROBE_EVIDENCE",
+            "change-specs/X/evidence/run.py": "CODE",
+            "change-specs/X/evidence/run.json": "PROBE_EVIDENCE",
+            "change-specs/X/evidence/run.md": "PROBE_EVIDENCE",
             "docs/\uff21GENTS.md": "AGENT_POLICY",
         }
         from router_spec002.policy import normalize_path
@@ -480,7 +480,7 @@ class PolicyTableValidationTests(unittest.TestCase):
             "unknown rule key": lambda d: d["families"]["INERT"].append({"regex": ".*"}),
             "glob feeding inert": lambda d: d["families"]["INERT"].append({"glob": "*"}),
             "implicit class unknown": lambda d: d["absent_block"].__setitem__("implicit_class", "NOPE"),
-            "implicit class on required block": lambda d: d["block_types"]["NEXT_VQT_REVIEW_REQUEST"].__setitem__(
+            "implicit class on required block": lambda d: d["block_types"]["NEXT_REVIEW_REQUEST"].__setitem__(
                 "implicit_class", "PLAN_ONLY"),
             "block missing implicit_class": lambda d: d["block_types"]["PLAN"].pop("implicit_class"),
             "glob feeding evidence": lambda d: d["families"]["PROBE_EVIDENCE"].append({"glob": "*/*"}),

@@ -1,7 +1,7 @@
 # GRAPH-ENGINE-RUNTIME-SPEC-001 — A2 implementation decisions
 
 **Mission:** M-EPAP-GRAPHRUN-001, round 1
-**Built from:** `missions/M-EPAP-GRAPHRUN-001/PLAN.md`, whose operative content is the spec, with the parent directive `governance/doctrine/L1-ENTERPRISE-GRAPH-ENGINEERING-ARCHITECTURE-DIRECTIVE-001.md` (§§7–9, §11) as reference. It builds on `tools/agent_workflow/graph_contracts/`, which this package imports and does not change.
+**Built from:** `missions/M-EPAP-GRAPHRUN-001/PLAN.md`, whose operative content is the spec, with the parent directive `governance/doctrine/L1-GRAPH-ENGINEERING-ARCHITECTURE-DIRECTIVE-001.md` (§§7–9, §11) as reference. It builds on `tools/agent_workflow/graph_contracts/`, which this package imports and does not change.
 
 The code does not amend the spec. Where the plan leaves a choice open, the choice below fails closed and is recorded here so A1 or HITL can reject it.
 

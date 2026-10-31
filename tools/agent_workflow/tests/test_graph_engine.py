@@ -729,11 +729,20 @@ class PackageTests(unittest.TestCase):
         if not manifests:
             self.skipTest("no release manifest in this tree; the source repository runs this check")
         self.assertEqual(len(manifests), 1)
-        terms = [re.compile(t) for t in json.loads(manifests[0].read_text(encoding="utf-8"))["deny_terms"]]
+        doc = json.loads(manifests[0].read_text(encoding="utf-8"))
+        terms = [re.compile(t) for t in doc["deny_terms"]]
+        rules = doc.get("translate", [])
         self.assertTrue(terms)
         files = [p for p in sorted(PKG.iterdir()) if p.is_file()] + [Path(__file__).resolve()]
+
+        def published(path):
+            text = path.read_text(encoding="utf-8")
+            for rule in rules:
+                text = re.sub(rule["pattern"], lambda m, replace=rule["replace"]: replace, text)
+            return text
+
         hits = [(path.name, number, term.pattern) for path in files
-                for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1)
+                for number, line in enumerate(published(path).split("\n"), start=1)
                 for term in terms if term.search(line)]
         self.assertEqual(hits, [])
 

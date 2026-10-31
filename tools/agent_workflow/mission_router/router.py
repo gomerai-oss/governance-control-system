@@ -115,7 +115,7 @@ class _Context:
     manifest: Optional[Manifest]
     integration_actual: Optional[str]
     landing: str = "main"  # where an A3 PASS merges: the default branch or the mission's stack branch
-    held_by: Optional[str] = None  # set when an ISAL stack holds this mission because another mission is blocked
+    held_by: Optional[str] = None  # set when an CHAINED stack holds this mission because another mission is blocked
 
 
 @dataclass(frozen=True)
@@ -363,14 +363,14 @@ class MissionRouter:
         state = self._agent_failures(state)
         ctx = _Context(state, manifest, integration_actual, landing)
         self._contexts[mission_id] = ctx
-        # ISAL: the first blocker blocks everything. Memoized above first, so the other
+        # CHAINED: the first blocker blocks everything. Memoized above first, so the other
         # missions' contexts read this one's own state, never a hold derived from it.
-        if manifest is not None and manifest.lands_with_stack and manifest.stack_kind == "ISAL" \
+        if manifest is not None and manifest.lands_with_stack and manifest.stack_kind == "CHAINED" \
                 and state.stage in (AWAIT_A2, AWAIT_A3):
             blocker = self._stack_blocker(manifest.stack_id, mission_id)
             if blocker:
                 ctx = _Context(MissionState(mission_id, BLOCKED, state.round, state.integration_head,
-                                            reason=f"ISAL stack {manifest.stack_id} is blocked by {blocker}",
+                                            reason=f"CHAINED stack {manifest.stack_id} is blocked by {blocker}",
                                             last_pr=state.last_pr, plan_sha=state.plan_sha),
                                manifest, integration_actual, landing, held_by=blocker)
                 self._contexts[mission_id] = ctx
@@ -567,7 +567,7 @@ class MissionRouter:
         """True when ``branch_sha`` has ``sha`` in its history."""
         return int(self.gh.compare(sha, branch_sha).get("behind_by", 1)) == 0
 
-    # ------------------------------------------------------- stacks (SAL/ISAL)
+    # ------------------------------------------------------- stacks (PARALLEL/CHAINED)
     def _head_manifest(self, raw: dict) -> Optional[Manifest]:
         ref = parse_stage_branch(raw["head"]["ref"])
         try:
@@ -636,7 +636,7 @@ class MissionRouter:
         members = self._stack_members(stack_id)
         ctxs = {m: self.context(m) for m in members}
         kinds = {c.manifest.stack_kind if c.manifest else self._declared_manifest(m).stack_kind for m, c in ctxs.items()}
-        kind = kinds.pop() if len(kinds) == 1 else "ISAL"  # disagreeing members are rejected at start; be strict meanwhile
+        kind = kinds.pop() if len(kinds) == 1 else "CHAINED"  # disagreeing members are rejected at start; be strict meanwhile
         head = self.gh.branch_head(stack_branch(stack_id))
         stages = {m: c.state.stage for m, c in ctxs.items()}
         blocked = [m for m, c in ctxs.items() if c.state.stage in (BLOCKED, CANCELLED) and c.held_by is None]
@@ -665,7 +665,7 @@ class MissionRouter:
             status, reason = STACK_HALTED, "its missions name different branches: " + ", ".join(sorted(targets))
         elif any(st == HALTED for st in stages.values()):
             status, reason = STACK_HALTED, "a mission is halted for HITL: " + ", ".join(m for m, st in stages.items() if st == HALTED)
-        elif blocked and (kind == "ISAL" or finished):
+        elif blocked and (kind == "CHAINED" or finished):
             status, reason = STACK_BLOCKED, "blocked by " + ", ".join(blocked)
         elif members and all(st == DONE for st in stages.values()):
             status = STACK_READY
@@ -737,11 +737,11 @@ class MissionRouter:
             dep_ctx = self.context(dep)
             dep_state = dep_ctx.state
             if dep_state.stage in (BLOCKED, CANCELLED):
-                waits.append(f"ISAL dependency {dep} is {dep_state.stage.lower()}; this mission will not start")
+                waits.append(f"CHAINED dependency {dep} is {dep_state.stage.lower()}; this mission will not start")
             elif dep_state.stage != DONE:
-                waits.append(f"ISAL dependency {dep} has not passed A3 yet (it is {dep_state.stage})")
+                waits.append(f"CHAINED dependency {dep} has not passed A3 yet (it is {dep_state.stage})")
             elif dep_ctx.landing not in (landing, target):
-                rejects.append(f"ISAL dependency {dep} landed on {dep_ctx.landing}, which this mission does not build on")
+                rejects.append(f"CHAINED dependency {dep} landed on {dep_ctx.landing}, which this mission does not build on")
             elif integration_actual and not self._contains(integration_actual, dep_state.landed_sha):
                 rejects.append(f"{integration_branch(mission_id)} does not contain {dep}'s landed commit {dep_state.landed_sha}")
         cycle = self._dependency_cycle(mission_id, manifest)
@@ -757,14 +757,14 @@ class MissionRouter:
                 declared = self._declared_manifest(other)
                 if other != mission_id and declared is not None and declared.stack_kind != manifest.stack_kind:
                     rejects.append(f"stack {sid} is {declared.stack_kind} in {other} but {manifest.stack_kind} here; a stack has one kind")
-            if manifest.stack_kind == "ISAL" and self._stack_blocker(sid, mission_id):
-                waits.append(f"ISAL stack {sid} is blocked by {self._stack_blocker(sid, mission_id)}; nothing more in it starts")
+            if manifest.stack_kind == "CHAINED" and self._stack_blocker(sid, mission_id):
+                waits.append(f"CHAINED stack {sid} is blocked by {self._stack_blocker(sid, mission_id)}; nothing more in it starts")
         for other in sorted(self._known - {mission_id}):
             ctx = self.context(other)
             if ctx.manifest is None or not self._holds_scope(other, ctx):
                 continue
-            if ctx.manifest.stack_id and ctx.manifest.stack_id == manifest.stack_id and manifest.stack_kind == "ISAL":
-                continue  # ISAL missions build on each other's results in order
+            if ctx.manifest.stack_id and ctx.manifest.stack_id == manifest.stack_id and manifest.stack_kind == "CHAINED":
+                continue  # CHAINED missions build on each other's results in order
             clash = scopes_overlap(manifest.build_scope, ctx.manifest.build_scope)
             if clash:
                 rejects.append(f"build_scope {clash[0]!r} overlaps {clash[1]!r} of active mission {other}; "
@@ -814,7 +814,7 @@ class MissionRouter:
                 self._write(f"create {branch} at {base}", lambda: self.gh.create_branch(branch, base))
                 actual = base
         elif manifest is not None and manifest.depends_on:
-            # ISAL: once every dependency has passed, move a still-empty integration branch up to the
+            # CHAINED: once every dependency has passed, move a still-empty integration branch up to the
             # landing branch (the stack branch, where the dependencies' results are).
             landed = [self.context(d).state.landed_sha for d in manifest.depends_on if self.context(d).state.stage == DONE]
             if len(landed) == len(manifest.depends_on) and not all(self._contains(actual, sha) for sha in landed):

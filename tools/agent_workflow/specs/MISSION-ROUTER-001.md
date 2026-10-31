@@ -4,7 +4,7 @@
 **Amendment 001 (2026-10-20, HITL direction):** A1 is a human seat. A HITL login may open and push the A1 plan PR and is accepted as the A1 actor (§5a); the a1 App remains an accepted A1 actor while it is `ACTIVE` in the registry. A2 and A3 are unchanged.
 **Amendment 002 (2026-10-22, HITL direction, "option 2"):** a stack lands as a whole. Its passed missions collect on
 the stack branch `stack/<STACK-ID>`, and nothing reaches `main` until every mission in the stack has passed; then the
-whole stack lands in one merge (§2). One `/mission approve` covers every plan in the stack. SAL and ISAL both follow the
+whole stack lands in one merge (§2). One `/mission approve` covers every plan in the stack. PARALLEL and CHAINED both follow the
 ADD protocol: nothing waits for HITL mid-stack; blockers are recorded (A3 verdict `BLOCKED`, §3), and the stack ends
 either on `main` or blocked with a review matrix. `"landing": "per-leg"` keeps the earlier behavior for a stack.
 **Amendment 003 (2026-10-23, HITL-approved pipeline patch):** a refused PR for the A2 or A3 stage the mission waits
@@ -18,7 +18,7 @@ mission alone: A3 reviews the same build again after a `BLOCKED` verdict, or A2 
 last round. The missions that passed stay passed, and the stack lands only when every mission has passed (§4, §6).
 **Amendment 005 (2026-10-24, HITL direction, HITL-approved pipeline patch):** the L1 capture route. L1 artifacts are
 the starting point of new development, not mission work: HITL's DRAFT captures enter the L1 capture queue
-(`UPG/CONTROL_MATRIX/L1-CAPTURE-QUEUE.md`) without a plan, an A2 build or an A3 review, and the router merges them into
+(`change-specs/CONTROL_MATRIX/L1-CAPTURE-QUEUE.md`) without a plan, an A2 build or an A3 review, and the router merges them into
 `main` (§5d). The route only appends DRAFT entries to that one file, opened and pushed by HITL; it promotes nothing, and
 filing captures into the matrices stays mission work. A capture is not a pipeline violation.
 **Amendment 006 (2026-10-24, HITL direction, HITL-approved pipeline patch):** a plan may name the `model` for A2 and A3
@@ -111,7 +111,7 @@ the Mission Agent restarted a failed run twice. Vectors 40–43 cover it.
 assigned runtime and opens the stage PR as the assigned agent's App (MISSION-DISPATCH-001). The request is a nudge
 only: the workflow derives everything itself and also runs on a schedule, so a failed request is logged, not fatal.
 
-## 2. Stacks: SAL and ISAL
+## 2. Stacks: PARALLEL and CHAINED
 
 HITL designs stacks at runtime. The router reads each mission's stack membership from its manifest; nothing about a
 stack is hard-coded.
@@ -124,22 +124,22 @@ Unless its plans say `"landing": "per-leg"` (or `config.json` `per_leg_stacks` l
    approval request listing every plan and its exact commit, with a fingerprint of that set
    (`sha256("mission-stack-v1\n" + sorted "<mission> <commit>" lines)`, first 40 hex). HITL approves the whole stack
    once: `/mission approve <fingerprint>` on any of those PRs. The approval covers each plan at its listed commit,
-   including later ISAL plans that merge only when their turn comes. A new push to any plan, or a new plan in the
+   including later CHAINED plans that merge only when their turn comes. A new push to any plan, or a new plan in the
    stack, changes the fingerprint and needs a new approval. Only plans opened by an actor who may hold A1 (HITL in person,
    or the assigned a1 bot) count towards a stack, so no other identity can change its fingerprint.
 2. **The stack branch.** The first plan to start creates `stack/<STACK-ID>` from `main`. Each mission's integration
    branch starts from it, and each A3 PASS merges into it. Only the router (and HITL) may update it.
-3. **ISAL:** loop N+1 starts only when loop N has passed. Its still-empty integration branch is fast-forwarded to the
+3. **CHAINED:** loop N+1 starts only when loop N has passed. Its still-empty integration branch is fast-forwarded to the
    stack branch, so it builds on loop N's result. A plan branch may be behind its integration branch: the integration
    branch then only holds what is already on the stack branch, and the plan adds files under its own mission only.
-4. **SAL:** the loops run side by side, with no overlapping `build_scope`.
+4. **PARALLEL:** the loops run side by side, with no overlapping `build_scope`.
 5. **Landing.** When every mission has passed, the router starts the Mission Agent workflow, which opens the PR from
    the stack branch into `main` as an A3 agent of the stack (the router's own token cannot approve a PR it opened).
    The router checks it (§5c) and merges the whole stack in one merge. The missions' issues and the stack's issue close.
 6. **Blockers (ADD).** Nothing waits for HITL mid-stack. A3 records a blocker with a `BLOCKED` verdict (§3); a FAIL in
    the last allowed round, and an agent run that failed 3 times in a row (MISSION-DISPATCH-001 §4), are recorded the
-   same way. In an **ISAL** the first blocker blocks everything: nothing more in the stack starts or merges. In an
-   **SAL** the other loops carry on, and the stack is blocked once every loop has finished. A cancelled mission counts
+   same way. In an **CHAINED** the first blocker blocks everything: nothing more in the stack starts or merges. In an
+   **PARALLEL** the other loops carry on, and the stack is blocked once every loop has finished. A cancelled mission counts
    as a blocker. A blocked stack never lands.
 7. **Review matrix.** The stack's issue shows every loop: its dependencies, result, PR and time, and a Blockers section
    with what, where and when for each one. A blocked stack stays whole, its issues open, until HITL closes the
@@ -152,12 +152,12 @@ one kind.
 
 ### 2b. Kinds
 
-- **SAL (Stacked Agent Loop):** unrelated missions run side by side. The router enforces that they really are
+- **PARALLEL (parallel stack):** unrelated missions run side by side. The router enforces that they really are
   unrelated: a mission cannot start while its `build_scope` overlaps the scope of any active mission (started, not
   yet passed, including halted ones). The overlap test is conservative: two scopes overlap when one's literal leading
-  path segments are a prefix of the other's. It can report a false overlap but never misses a real one. An SAL mission
+  path segments are a prefix of the other's. It can report a false overlap but never misses a real one. An PARALLEL mission
   may not declare `depends_on`.
-- **ISAL (Integrated Stacked Agent Loop):** a mission lists the missions whose results it needs in `depends_on`. It
+- **CHAINED (chained stack):** a mission lists the missions whose results it needs in `depends_on`. It
   does not start until every dependency has passed A3 and landed on its landing branch (the stack branch, or `main`
   for a per-leg stack). Its integration branch then starts from there: the router fast-forwards a still-empty
   integration branch to it. A dependency cycle is rejected. If a dependency halts or is blocked, its dependents wait.
@@ -180,7 +180,7 @@ Because only passed missions reach a landing branch, a downstream mission only e
   },
   "build_scope": ["tools/example/**", "docs/example/*.md"],
   "max_rounds": 5,
-  "stack": {"id": "S-EXAMPLE", "kind": "ISAL"},
+  "stack": {"id": "S-EXAMPLE", "kind": "CHAINED"},
   "depends_on": ["M-EXAMPLE-001"]
 }
 ```
@@ -204,8 +204,8 @@ Because only passed missions reach a landing branch, a downstream mission only e
 - `build_scope`: repo-relative globs. `*` stays inside one path segment and `**` spans any depth. Matching is
   case-sensitive. A glob may not start with a wildcard or cover `.github/` or `missions/`.
 - `max_rounds`: 1–10, default 5.
-- `stack` (optional): `kind` is `SAL` or `ISAL`; `landing` (optional) is `stack` (the default: the stack lands as a
-  whole, §2a) or `per-leg` (each mission lands on `main` when it passes). `depends_on` (optional, ISAL only): up to 20
+- `stack` (optional): `kind` is `PARALLEL` or `CHAINED`; `landing` (optional) is `stack` (the default: the stack lands as a
+  whole, §2a) or `per-leg` (each mission lands on `main` when it passes). `depends_on` (optional, CHAINED only): up to 20
   mission ids.
 - `deliverables` (optional, Amendment 004): up to 200 exact repo-relative file paths (no wildcard) that the plan says
   A2 creates or changes. Before approval the router refuses a plan in which any of them is outside `build_scope` or
@@ -221,7 +221,7 @@ Because only passed missions reach a landing branch, a downstream mission only e
     against it. A1 branches the plan from it: a plan carrying commits that are not on it is refused (§5, A1 files);
   - a stack that lands as a whole starts its stack branch from it and lands on it (§2a, §5c);
   - every mission of one stack names the same branch (or none): a plan that differs from another plan of its stack
-    is refused, and a stack whose plans disagree is halted. An ISAL dependency must have landed where the mission
+    is refused, and a stack whose plans disagree is halted. An CHAINED dependency must have landed where the mission
     builds;
   - HITL's approval binds it with the rest of `mission.json`, so it cannot change mid-mission: a different branch
     needs a new plan and a new approval.
@@ -282,7 +282,7 @@ exactly at the last stage merge. If anything else moved it, the mission halts.
 | Files | Only under `missions/<ID>/`, not `reviews/`; adds `mission.json`. Every `deliverables` entry and literal `build_scope` entry is inside `build_scope` and not `AUTHORITY` (Amendment 004) | Every path (both sides of a rename) inside `build_scope`, not under `missions/`, not SPEC-002 `AUTHORITY`; may be none (Amendment 003) | Exactly one added file, the round's verdict, on top of the reviewed commit |
 | Up to date with the integration branch | (may be behind; §2a) | ✓ | Contains the reviewed commit |
 | Integration branch untouched outside the router | ✓ | ✓ | ✓ |
-| Stack: no scope overlap with active missions or unlanded stacks; ISAL dependencies passed; no cycle; one kind per stack; stack id not landed or closed; ISAL stack not blocked | ✓ | | |
+| Stack: no scope overlap with active missions or unlanded stacks; CHAINED dependencies passed; no cycle; one kind per stack; stack id not landed or closed; CHAINED stack not blocked | ✓ | | |
 | Verdict parses, round matches, `reviewed_sha` = the commit A3 was handed | | | ✓ |
 | File list complete (under GitHub's 300-file comparison cap) | ✓ | ✓ | ✓ |
 
@@ -302,7 +302,7 @@ waiting on, and its head is that stage's branch in this repository, the router a
 Without a readable tracking issue nothing is deleted. A refused PR for any other stage (a stale round, a PR from
 another branch or a fork) keeps its branch and records nothing. Before this, a refused A2 PR left its branch in
 place: the workflow treated the stage as handed in and never ran the agent again, and nothing was recorded as
-blocked (CCSYNC-ISAL-001, 2026-10-23).
+blocked (CCSYNC-CHAINED-001, 2026-10-23).
 
 Every merge is pinned to the SHA that was checked (`PUT /pulls/{n}/merge` with `sha`). A push that lands after the
 check makes the merge fail, and the new commit is checked on the next sweep.
@@ -455,7 +455,7 @@ The router enforces everything it can see. These settings live in GitHub and onl
 
 1. **Starting the agent process** is MISSION-DISPATCH-001's job, for roles whose plan names a `runtime`.
 2. **Merge conflicts at PASS.** If `main` moved in a way that conflicts with a mission, GitHub refuses the PASS merge.
-   The router reports it; the fix is an A2 round that merges `main` into the integration branch. Non-overlapping SAL
+   The router reports it; the fix is an A2 round that merges `main` into the integration branch. Non-overlapping PARALLEL
    scopes make this rare.
 3. **Legacy producer docs.** `AGENTS.md` and `CLAUDE.md` still describe the retired handoff-block flow for
    `route-handoff-block`.
@@ -492,12 +492,12 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 16 | Push between the check and the merge | Merge refused; the new commit is checked next sweep |
 | 17 | Required checks failing on a PASS PR | Not merged; one "waiting" comment; retried each sweep |
 | 18 | Three consecutive sweeps with no change | No new comments, labels, issues or branches |
-| 19 | Two SAL missions with disjoint scopes | Both run and both land on `main` |
+| 19 | Two PARALLEL missions with disjoint scopes | Both run and both land on `main` |
 | 20 | A1 whose `build_scope` overlaps an active mission | Rejected with the overlapping globs |
-| 21 | ISAL A1 whose dependency has not passed | Held with a comment naming the dependency |
+| 21 | CHAINED A1 whose dependency has not passed | Held with a comment naming the dependency |
 | 22 | Vector 21 after the dependency lands | Integration branch fast-forwarded to `main` (contains the dependency's result); A1 asked to update; then normal approval and merge |
-| 23 | Two ISAL missions depending on each other | Both rejected as a cycle |
-| 24 | `depends_on` in an SAL or stack-less manifest | Manifest rejected |
+| 23 | Two CHAINED missions depending on each other | Both rejected as a cycle |
+| 24 | `depends_on` in an PARALLEL or stack-less manifest | Manifest rejected |
 | 25 | A2/A3 branch also pushed by another identity (another agent, HITL, `cursor[bot]`), or an A1 branch pushed by anyone other than the a1 bot or a HITL login | Rejected, naming the pusher |
 | 26 | Push not yet in GitHub's activity log | Held until it is recorded |
 | 27 | Assigned identity `SUSPENDED` or `RETIRED` in the registry | Rejected: no ACTIVE identity |
@@ -517,17 +517,17 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 41 | A mission's tracking issue is opened | The plan PR gets one `tracking-issue:<N>` marker comment naming it |
 | 42 | No marker and no `config.json` record, but the listing finds the issue | The issue is used and the marker is posted once |
 | 43 | The recorded number is a PR, another mission's issue, an issue not opened by the bot, or missing | The mission waits, logged; nothing is merged or opened; the Mission Agent leaves it out |
-| 44 | Three ISAL plans opened; HITL approves the stack fingerprint once | Loop 1 merges; loops 2 and 3 merge in turn without another approval, each building on the previous loop's result |
+| 44 | Three CHAINED plans opened; HITL approves the stack fingerprint once | Loop 1 merges; loops 2 and 3 merge in turn without another approval, each building on the previous loop's result |
 | 45 | Every loop of a stack passes | Each PASS merges into `stack/<ID>`; `main` is unchanged until the landing PR, which lands the whole stack in one merge; all issues close |
-| 46 | ISAL loop 2 is `BLOCKED` | Loop 3 never starts; any running loop is held; the stack issue shows the matrix and the blocker (what, where, when); nothing reaches `main`; a landing PR is rejected |
-| 47 | SAL loop 1 is `BLOCKED` | Loop 2 carries on; the stack is blocked once both finished; nothing lands |
+| 46 | CHAINED loop 2 is `BLOCKED` | Loop 3 never starts; any running loop is held; the stack issue shows the matrix and the blocker (what, where, when); nothing reaches `main`; a landing PR is rejected |
+| 47 | PARALLEL loop 1 is `BLOCKED` | Loop 2 carries on; the stack is blocked once both finished; nothing lands |
 | 48 | A plan is pushed after the stack approval request | The fingerprint changes; no plan merges on the old approval; a new request is posted |
 | 49 | Landing PR before every loop passed, by a non-A3 bot, or after someone else updated the stack branch | Waits, rejected, rejected |
 | 50 | Landing diff with `AUTHORITY` files (other than the stack's own plans) | Held for HITL `/mission approve <head>` |
 | 51 | An agent run fails 3 times in a row | The stage is `BLOCKED`; `/mission retry` allows new attempts |
 | 52 | Another mission's scope overlaps a passed mission of an unlanded stack | Rejected until the stack lands or its review is closed |
 | 53 | HITL closes a blocked stack's issue | Its missions' issues close; a new plan with that stack id is rejected |
-| 54 | A plan reuses the id of a landed stack, or a stack mixes SAL and ISAL | Rejected |
+| 54 | A plan reuses the id of a landed stack, or a stack mixes PARALLEL and CHAINED | Rejected |
 | 55 | `"landing": "per-leg"`, or a stack in `config.json` `per_leg_stacks` | Each mission lands on `main` when it passes, as before Amendment 002 |
 | 56 | The A2 PR the mission waits on is refused (for example an `AUTHORITY` file) | One failure record on the tracking issue, naming the reasons; the stage branch is deleted and its PR closed |
 | 57 | The same stage is refused 3 times in a row | `BLOCKED`, with the last refusal in the review matrix; `/mission retry` allows new attempts |
@@ -536,11 +536,11 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 60 | An A2 PR that changes no files | Merged like any A2 build; A3 reviews it |
 | 61 | A plan whose `deliverables` include an `AUTHORITY` file, or a file outside `build_scope`, or a literal `build_scope` entry that is `AUTHORITY` | Rejected before any approval is requested; an approval comment does not merge it |
 | 62 | `deliverables` with a wildcard, `..`, an absolute path or a duplicate | The manifest is invalid |
-| 63 | HITL comments `/mission retry` on a SAL mission blocked by A3 | That mission goes to A3 round r+1 on the integration head; the stack issue says it resumed; the passed missions are not run again; on PASS the whole stack lands |
+| 63 | HITL comments `/mission retry` on a PARALLEL mission blocked by A3 | That mission goes to A3 round r+1 on the integration head; the stack issue says it resumed; the passed missions are not run again; on PASS the whole stack lands |
 | 64 | The re-reviewed mission is `BLOCKED` again | The stack is blocked again and the stack issue says so again; another retry is needed to reopen it |
 | 65 | `/mission retry` from a bot, a non-HITL user, or posted before the block | Nothing reopens |
 | 66 | HITL closed the stack's review, then comments `/mission retry` | Nothing reopens |
-| 67 | `/mission retry` on the ISAL mission that blocked its stack | It is reviewed again; once it passes, the loops it held start |
+| 67 | `/mission retry` on the CHAINED mission that blocked its stack | It is reviewed again; once it passes, the loops it held start |
 | 68 | `/mission retry` after a FAIL in the last allowed round | A2 gets one more round |
 | 69 | HITL opens a PR from `capture/<name>` that appends DRAFT entries to the queue | The router merges it into `main`; `route-handoff-block` success |
 | 70 | A capture PR opened by an agent App or another user, or its branch pushed to by anyone but HITL | Refused, not merged; `failure` |
@@ -562,6 +562,6 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 86 | A plan branched from `main` with commits that are not on its `branch` | Refused: those files are outside the plan's directory |
 | 87 | A stack whose plans name `release` | Its stack branch starts from `release`; a landing PR into `main` is refused; one into `release` is merged; a new plan in the stack is refused as already landed on `release` |
 | 88 | Two plans of one stack name different branches (or one names none) | The later plan is refused; while both are proposed the stack is halted |
-| 89 | An ISAL mission whose dependency landed on another branch | Refused |
+| 89 | An CHAINED mission whose dependency landed on another branch | Refused |
 | 90 | A PR into a landing branch from any other branch | "Not a mission" `failure`, as on `main` |
 | 91 | `branch` empty, under `mission/` or `stack/`, with `..`, `HEAD`, a leading `-` or `.` in a part, ending in `.lock` or `.`, a space, or over 200 characters; `landing_branches` not a list, with duplicates, or naming such a branch or one under the capture prefix | The manifest, or `config.json`, is invalid |

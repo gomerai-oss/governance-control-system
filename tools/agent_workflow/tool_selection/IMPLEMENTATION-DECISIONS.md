@@ -1,7 +1,7 @@
 # GOVERNED-TOOL-SELECTION-SPEC-001 — A2 implementation decisions
 
 **Mission:** M-EPAP-TOOLSELECT-001, round 2 (fixes the round-1 finding on P2)
-**Built from:** `missions/M-EPAP-TOOLSELECT-001/PLAN.md`, which restates the spec's operative content, with the parent doctrine `governance/doctrine/L1-ENTERPRISE-MCP-RAG-EPAP-GOVERNED-TOOL-SELECTION-PRIMITIVE-001.md` as reference. The spec text itself is not in the checkout.
+**Built from:** `missions/M-EPAP-TOOLSELECT-001/PLAN.md`, which restates the spec's operative content, with the parent doctrine `governance/doctrine/L1-MCP-RAG-EPAP-GOVERNED-TOOL-SELECTION-PRIMITIVE-001.md` as reference. The spec text itself is not in the checkout.
 
 The code does not amend the spec. Where the plan leaves a choice open, the choice below fails closed and is recorded here so A1 or HITL can reject it.
 

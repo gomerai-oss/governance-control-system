@@ -91,7 +91,7 @@ def evaluate(
     hitl_logins: Set[str] = frozenset(),
 ) -> Decision:
     """``start_rejects`` / ``start_waits`` are the router's stack checks for an A1 PR
-    (scope overlap with active missions, unmet ISAL dependencies); ``integration_clean``
+    (scope overlap with active missions, unmet CHAINED dependencies); ``integration_clean``
     says the integration branch holds nothing beyond the default branch before A1 merges.
     ``identities`` maps each ACTIVE agent to its GitHub App bot login; an agent missing
     from it cannot act in any role. ``hitl_logins`` names the human seats: A1 is held
@@ -156,7 +156,7 @@ def evaluate(
                   f"{integration} must exist and hold nothing that is not already on {default_branch}")
         # The plan branch may be behind: the integration branch then only holds what is already on
         # the landing branch (checked above), and the plan adds files under its own mission directory
-        # only (checked below). This is what lets one approval carry an ISAL stack to its later missions.
+        # only (checked below). This is what lets one approval carry an CHAINED stack to its later missions.
         _check_a1_files(pr, c)
         c.reasons.extend(plan_findings(manifest, classify))
         c.reasons.extend(start_rejects)

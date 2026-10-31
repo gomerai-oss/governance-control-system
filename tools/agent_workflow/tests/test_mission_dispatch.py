@@ -726,7 +726,7 @@ class FlowTests(unittest.TestCase):
         git("clone", "--quiet", "--branch", f"mission/{MID}/integration", self.remote.url, str(clone), cwd=self.root)
         git("checkout", "--quiet", "-b", "a2", cwd=clone)
         (clone / "tools" / "demo" / "app.py").write_text("print('v2')\n")
-        git("commit", "--quiet", "-am", "Build v2\n\nBlockers:\n- the PMS API key is missing", cwd=clone, env=ident)
+        git("commit", "--quiet", "-am", "Build v2\n\nBlockers:\n- the vendor API key is missing", cwd=clone, env=ident)
         git("checkout", "--quiet", f"mission/{MID}/integration", cwd=clone)
         git("merge", "--quiet", "--no-ff", "-m", "router merge", "a2", cwd=clone, env=ident)
         git("push", "--quiet", "origin", f"mission/{MID}/integration", cwd=clone)
@@ -735,7 +735,7 @@ class FlowTests(unittest.TestCase):
         work = self.root / "a3notes"
         prepare(job, work, self.remote.url, "", self.env, self.root, "main")
         tree = work / "checkout"
-        self.assertIn("the PMS API key is missing", (tree / ".mission-dispatch" / "A2-NOTES.md").read_text())
+        self.assertIn("the vendor API key is missing", (tree / ".mission-dispatch" / "A2-NOTES.md").read_text())
         task = (tree / ".mission-dispatch" / "TASK.md").read_text()
         self.assertIn("A2-NOTES.md", task)
         self.assertIn("BLOCKED", task)
@@ -964,7 +964,7 @@ class FlowTests(unittest.TestCase):
 class LandTests(unittest.TestCase):
     def status(self, **kw):
         base = dict(status="READY", landing_pr_open=False, head="a" * 40, lander=("a3", A3B), members=("M-ONE", "M-TWO"),
-                    kind="ISAL", target="main")
+                    kind="CHAINED", target="main")
         return SimpleNamespace(**{**base, **kw})
 
     def survey(self, status, head="a" * 40):
@@ -1013,7 +1013,7 @@ class LandTests(unittest.TestCase):
 
 
 class FakeBinder:
-    """Stands in for tool_selection.runtime_binding (loop 4 of EPAP-ISAL-002): the interface the dispatcher calls."""
+    """Stands in for tool_selection.runtime_binding (loop 4 of EPAP-CHAINED-002): the interface the dispatcher calls."""
 
     class BindingRefused(ValueError):
         pass

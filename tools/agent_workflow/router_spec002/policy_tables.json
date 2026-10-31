@@ -5,10 +5,10 @@
   "fallback_family": "CODE",
   "families": {
     "AUTHORITY": [
-      {"exact": "governance/reviewer_execution/sal3/temporary-review-waiver.yaml"},
-      {"prefix": "governance/reviewer_execution/sal3/"},
-      {"prefix": "tools/reviewer_execution/sal3/"},
-      {"exact": "POLICIES/ENTERPRISE-DELEGATED-MERGE-STANDING-AUTHORITY-001.md"},
+      {"exact": "governance/reviewer_execution/merge/temporary-review-waiver.yaml"},
+      {"prefix": "governance/reviewer_execution/merge/"},
+      {"prefix": "tools/reviewer_execution/merge/"},
+      {"exact": "POLICIES/DELEGATED-MERGE-STANDING-AUTHORITY-001.md"},
       {"exact": "CODEOWNERS"},
       {"exact": ".github/CODEOWNERS"},
       {"exact": "docs/CODEOWNERS"},
@@ -28,14 +28,14 @@
       {"exact": "tools/agent_workflow/epap/signing.py"},
       {"glob": "missions/*/mission.json"},
       {"exact": "tools/agent_workflow/specs/ROUTER-POLICY-SPEC-002.md"},
-      {"exact": "tools/agent_workflow/sal3_merge_dispatch.py"},
+      {"exact": "tools/agent_workflow/merge_dispatch.py"},
       {"exact": "tools/agent_workflow/merge_delegation_evaluator.py"},
       {"exact": ".github/workflows/pr-handoff-router.yml"},
       {"exact": ".github/workflows/vrt-delegated-merge-dispatch.yml"},
       {"prefix": ".github/workflows/"},
       {"prefix": ".github/actions/"},
       {"exact": ".github/settings.yml"},
-      {"prefix": "UPG/delegation/"},
+      {"prefix": "change-specs/delegation/"},
       {"prefix": "docs/delegation/"},
       {"prefix": "tools/vrt/tests/"},
       {"prefix": "tools/policy/"},
@@ -49,7 +49,7 @@
       {"exact": "tools/reviewer_execution/contracts.py"},
       {"prefix": "tools/reviewer_execution/lifecycle/"},
       {"prefix": "tools/reviewer_execution/runtime/"},
-      {"prefix": "tools/reviewer_execution/sal4/"},
+      {"prefix": "tools/reviewer_execution/parallel4/"},
       {"glob": "*.py*"},
       {"glob": "*.so"},
       {"glob": "*/__init__.*"},
@@ -104,8 +104,8 @@
       {"basename": "devcontainer.json"}
     ],
     "PROBE_EVIDENCE": [
-      {"prefix": "CCP_UPGRADES/", "segment": "evidence", "suffix": [".json", ".log", ".err", ".txt", ".md", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".pdf"]},
-      {"prefix": "UPG/", "segment": "evidence", "suffix": [".json", ".log", ".err", ".txt", ".md", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".pdf"]}
+      {"prefix": "change-specs/", "segment": "evidence", "suffix": [".json", ".log", ".err", ".txt", ".md", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".pdf"]},
+      {"prefix": "change-specs/", "segment": "evidence", "suffix": [".json", ".log", ".err", ".txt", ".md", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".pdf"]}
     ],
     "INERT": [
       {"suffix": [".md", ".txt", ".rst", ".adoc", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"]}
@@ -130,8 +130,8 @@
     }
   },
   "block_types": {
-    "NEXT_VQT_REVIEW_REQUEST": {
-      "pr_type": "VQT_REVIEW_REQUEST",
+    "NEXT_REVIEW_REQUEST": {
+      "pr_type": "REVIEW_REQUEST",
       "pr_type_by_class": {"PLAN_ONLY": "PLAN"},
       "class_policy": "required",
       "implicit_class": null,
@@ -186,7 +186,7 @@
     "mismatch_reason": "NO_BLOCK"
   },
   "merge_allowlist": [
-    {"pr_type": "VQT_REVIEW_REQUEST", "disposition": "WAIVED"},
+    {"pr_type": "REVIEW_REQUEST", "disposition": "WAIVED"},
     {"pr_type": "PLAN", "disposition": "WAIVED"},
     {"pr_type": "DOCS_ONLY", "disposition": "ACKNOWLEDGED"},
     {"pr_type": "CLOSEOUT", "disposition": "ACKNOWLEDGED"}

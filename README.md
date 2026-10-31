@@ -36,6 +36,9 @@ land        on PASS the router merges the mission into main; on FAIL the build g
 The specifications are in `tools/agent_workflow/specs/`: `MISSION-ROUTER-001.md`, `MISSION-DISPATCH-001.md` and
 `ROUTER-POLICY-SPEC-002.md`.
 
+**EPAP** (Evidence, Provenance and Audit Proof) is the record that ties each change to its plan, its build, its review
+and its merge, signed so it can be checked later. Its code is in `tools/agent_workflow/epap/`.
+
 ## Requirements
 
 - A GitHub repository with GitHub Actions, admin rights on it, and a `main` branch. For a new repository, tick "Add a

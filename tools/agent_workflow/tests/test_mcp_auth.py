@@ -17,9 +17,9 @@ from epap import links, signing
 PKG = Path(__file__).resolve().parents[1] / "mcp_auth"
 NOW = 1_800_000_000
 MISSION = "M-TEST-001"
-LANE = "UPG-TEST-LANE-001"
+LANE = "SPEC-TEST-LANE-001"
 APPROVAL = "HITL-TEST-APPROVAL-001"
-OTHER = "UPG-OTHER-001"
+OTHER = "SPEC-OTHER-001"
 RAG_READ = ["rag.retrieve", "rag.search", "rag.summarize", "rag.cite", "rag.memory_lookup", "rag.retrieve_no_write"]
 EPAP_READ = ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"]
 
@@ -33,14 +33,14 @@ def fixture_policy():
         "actions": shipped["actions"],
         "classes": shipped["classes"],
         "authority_refs": {
-            LANE: {"kind": "UPG", "source": "governance/upg/UPG-TEST-LANE-001.md", "missions": [MISSION]},
+            LANE: {"kind": "SPEC", "source": "change-specs/SPEC-TEST-LANE-001.md", "missions": [MISSION]},
             APPROVAL: {"kind": "HITL", "source": f"missions/{MISSION}/PLAN.md", "missions": [MISSION]},
-            OTHER: {"kind": "UPG", "source": "governance/upg/UPG-OTHER-001.md", "missions": ["M-OTHER-001"]},
+            OTHER: {"kind": "SPEC", "source": "change-specs/SPEC-OTHER-001.md", "missions": ["M-OTHER-001"]},
         },
-        "roles": ["VQT", "CCP"],
+        "roles": ["REVIEWER", "BUILDER"],
         "principals": {
-            "agent:vqt-1": {"kind": "agent", "acting_identities": ["a3"], "roles": ["VQT"]},
-            "agent:ccp-1": {"kind": "agent", "acting_identities": ["a2"], "roles": ["CCP"]},
+            "agent:vqt-1": {"kind": "agent", "acting_identities": ["a3"], "roles": ["REVIEWER"]},
+            "agent:ccp-1": {"kind": "agent", "acting_identities": ["a2"], "roles": ["BUILDER"]},
         },
         "resources": {
             "corpus:governance": {"class": "rag", "restricted": False, "credential_bearing": False},
@@ -56,20 +56,20 @@ def fixture_policy():
                             "approvals": {"restricted": [], "credential": [], "runtime": []}},
         },
         "grants": [
-            {"id": "G-VQT-RAG-READ", "effect": "allow", "role": "VQT", "class": "rag",
+            {"id": "G-REVIEWER-RAG-READ", "effect": "allow", "role": "REVIEWER", "class": "rag",
              "resources": ["corpus:governance", "corpus:secrets"], "actions": list(RAG_READ),
              "authority_ref": LANE, "evidence": "none"},
-            {"id": "G-VQT-EPAP-READ", "effect": "allow", "role": "VQT", "class": "epap",
+            {"id": "G-REVIEWER-EPAP-READ", "effect": "allow", "role": "REVIEWER", "class": "epap",
              "resources": ["index:epap"], "actions": list(EPAP_READ),
              "authority_ref": LANE, "evidence": "audit_record"},
-            {"id": "G-CCP-RAG-READ", "effect": "allow", "role": "CCP", "class": "rag",
+            {"id": "G-BUILDER-RAG-READ", "effect": "allow", "role": "BUILDER", "class": "rag",
              "resources": ["corpus:governance"], "actions": ["rag.retrieve"],
              "authority_ref": LANE, "evidence": "none"},
             # Scoped to another mission's SOT authority: no grant for M-TEST-001.
-            {"id": "G-CCP-EPAP-CREATE-OTHER", "effect": "allow", "role": "CCP", "class": "epap",
+            {"id": "G-BUILDER-EPAP-CREATE-OTHER", "effect": "allow", "role": "BUILDER", "class": "epap",
              "resources": ["index:epap"], "actions": ["epap.artifact_create"],
              "authority_ref": OTHER, "evidence": "epap_packet"},
-            {"id": "G-CCP-EPAP-UPDATE", "effect": "allow", "role": "CCP", "class": "epap",
+            {"id": "G-BUILDER-EPAP-UPDATE", "effect": "allow", "role": "BUILDER", "class": "epap",
              "resources": ["index:epap"], "actions": ["epap.artifact_update"],
              "authority_ref": LANE, "evidence": "epap_packet"},
         ],
@@ -83,7 +83,7 @@ def request(**overrides):
         "acting_identity": "a3",
         "session": {"id": "sess-1", "principal": "agent:vqt-1", "acting_identity": "a3", "mission": MISSION,
                     "issued_at": NOW - 60, "expires_at": NOW + 600},
-        "role": "VQT",
+        "role": "REVIEWER",
         "mission": {"id": MISSION, "authority_ref": APPROVAL},
         "resource": {"class": "rag", "id": "corpus:governance"},
         "action": "rag.retrieve",
@@ -102,7 +102,7 @@ def ccp_request(**overrides):
         "acting_identity": "a2",
         "session": {"id": "sess-2", "principal": "agent:ccp-1", "acting_identity": "a2", "mission": MISSION,
                     "issued_at": NOW - 60, "expires_at": NOW + 600},
-        "role": "CCP",
+        "role": "BUILDER",
         "resource": {"class": "epap", "id": "index:epap"},
         "action": "epap.artifact_update",
         "connector": {"id": "mcp:epap", "capabilities": ["epap.artifact_update"], "credential_bearing": False},
@@ -143,12 +143,12 @@ class SpecVectors(Base):
         self.assertIsNone(d.stop_condition)
         answers = d.record["answers"]
         self.assertEqual(answers["sot_authority"]["grant"],
-                         {"id": "G-VQT-RAG-READ", "ref": LANE, "kind": "UPG",
-                          "source": "governance/upg/UPG-TEST-LANE-001.md"})
+                         {"id": "G-REVIEWER-RAG-READ", "ref": LANE, "kind": "SPEC",
+                          "source": "change-specs/SPEC-TEST-LANE-001.md"})
         self.assertEqual(answers["sot_authority"]["mission"]["ref"], APPROVAL)
         self.assertEqual(answers["principal"], {"id": "agent:vqt-1", "kind": "agent"})
         self.assertEqual(answers["acting_identity"], "a3")
-        self.assertEqual(answers["role_class"], {"role": "VQT", "class": "rag"})
+        self.assertEqual(answers["role_class"], {"role": "REVIEWER", "class": "rag"})
         self.assertEqual(answers["scope"], {"mission": MISSION, "class": "rag", "resource": "corpus:governance"})
         self.assertEqual(answers["action"], {"name": "rag.retrieve", "kind": "read"})
         self.assertEqual(answers["evidence"], "none")
@@ -168,13 +168,13 @@ class SpecVectors(Base):
                 self.assertIsNone(d.record["answers"]["principal"])
 
     def test_vector3_epap_mutation_without_sot_scoped_grant_denies_stop_6(self):
-        # CCP's only create grant rests on another mission's authority.
+        # the builder's only create grant rests on another mission's authority.
         d = self.decide(ccp_request(action="epap.artifact_create",
                                     connector={"id": "mcp:epap", "capabilities": ["epap.artifact_create"],
                                                "credential_bearing": False}))
         self.assertDenied(d, "action_grant", 6)
         self.assertIsNone(d.record["answers"]["sot_authority"]["grant"])
-        # VQT holds EPAP read only.
+        # REVIEWER holds EPAP read only.
         d = self.decide(request(resource={"class": "epap", "id": "index:epap"}, action="epap.artifact_update"))
         self.assertDenied(d, "action_grant", 6)
 
@@ -190,17 +190,17 @@ class SpecVectors(Base):
 
     def test_vector5_conflicting_grants_deny_stop_11(self):
         self.policy["grants"].append(
-            {"id": "G-VQT-RAG-DENY", "effect": "deny", "role": "VQT", "class": "rag",
+            {"id": "G-REVIEWER-RAG-DENY", "effect": "deny", "role": "REVIEWER", "class": "rag",
              "resources": ["corpus:governance"], "actions": ["rag.retrieve"], "authority_ref": APPROVAL,
              "evidence": "none"})
         d = self.decide(request())
         self.assertDenied(d, "action_grant", 11)
-        self.assertIn("G-VQT-RAG-DENY", d.reason)
-        self.assertIn("G-VQT-RAG-READ", d.reason)
+        self.assertIn("G-REVIEWER-RAG-DENY", d.reason)
+        self.assertIn("G-REVIEWER-RAG-READ", d.reason)
 
         self.policy = fixture_policy()
         self.policy["grants"].append(
-            {"id": "G-VQT-RAG-AUDITED", "effect": "allow", "role": "VQT", "class": "rag",
+            {"id": "G-REVIEWER-RAG-AUDITED", "effect": "allow", "role": "REVIEWER", "class": "rag",
              "resources": ["corpus:governance"], "actions": ["rag.retrieve"], "authority_ref": LANE,
              "evidence": "audit_record"})
         self.assertDenied(self.decide(request()), "action_grant", 11)
@@ -214,7 +214,7 @@ class SpecVectors(Base):
         broken["classes"]["rag"]["mutation"] = ["rag.corpus_write"]
         self.assertDenied(self.decide(request(), policy=broken), "policy", 12)
         broken = fixture_policy()
-        broken["grants"][0]["authority_ref"] = "UPG-NOWHERE"
+        broken["grants"][0]["authority_ref"] = "SPEC-NOWHERE"
         self.assertDenied(self.decide(request(), policy=broken), "policy", 12)
         self.assertDenied(self.decide(request(), policy="not a policy"), "policy", 12)
 
@@ -261,7 +261,7 @@ class FixedOrder(Base):
         self.assertDenied(self.decide(request(acting_identity="a2")), "identity", 2)
 
     def test_role_not_held_fails_role_class(self):
-        self.assertDenied(self.decide(request(role="CCP")), "role_class", None)
+        self.assertDenied(self.decide(request(role="BUILDER")), "role_class", None)
         self.assertDenied(self.decide(request(role="ROOT")), "role_class", None)
         self.assertDenied(self.decide(request(resource={"class": "memory", "id": "corpus:governance"})),
                           "role_class", None)
@@ -289,7 +289,7 @@ class FixedOrder(Base):
 
     def test_sole_deny_grant_on_read_denies(self):
         for g in self.policy["grants"]:
-            if g["id"] == "G-VQT-RAG-READ":
+            if g["id"] == "G-REVIEWER-RAG-READ":
                 g["effect"] = "deny"
         self.assertDenied(self.decide(request()), "action_grant", None)
 
@@ -305,7 +305,7 @@ class FixedOrder(Base):
     def test_epap_mutation_with_sot_scoped_grant_allows(self):
         d = self.decide(ccp_request())
         self.assertTrue(d.allowed, d.reason)
-        self.assertEqual(d.record["answers"]["sot_authority"]["grant"]["id"], "G-CCP-EPAP-UPDATE")
+        self.assertEqual(d.record["answers"]["sot_authority"]["grant"]["id"], "G-BUILDER-EPAP-UPDATE")
         self.assertEqual(d.record["answers"]["evidence"], "epap_packet")
 
 

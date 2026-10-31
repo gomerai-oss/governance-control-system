@@ -296,7 +296,7 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
    It is scrubbed of the model login.
 5. **The Cursor CLI sandbox rules were verified live on 2026.10.16.** The pinned version is 2026.10.19-6bbf2c4.
 6. **Runtime binding is verified against a stand-in library (Amendment 011).** Until `tool_selection.runtime_binding`
-   and `mcp_gateway` land (stack EPAP-ISAL-002), `"enforce"` fails every job, by design; leave it `"off"` until both
+   and `mcp_gateway` land (stack EPAP-CHAINED-002), `"enforce"` fails every job, by design; leave it `"off"` until both
    are on the default branch. `Mcp(server:tool)` rules and `--approve-mcps` follow the Cursor CLI's documented
    options and have not yet been exercised live on the pinned version.
 

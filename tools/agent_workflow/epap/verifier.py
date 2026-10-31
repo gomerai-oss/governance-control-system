@@ -8,7 +8,7 @@ shares only the file formats with the writer, and emits ``VERIFY_PASS`` or
 - ``MALFORMED``: a file cannot be read as the pack format requires
 - ``BAD_SIGNATURE``: the layout is not signed by the trusted HITL key; or a
   link signature does not verify, is by a key the layout does not authorize for
-  that step, or is by a Campus App that is not ``ACTIVE`` in the registry with
+  that step, or is by a agent App that is not ``ACTIVE`` in the registry with
   the App ID the layout records
 - ``LAYOUT_VIOLATION``: the layout departs from the five-step pipeline model,
   the pack holds a step (or any file) the layout does not have, or a merge
@@ -223,7 +223,7 @@ def _check_link_signatures(name: str, doc: Mapping, layout: Mapping, registry: M
         _require(signature_valid(entry["public"], doc["signed"], sig["sig"]), BAD_SIGNATURE,
                  f"{name}: the signature by {keyid!r} does not verify")
         principal = entry["principal"]
-        if principal["kind"] == model.CAMPUS_APP:
+        if principal["kind"] == model.AGENT_APP:
             ident = registry.get(principal["role"])
             _require(ident is not None, BAD_SIGNATURE,
                      f"{name}: {keyid!r} is not in the identity registry")

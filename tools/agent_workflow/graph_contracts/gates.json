@@ -6,7 +6,7 @@
       "stage": "8.1",
       "id": "CONCEPTUAL_PLANNING",
       "activity": "Author a graph-shaped workflow description (nodes, edges, intended routing).",
-      "control": "Governed by an admitted SAL/UPG mission contract (parent L2 section 2); not a standalone artifact.",
+      "control": "Governed by an admitted SPEC mission contract (parent L2 section 2); not a standalone artifact.",
       "control_kind": "POLICY",
       "invariants": ["NO_DUPLICATE_CANONICAL_ARCHITECTURE"],
       "node_output_satisfies": false
@@ -33,14 +33,14 @@
       "stage": "8.4",
       "id": "AUTHORIZATION_GATES",
       "activity": "Deterministic and policy gates: scope, budget, worker independence, approved tool/model class.",
-      "control": "Parent L2 section 3.6 Gate Engine; SAL/UPG authority envelope.",
+      "control": "Parent L2 section 3.6 Gate Engine; SPEC authority envelope.",
       "control_kind": "DETERMINISTIC",
       "invariants": ["NO_SELF_SATISFIED_GATES"],
       "node_output_satisfies": false
     },
     {
       "stage": "8.5",
-      "id": "INDEPENDENT_VQT_REVIEW",
+      "id": "INDEPENDENT_REVIEW",
       "activity": "Exact-head, session-independent review of the implementation and of graph behavior under test.",
       "control": "mission_state.py invariant: REVIEW_REQUESTED != REVIEW_COMPLETED; a builder's own adversarial self-check is never independent review.",
       "control_kind": "VERIFICATION",
@@ -72,7 +72,7 @@
       "stage": "8.7",
       "id": "EPAP_PROVENANCE",
       "activity": "Every node's evidence (claims, artifacts, tests, exceptions) recorded in the Evidence Bus and bound to EPAP/PAP.",
-      "control": "Parent L2 section 3.5; EPAP-ENTERPRISE-DOCTRINE-FOUNDATION.",
+      "control": "Parent L2 section 3.5; EPAP-DOCTRINE-FOUNDATION.",
       "control_kind": "VERIFICATION",
       "invariants": ["NO_DESIGN_REFERENCE_AS_PRODUCTION_EVIDENCE"],
       "node_output_satisfies": false
@@ -90,7 +90,7 @@
       "stage": "8.9",
       "id": "DURABLE_CONTINUATION",
       "activity": "Graph run state persists independently of any one chat session or worker process, and survives restart without duplicated execution.",
-      "control": "Parent L2 sections 3.2 and 3.10; the Enterprise persistence contract governs regardless of engine; a vendor checkpointing feature is a reference pattern only.",
+      "control": "Parent L2 sections 3.2 and 3.10; the governance persistence contract governs regardless of engine; a vendor checkpointing feature is a reference pattern only.",
       "control_kind": "DETERMINISTIC",
       "invariants": ["NO_VENDOR_LOCK_IN"],
       "node_output_satisfies": false
@@ -99,7 +99,7 @@
       "stage": "8.10",
       "id": "EVALUATION",
       "activity": "Trajectory- and outcome-level evaluation of graph runs before any reliance claim.",
-      "control": "Vendor evaluation vocabulary as reference; Enterprise acceptance thresholds are a future L2/implementation decision.",
+      "control": "Vendor evaluation vocabulary as reference; governance acceptance thresholds are a future L2/implementation decision.",
       "control_kind": "VERIFICATION",
       "invariants": ["NO_DESIGN_REFERENCE_AS_PRODUCTION_EVIDENCE"],
       "node_output_satisfies": false
@@ -108,7 +108,7 @@
       "stage": "8.11",
       "id": "SECURITY",
       "activity": "Identity/authorization, guardrails, sandboxed execution, network perimeter.",
-      "control": "Six-ring security doctrine (SAL-ENTERPRISE-6-RING-SECURITY-IMPLEMENTATION-STACKED-001 and addenda), controlling.",
+      "control": "Six-ring security doctrine (PARALLEL-6-RING-SECURITY-IMPLEMENTATION-STACKED-001 and addenda), controlling.",
       "control_kind": "POLICY",
       "invariants": ["NO_SECURITY_MODEL_FORK"],
       "node_output_satisfies": false
@@ -126,7 +126,7 @@
       "stage": "8.13",
       "id": "OBSERVABILITY",
       "activity": "Trace/log every node execution, gate evaluation and state transition.",
-      "control": "Parent L2 section 3.10 and existing Enterprise observability doctrine; vendor telemetry integration is a reference pattern, not an adopted dependency.",
+      "control": "Parent L2 section 3.10 and existing governance observability doctrine; vendor telemetry integration is a reference pattern, not an adopted dependency.",
       "control_kind": "POLICY",
       "invariants": ["NO_VENDOR_LOCK_IN"],
       "node_output_satisfies": false
@@ -135,7 +135,7 @@
       "stage": "8.14",
       "id": "LIVE_DASHBOARD",
       "activity": "Operator-visible projection of actual graph/node runtime state.",
-      "control": "Extend L1-ENTERPRISE-L1-L4-WORKFLOW-OPERATOR-DASHBOARD-001; the dashboard shows where work stands, it does not decide where work moves.",
+      "control": "Extend L1-L1-L4-WORKFLOW-OPERATOR-DASHBOARD-001; the dashboard shows where work stands, it does not decide where work moves.",
       "control_kind": "POLICY",
       "invariants": ["NO_DUPLICATE_DASHBOARD"],
       "node_output_satisfies": false
