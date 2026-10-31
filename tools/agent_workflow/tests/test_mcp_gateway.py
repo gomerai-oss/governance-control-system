@@ -450,6 +450,47 @@ class HardeningTests(GatewayCase):
         self.assertEqual(body["citations"], [])
 
 
+class SecretsBoundaryTests(GatewayCase):
+    """Every tool result passes the secrets boundary's context check before the agent sees it."""
+
+    TOKEN = "gh" + "p_" + "R" * 36
+
+    def call_retrieve(self, query="where is the quorum rule"):
+        # Results point at sources (path, span, hash) and echo the request; the echo is what can carry a secret.
+        self.write("governance/doctrine/ALPHA-001.md", doc("Alpha doctrine", "the quorum rule for reviews"))
+        gateway = self.gateway(self.write_session(session_doc("a2")))
+        arguments = {"keywords": ["quorum"], "query": query}
+        return self.run_messages(gateway, [initialize(), INITIALIZED, call(2, "retrieve", arguments)])[1]
+
+    def test_a_secret_in_a_result_is_redacted_and_the_decision_logged(self):
+        response = self.call_retrieve(f"quorum rule; deploy key {self.TOKEN}")
+        result = response["result"]
+        self.assertFalse(result["isError"], result)
+        self.assertNotIn(self.TOKEN, json.dumps(response))
+        self.assertIn("[REDACTED:github-token:", result["content"][0]["text"])
+        self.assertEqual(json.loads(result["content"][0]["text"]), result["structuredContent"])
+        (entry,) = self.entries("boundary")
+        self.assertEqual(entry["record"]["checkpoint"], "context")
+        self.assertTrue(entry["record"]["allow"])
+        self.assertEqual([f["rule"] for f in entry["record"]["findings"]], ["github-token"])
+        self.assertNotIn(self.TOKEN, (self.evidence / server.DECISIONS_FILE).read_text())
+
+    def test_a_clean_result_is_unchanged_and_still_logged(self):
+        response = self.call_retrieve()
+        self.assertEqual(response["result"]["structuredContent"]["disposition"], "ALLOW")
+        (entry,) = self.entries("boundary")
+        self.assertEqual(entry["record"]["findings"], [])
+
+    def test_a_boundary_failure_withholds_the_result(self):
+        from unittest import mock
+        with mock.patch.object(server.boundary.detector, "scan", side_effect=RuntimeError("down")):
+            response = self.call_retrieve()
+        result = response["result"]
+        self.assertTrue(result["isError"], result)
+        self.assertNotIn("ALLOW", json.dumps(result), "no result reaches the agent")
+        self.assertEqual(self.log(), [], "the evidence log refuses unchecked entries, so the call is refused first")
+
+
 class ShippedDataTests(unittest.TestCase):
     def test_policy_adds_mission_seats_and_read_only_mission_grants(self):
         policy = P.load_file()

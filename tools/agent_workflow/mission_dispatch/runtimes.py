@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
+from secrets_boundary import paths as secret_paths
+
 from .binding import GATEWAY_SERVER as GATEWAY, Bound
 
 CLAUDE_CODE = "claude-code"
@@ -102,6 +104,18 @@ def _safe(path: Path) -> str:
     return text
 
 
+_SECRET_GLOB = re.compile(r"[A-Za-z0-9_.*/-]+")
+
+
+def secret_globs() -> Tuple[str, ...]:
+    """The secrets boundary's credential paths, as globs inside the checkout; one that cannot be placed fails."""
+    globs = secret_paths.read_denials()
+    for glob in globs:
+        if not _SECRET_GLOB.fullmatch(glob) or glob.startswith("/") or ".." in glob.split("/"):
+            raise SandboxError(f"credential glob {glob!r} cannot be placed in a permission rule")
+    return globs
+
+
 def claude_path(path: Path, home: Path) -> str:
     """Claude Code path rule: ``~/rel`` under home, ``//abs`` elsewhere."""
     resolved = Path(_safe(path))
@@ -122,6 +136,8 @@ def claude_argv(checkout: Path, prompt: str, home: Path, binary: str = "claude",
         *(f"Edit(~/{rel})" for rel in HOME_SECRET_PATHS),
         f"Edit({ws}/.git)",
         f"Edit({ws}/.git/**)",
+        *(f"{verb}({ws}/{glob})" for verb in ("Read", "Edit") for glob in secret_globs()),
+        "Read(//proc/**)",
         "Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit",
         *(bound.denied if bound is not None else ()),
     ]
@@ -165,6 +181,8 @@ def cursor_permissions(checkout: Path, home: Path, bound: Optional[Bound] = None
         *(f"Write({root}/**)" for root in CURSOR_DEFAULT_WRITABLE_ROOTS if not ws.startswith(root + "/")),
         *(f"Read({home_s}/{rel})" for rel in HOME_SECRET_PATHS),
         *(f"Write({home_s}/{rel})" for rel in HOME_SECRET_PATHS),
+        *(f"{verb}({ws}/{glob})" for verb in ("Read", "Write") for glob in secret_globs()),
+        "Read(/proc/**)",
         *narrowed,
     ]
     for rule in allow + deny:

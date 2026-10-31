@@ -15,6 +15,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mission_dispatch.dispatch import (
+    BOUNDARY_OUT,
+    CANARY_ENV,
     DispatchError,
     Job,
     Survey,
@@ -39,8 +41,10 @@ from mission_dispatch.dispatch import (
     prepare,
     publish,
     run_agent,
+    run_canary,
     run_checks,
     scrub,
+    added_content,
     still_wanted,
     task_text,
 )
@@ -843,6 +847,63 @@ class FlowTests(unittest.TestCase):
         scrub(log, [])  # no logins: nothing to do
         self.assertEqual(log.read_text(), text)
 
+    def test_each_run_gets_a_fresh_canary_and_a_change_carrying_it_is_refused(self):
+        job = self.job()
+        work = self.agent(job, f'pathlib.Path("tools/demo/a.py").write_text("x = " + repr(os.environ["{CANARY_ENV}"]))')
+        canary = run_canary(work)
+        self.assertRegex(canary, r"^SBX-CANARY-[0-9a-f]{32}$")
+        self.assertNotIn(canary, (work / "checkout" / INBOX_DIR / "TASK.md").read_text())
+        other = self.agent(self.job(), "pass", name="other")
+        self.assertNotEqual(run_canary(other), canary, "a fresh canary per run")
+        with self.assertRaisesRegex(DispatchError, "secrets boundary refused the change .*tools/demo/a.py: known"):
+            collect(job, work, self.root / "out", self.env)
+        record = json.loads((self.root / "out" / BOUNDARY_OUT).read_text())
+        self.assertFalse(record["allow"])
+        self.assertNotIn(canary, (self.root / "out" / BOUNDARY_OUT).read_text())
+        self.assertFalse((self.root / "out" / "change.patch").exists(), "nothing is handed on")
+
+    def test_a_change_adding_a_credential_shaped_value_or_file_is_refused(self):
+        token = "gh" + "p_" + "Z" * 36
+        cases = {
+            "token": f'pathlib.Path("tools/demo/a.py").write_text("t = {token!r}")',
+            "env file": 'pathlib.Path("tools/demo/.env").write_text("A=1")',
+            "message": f'pathlib.Path("tools/demo/a.py").write_text("x")\n'
+                       f'pathlib.Path(".mission-dispatch/COMMIT_MSG").write_text("Build\\n\\n{token}\\n")',
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                job = self.job()
+                work = self.agent(job, body, name=f"w-{abs(hash(name))}")
+                with self.assertRaisesRegex(DispatchError, "secrets boundary refused"):
+                    collect(job, work, self.root / f"out-{abs(hash(name))}", self.env)
+
+    def test_a_clean_change_passes_the_boundary_and_records_it(self):
+        job = self.job()
+        result = self.run_through(job, self.A2_BUILD)
+        self.assertEqual(result["status"], "published")
+        record = json.loads((self.root / "out" / BOUNDARY_OUT).read_text())
+        self.assertEqual((record["checkpoint"], record["allow"], record["findings"]), ("output", True, []))
+        self.assertEqual(json.loads((self.root / "out" / "result.json").read_text())["boundary"],
+                         {"allow": True, "findings": 0})
+
+    def test_only_added_lines_are_the_agents_output(self):
+        key = "AK" + "IA" + "B" * 16
+        patch = "\n".join([
+            "diff --git a/tools/demo/f.py b/tools/demo/f.py", "--- a/tools/demo/f.py", "+++ b/tools/demo/f.py",
+            "@@ -1,2 +1,2 @@", f" FIXTURE = {key!r}", "-x = 1", "+x = 2",
+            "diff --git a/tools/demo/g.bin b/tools/demo/g.bin", "GIT binary patch", "literal 3", "zcmZ"])
+        (self.root / "tools/demo").mkdir(parents=True)
+        (self.root / "tools/demo/g.bin").write_bytes(b"\x00\x01")
+        self.assertEqual(added_content(patch, self.root), {"tools/demo/f.py": b"x = 2", "tools/demo/g.bin": b"\x00\x01"})
+
+    def test_the_log_is_cleared_of_credential_shaped_values_too(self):
+        token = "gh" + "s_" + "Q" * 36
+        log = self.root / "agent.log"
+        log.write_text(f"saw {token} here\n")
+        scrub(log, [])
+        self.assertNotIn(token, log.read_text())
+        self.assertIn("[REDACTED:github-token:", log.read_text())
+
     def test_checks_run_and_report_for_a3(self):
         job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", self.base, ("tools/demo/**",), "t",
                   ("python3 tools/demo/app.py", "exit 4", "env | grep -c TOKEN; exit 0"))
@@ -1146,6 +1207,31 @@ class BindingTests(unittest.TestCase):
         with self.assertRaisesRegex(binding.BindingError, "refusing to reuse"):
             binding.bind(job, self.work, self.work / "checkout", self.root, self.NOW, FakeBinder())
 
+
+
+class CredentialPathDenialTests(unittest.TestCase):
+    def test_both_runtimes_deny_the_boundarys_credential_paths(self):
+        from secrets_boundary import paths
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            checkout = home / "job" / "checkout"
+            checkout.mkdir(parents=True)
+            argv = runtimes.claude_argv(checkout, "go", home)
+            denied = [a.split("=", 1)[1] for a in argv if a.startswith("--disallowedTools=")]
+            perms = runtimes.cursor_permissions(checkout, home)
+            for glob in paths.read_denials():
+                with self.subTest(glob=glob):
+                    self.assertIn(f"Read(~/job/checkout/{glob})", denied)
+                    self.assertIn(f"Edit(~/job/checkout/{glob})", denied)
+                    self.assertIn(f"Read({checkout}/{glob})", perms["deny"])
+                    self.assertIn(f"Write({checkout}/{glob})", perms["deny"])
+            self.assertIn("Read(//proc/**)", denied)
+            self.assertIn("Read(/proc/**)", perms["deny"])
+
+    def test_a_glob_that_cannot_be_placed_fails_closed(self):
+        with mock.patch.object(runtimes.secret_paths, "read_denials", return_value=("**/a b",)):
+            with self.assertRaises(runtimes.SandboxError):
+                runtimes.secret_globs()
 
 if __name__ == "__main__":
     unittest.main()
