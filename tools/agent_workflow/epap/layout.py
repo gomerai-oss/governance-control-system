@@ -12,7 +12,7 @@ out of band, so nobody else can rewrite the layout.
 
 Key ids are the acting identity itself:
 
-- Campus App: the registry role (``a1``, ``a2``, ``a3``, ...)
+- agent App: the registry role (``a1``, ``a2``, ``a3``, ...)
 - HITL: ``hitl:<login>``
 - Mission Router: ``router:<login>``
 """
@@ -27,10 +27,10 @@ from epap.signing import is_hex
 PIPELINE_ID = "EPAP-PIPELINE-v1"
 SPEC_ID = "EPAP-EVIDENCE-SPEC-001"
 
-CAMPUS_APP = "campus-app"
+AGENT_APP = "agent-app"
 HITL = "hitl"
 ROUTER = "router"
-PRINCIPAL_KINDS = (CAMPUS_APP, HITL, ROUTER)
+PRINCIPAL_KINDS = (AGENT_APP, HITL, ROUTER)
 
 A1_SPEC = "A1_SPEC"
 HITL_APPROVAL = "HITL_APPROVAL"
@@ -43,7 +43,7 @@ HITL_MERGE = "HITL_MERGE"
 class Step:
     name: str
     role: str
-    # (principal kind, campus role or None for any principal of that kind)
+    # (principal kind, agent role or None for any principal of that kind)
     allowed: Tuple[Tuple[str, Optional[str]], ...]
 
     def admits(self, principal: Mapping[str, str]) -> bool:
@@ -52,10 +52,10 @@ class Step:
 
 
 STEPS: Tuple[Step, ...] = (
-    Step(A1_SPEC, "A1", ((CAMPUS_APP, "a1"), (HITL, None))),
+    Step(A1_SPEC, "A1", ((AGENT_APP, "a1"), (HITL, None))),
     Step(HITL_APPROVAL, "HITL", ((HITL, None),)),
-    Step(A2_BUILD, "A2", ((CAMPUS_APP, "a2"),)),
-    Step(A3_REVIEW, "A3", ((CAMPUS_APP, "a3"),)),
+    Step(A2_BUILD, "A2", ((AGENT_APP, "a2"),)),
+    Step(A3_REVIEW, "A3", ((AGENT_APP, "a3"),)),
     Step(HITL_MERGE, "HITL", ((HITL, None), (ROUTER, None))),
 )
 STEP_NAMES: Tuple[str, ...] = tuple(s.name for s in STEPS)
@@ -64,7 +64,7 @@ LAYOUT_FIELDS = frozenset({"_type", "pipeline", "spec", "mission_id", "owner", "
 KEY_FIELDS = frozenset({"keytype", "scheme", "public", "principal"})
 STEP_FIELDS = frozenset({"name", "role", "functionaries"})
 PRINCIPAL_FIELDS = {
-    CAMPUS_APP: frozenset({"kind", "role", "app_id"}),
+    AGENT_APP: frozenset({"kind", "role", "app_id"}),
     HITL: frozenset({"kind", "login"}),
     ROUTER: frozenset({"kind", "login"}),
 }
@@ -77,8 +77,8 @@ def step(name: str) -> Step:
     raise KeyError(name)
 
 
-def campus_app(role: str, app_id: str) -> dict:
-    return {"kind": CAMPUS_APP, "role": role, "app_id": str(app_id)}
+def agent_app(role: str, app_id: str) -> dict:
+    return {"kind": AGENT_APP, "role": role, "app_id": str(app_id)}
 
 
 def hitl(login: str) -> dict:
@@ -101,7 +101,7 @@ def principal_problem(principal: object) -> Optional[str]:
 
 
 def keyid_for(principal: Mapping[str, str]) -> str:
-    if principal["kind"] == CAMPUS_APP:
+    if principal["kind"] == AGENT_APP:
         return principal["role"]
     return f"{principal['kind']}:{principal['login']}"
 

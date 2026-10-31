@@ -1,7 +1,7 @@
 # MCP-AUTHORIZATION-FABRIC-SPEC-001 — A2 implementation decisions
 
 **Mission:** M-EPAP-FABRIC-001, round 1
-**Built from:** `missions/M-EPAP-FABRIC-001/PLAN.md`, which restates the spec's operative content, with the parent doctrine `governance/doctrine/L1-ENTERPRISE-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001.md` as reference. The spec text itself is not in the checkout.
+**Built from:** `missions/M-EPAP-FABRIC-001/PLAN.md`, which restates the spec's operative content, with the parent doctrine `governance/doctrine/L1-MCP-AUTHORIZATION-FABRIC-GOVERNED-RAG-EPAP-ACCESS-001.md` as reference. The spec text itself is not in the checkout.
 
 The code does not amend the spec. Where the plan leaves a choice open, the choice below fails closed and is recorded here so A1 or HITL can reject it.
 
@@ -31,4 +31,4 @@ There is no `__init__.py`: `mcp_auth` is a namespace package.
 10. **Engine errors fail closed.** An unexpected exception during evaluation is a DENY at the current step with stop 12 (the authorization service could not produce a result).
 11. **Decision records.** Every evaluation emits a `mcp-auth-decision-v1` record holding the nine §5 answers as resolved (`null` where unresolved; the ninth is always `FAIL_CLOSED`), the disposition, the failed step and stop condition, the policy version and digest, the request digest, and a UTC timestamp derived from `now`. `answers.stop_conditions` lists the conditions cleared by the steps that passed and the one triggered.
 12. **EPAP link material.** `records.link_material(record)` returns the `signed` part of an `epap.links` link named `MCP_AUTH_DECISION`. Its materials are the canonical policy and request (`mcp_auth/policy/<sha>.json`, `mcp_auth/requests/<sha>.json`). Its products are those plus the record (`mcp_auth/decisions/<sha>.json`), cumulative as in leg 2. Its byproducts are the record. It is not signed here: signing and pack assembly belong to the enforcement wiring, which is outside this leg.
-13. **Shipped policy binds no identity.** `policy.json` carries the binding classes and action catalog, the governed roles, and read-only role grants resting on the L3 lane's UPG reference. It has no principals, no missions and no mutation grants. With the shipped data, every request is therefore denied (stop 2) until a governed change admits principals and missions. Tests use their own fixture policy.
+13. **Shipped policy binds no identity.** `policy.json` carries the binding classes and action catalog, the governed roles, and read-only role grants resting on the L3 lane's SPEC reference. It has no principals, no missions and no mutation grants. With the shipped data, every request is therefore denied (stop 2) until a governed change admits principals and missions. Tests use their own fixture policy.

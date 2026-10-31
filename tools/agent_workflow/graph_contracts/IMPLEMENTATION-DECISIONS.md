@@ -1,7 +1,7 @@
 # GRAPH-ENGINEERING-CONTRACT-SPEC-001 — A2 implementation decisions
 
 **Mission:** M-EPAP-GRAPH-001, round 2 (round 1 finding fixed: the vendor scan's `description` exemption, item 10)
-**Built from:** `missions/M-EPAP-GRAPH-001/PLAN.md`, which restates the spec's operative content, with the parent directive `governance/doctrine/L1-ENTERPRISE-GRAPH-ENGINEERING-ARCHITECTURE-DIRECTIVE-001.md` (§§5–9) as reference. The spec text itself is not in the checkout.
+**Built from:** `missions/M-EPAP-GRAPH-001/PLAN.md`, which restates the spec's operative content, with the parent directive `governance/doctrine/L1-GRAPH-ENGINEERING-ARCHITECTURE-DIRECTIVE-001.md` (§§5–9) as reference. The spec text itself is not in the checkout.
 
 The code does not amend the spec. Where the plan leaves a choice open, the choice below fails closed and is recorded here so A1 or HITL can reject it.
 

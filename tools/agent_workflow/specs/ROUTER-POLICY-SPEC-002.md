@@ -5,16 +5,16 @@
 **Author:** A1
 **Basis:** Open Policy Agent (OPA) policy-engine model; Kubernetes admission-control architecture. Derived from research, not from any existing implementation.
 **Supersedes:** ROUTER-POLICY-SPEC-001 (withdrawn — written post-hoc from implementation; no ground truth)
-**Amendment 2026-10-19 (A1):** §3d row 1 removed — VQT review *request* without waiver no longer mergeable. A request is not an approval; only an operator waiver authorizes merge.
+**Amendment 2026-10-19 (A1):** §3d row 1 removed — REVIEWER review *request* without waiver no longer mergeable. A request is not an approval; only an operator waiver authorizes merge.
 **Amendment 2026-10-29 (HITL direction):** code the pipeline runs for agent runs, and the permission data it reads, is AUTHORITY. The runtime tool binding (`tools/agent_workflow/tool_selection/`), the MCP gateway the dispatcher launches for agent runs (`mcp_gateway/`), the authorization fabric (`mcp_auth/`), governed retrieval (`retrieval/`) and the three EPAP modules they import (`epap/ed25519.py`, `epap/links.py`, `epap/signing.py`) join the AUTHORITY family in `policy_tables.json`, their data files included (fabric policy, tool-selection matrix, seats, runtime registry, corpus registry, gateway tool catalog). Changing them is a HITL pipeline patch, never mission work. A test pins the gateway's import closure and that data as AUTHORITY, as the workflow import closure already is.
 **Amendment 2026-10-31 (HITL direction):** the secrets boundary (`tools/agent_workflow/secrets_boundary/`) is AUTHORITY under the 2026-10-29 rule: the dispatcher and the MCP gateway import it, so it runs for every agent run.
-**A1 verdict 2026-10-19 ~19:15 CDT:** PASS. SPEC-002 router approved for merge. CCP's defense accepted (BLOCKED_PROTECTION row removed from §3d). CC's 12 findings fixed and committed (9ed5a7cb). CCP's S-1..S-3 implementation committed (11bbb7e7). Gomer ordered: "We have beat this router to death. It goes as is until it breaks and then we will debug it then. Push this to the main." PR opened for merge.
+**A1 verdict 2026-10-19 ~19:15 CDT:** PASS. SPEC-002 router approved for merge. the builder's defense accepted (BLOCKED_PROTECTION row removed from §3d). CC's 12 findings fixed and committed (9ed5a7cb). the builder's S-1..S-3 implementation committed (11bbb7e7). Gomer ordered: "We have beat this router to death. It goes as is until it breaks and then we will debug it then. Push this to the main." PR opened for merge.
 
 ---
 
 ## 1. Architecture
 
-The router is a **Policy Decision Point (PDP)** in the OPA sense. It does not enforce; it decides. Enforcement (merge, block, comment) is the Policy Enforcement Point (PEP) — the GitHub Actions workflow and SAL-3.
+The router is a **Policy Decision Point (PDP)** in the OPA sense. It does not enforce; it decides. Enforcement (merge, block, comment) is the Policy Enforcement Point (PEP) — the GitHub Actions workflow and the merge agent.
 
 Like a Kubernetes validating admission webhook:
 - It intercepts a PR event
@@ -89,21 +89,21 @@ Files in `AUTHORITY` (deny if touched, regardless of class or waiver):
 
 **Rule:** A PR touching `AUTHORITY` is denied. No waiver applies. This is not overridable.
 
-### 3d. SAL-3 merge allowlist
+### 3d. the merge agent merge allowlist
 
-SAL-3 may merge **only** when the router outputs `merge_allowed=true`. The router sets this true **only** for:
+The merge agent may merge **only** when the router outputs `merge_allowed=true`. The router sets this true **only** for:
 
 | PR type | Disposition | Condition |
 |---|---|---|
-| VQT review request | Waived by operator | Valid waiver active |
-| VQT review request | Blocked protection | Waived PR waiting on transient merge state; SAL-3 waits it out |
+| review request | Waived by operator | Valid waiver active |
+| review request | Blocked protection | Waived PR waiting on transient merge state; the merge agent waits it out |
 | Plan | Waived by operator | Valid waiver active; unwaived plans are human-merged |
 | Docs-only | Acknowledged | No waiver needed |
 | Closeout | Acknowledged | No waiver needed |
 
-A VQT review *request* without an operator waiver is not mergeable. A request is not an approval.
+A REVIEWER review *request* without an operator waiver is not mergeable. A request is not an approval.
 
-**Amendment 2026-10-19 (A1, per CCP defense):** The `BLOCKED_PROTECTION` row is removed from §3d. Rationale: the router has no merge-state input (§2); transient blocks are an enforcement concern for SAL-3, not a decision for the router. A transient branch-protection block on a `WAIVED` decision is handled by SAL-3, which retries while the current head still equals the decision's `head_sha`.
+**Amendment 2026-10-19 (A1, per BUILDER defense):** The `BLOCKED_PROTECTION` row is removed from §3d. Rationale: the router has no merge-state input (§2); transient blocks are an enforcement concern for the merge agent, not a decision for the router. A transient branch-protection block on a `WAIVED` decision is handled by the merge agent, which retries while the current head still equals the decision's `head_sha`.
 
 **Everything else → `merge_allowed=false`.** Specifically:
 - Any breach type → false
@@ -141,10 +141,10 @@ Steps execute in this fixed order. The first step that denies stops evaluation.
 | `pr_type` | String identifier | What kind of PR this is |
 | `disposition` | String identifier | What should happen to it |
 | `exit_code` | 0 or 1 | 0 = check passes (green), 1 = check fails (red) |
-| `merge_allowed` | true/false | Whether SAL-3 may merge this PR |
+| `merge_allowed` | true/false | Whether the merge agent may merge this PR |
 | `head_sha` | SHA string | The exact commit this decision applies to |
 
-**Critical distinction:** `exit_code=0` does NOT mean "merge it." It means "the check passes." A PR can have `exit_code=0` and `merge_allowed=false` (e.g., a plan acknowledgment, or a HITL-required change). SAL-3 only merges when `merge_allowed=true` AND the current head matches `head_sha`.
+**Critical distinction:** `exit_code=0` does NOT mean "merge it." It means "the check passes." A PR can have `exit_code=0` and `merge_allowed=false` (e.g., a plan acknowledgment, or a HITL-required change). the merge agent only merges when `merge_allowed=true` AND the current head matches `head_sha`.
 
 ---
 
@@ -155,7 +155,7 @@ These must hold for any implementation. A3 verifies each.
 1. **No green breach.** If any file violates the class permission table, the result is deny (exit 1). No waiver, acknowledgment, or later step changes this.
 2. **Waiver cannot override steps 1–4.** The waiver is only consulted after input integrity, authority, agent-policy, and class-diff checks pass.
 3. **Merge allowed only per §3d.** `merge_allowed=true` only for the listed (type, disposition) pairs. Nothing else.
-4. **Decision binds to SHA.** The output `head_sha` is the SHA that was verified (read before and after listing). SAL-3 must refuse if the current head differs.
+4. **Decision binds to SHA.** The output `head_sha` is the SHA that was verified (read before and after listing). the merge agent must refuse if the current head differs.
 5. **Self-modification denied.** A PR touching `AUTHORITY` files is denied unconditionally.
 6. **Unknown input denied.** Unknown block type, unknown class, unknown diff, missing inputs → deny. Default deny in all dimensions.
 7. **No silent widening.** No code path may set `merge_allowed=true` except through the §3d table lookup.

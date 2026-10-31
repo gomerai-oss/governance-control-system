@@ -24,7 +24,7 @@ SIGNERS = {L.A1_SPEC: "a1", L.HITL_APPROVAL: HITL_ID, L.A2_BUILD: "a2", L.A3_REV
 AUTHORITY = {"plan_approval": "/mission approve 0123456789abcdef", "approved_by": "hitl-operator", "spec": L.SPEC_ID}
 
 REGISTRY_MD = textwrap.dedent("""\
-    # Campus identity registry (test fixture)
+    # Identity registry (test fixture)
 
     | Role | App ID | Installation ID | Status | Permissions |
     |---|---|---|---|---|
@@ -69,9 +69,9 @@ class Fixture:
 
     def __init__(self):
         principals = {
-            "a1": L.campus_app("a1", APP_IDS["a1"]),
-            "a2": L.campus_app("a2", APP_IDS["a2"]),
-            "a3": L.campus_app("a3", APP_IDS["a3"]),
+            "a1": L.agent_app("a1", APP_IDS["a1"]),
+            "a2": L.agent_app("a2", APP_IDS["a2"]),
+            "a3": L.agent_app("a3", APP_IDS["a3"]),
             HITL_ID: L.hitl("hitl-operator"),
             ROUTER_ID: L.router("github-actions[bot]"),
         }
@@ -195,9 +195,9 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(RegistryError):
             parse_registry(doubled)
 
-    @unittest.skipUnless((REPO / "CAMPUS" / "IDENTITY-REGISTRY.md").is_file(), "live registry not in checkout")
+    @unittest.skipUnless((REPO / "registry" / "IDENTITY-REGISTRY.md").is_file(), "live registry not in checkout")
     def test_reads_the_live_registry_format(self):
-        reg = load_registry(REPO / "CAMPUS" / "IDENTITY-REGISTRY.md")
+        reg = load_registry(REPO / "registry" / "IDENTITY-REGISTRY.md")
         self.assertTrue({"a1", "a2", "a3"} <= set(reg))
 
 

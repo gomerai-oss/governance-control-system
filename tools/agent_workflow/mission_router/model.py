@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 ROLES = ("A1", "A2", "A3")
 MAX_ROUNDS_CEILING = 10
 MAX_DEPENDENCIES = 20
-STACK_KINDS = ("SAL", "ISAL")  # unrelated missions / missions with built-in dependencies
+STACK_KINDS = ("PARALLEL", "CHAINED")  # unrelated missions / missions with built-in dependencies
 # Where a stack's passed missions go: all onto the stack branch, landing on the default
 # branch together once the whole stack passed ("stack"), or each on its own ("per-leg").
 LANDINGS = ("stack", "per-leg")
@@ -222,7 +222,7 @@ def parse_manifest(text: Any, expected_id: str) -> Manifest:
     _require(isinstance(deps, list) and len(deps) <= MAX_DEPENDENCIES, f"mission.json: depends_on must list at most {MAX_DEPENDENCIES} missions")
     _require(all(isinstance(d, str) and MISSION_ID_RE.fullmatch(d) for d in deps), "mission.json: depends_on entries must be mission ids")
     _require(len(set(deps)) == len(deps) and expected_id not in deps, "mission.json: depends_on has duplicates or names the mission itself")
-    _require(not deps or stack_kind == "ISAL", "mission.json: only an ISAL mission may declare depends_on; SAL missions are independent")
+    _require(not deps or stack_kind == "CHAINED", "mission.json: only an CHAINED mission may declare depends_on; PARALLEL missions are independent")
 
     checks = data.get("checks", [])
     _require(isinstance(checks, list) and len(checks) <= MAX_CHECKS

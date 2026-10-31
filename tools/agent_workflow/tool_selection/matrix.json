@@ -33,7 +33,7 @@
   },
   "roles": {
     "writer": {
-      "doctrine_row": "CCA / CCP Writer",
+      "doctrine_row": "EXTERNAL_WORKER / BUILDER Writer",
       "read_only": false,
       "separation_rule": null,
       "evidence_classes": ["read", "draft", "write", "execute"],
@@ -49,7 +49,7 @@
       }
     },
     "reviewer": {
-      "doctrine_row": "VQT Reviewer",
+      "doctrine_row": "REVIEWER Reviewer",
       "read_only": true,
       "separation_rule": "WRITER_REVIEWER_SEPARATION",
       "evidence_classes": ["read", "draft"],

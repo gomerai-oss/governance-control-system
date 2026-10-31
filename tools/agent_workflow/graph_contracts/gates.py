@@ -1,7 +1,7 @@
 """The GE gate-criteria table (directive section 8) as data: loading, strict validation, criteria.
 
 The table ships as data (``gates.json`` next to this module): one entry per
-lifecycle stage 8.1-8.14, in order, each naming the Enterprise control the
+lifecycle stage 8.1-8.14, in order, each naming the governance control the
 stage requires. A table document has exactly these fields:
 
 ``schema``  ``"ge-gate-criteria-v1"``
@@ -13,7 +13,7 @@ stage requires. A table document has exactly these fields:
 
 Two entries are load-bearing and checked here when the data loads:
 
-- 8.5 independent VQT review is exact-head and session-independent, completes
+- 8.5 independent REVIEWER review is exact-head and session-independent, completes
   only as ``REVIEW_COMPLETED`` (``REVIEW_REQUESTED`` and the other pending
   states never complete it), and a builder's self-check never satisfies it;
 - 8.6 HITL gates cover at least the merge, activation and reliance boundaries
@@ -44,7 +44,7 @@ STAGES = (
     ("8.2", "GRAPH_CONTRACT_AUTHORING"),
     ("8.3", "TRANSFER_HANDOFF"),
     ("8.4", "AUTHORIZATION_GATES"),
-    ("8.5", "INDEPENDENT_VQT_REVIEW"),
+    ("8.5", "INDEPENDENT_REVIEW"),
     ("8.6", "HITL_GATES"),
     ("8.7", "EPAP_PROVENANCE"),
     ("8.8", "BOUNDED_RECOVERY"),

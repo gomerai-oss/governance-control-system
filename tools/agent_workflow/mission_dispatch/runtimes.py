@@ -48,7 +48,7 @@ CURSOR_CONFIG = ".cursor/cli.json"
 
 # Key material and credentials on this laptop, relative to home. Denied to every runtime.
 HOME_SECRET_PATHS: Tuple[str, ...] = (
-    "campus-keys/**",
+    "secret-keys/**",
     "token-broker/**",
     "mint-*.sh",
     ".git-credentials",
@@ -64,7 +64,7 @@ HOME_SECRET_PATHS: Tuple[str, ...] = (
     ".local/state/mission-dispatch/jobs/**",
 )
 SHELL_SECRET_SUBSTRINGS: Tuple[str, ...] = (
-    "campus-keys", "token-broker", "mint-", ".git-credentials", ".config/gh", ".ssh", ".gnupg", "credentials",
+    "secret-keys", "token-broker", "mint-", ".git-credentials", ".config/gh", ".ssh", ".gnupg", "credentials",
 )
 
 # A checkout that holds any of these could configure the runtime itself (hooks, MCP

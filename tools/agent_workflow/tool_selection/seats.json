@@ -4,14 +4,14 @@
     "A2": {
       "role": "writer",
       "mission_type": "IMPLEMENT",
-      "fabric_role": "CCP",
+      "fabric_role": "BUILDER",
       "principal": "a2",
       "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
     },
     "A3": {
       "role": "reviewer",
       "mission_type": "VERIFY",
-      "fabric_role": "VQT",
+      "fabric_role": "REVIEWER",
       "principal": "a3",
       "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
     }

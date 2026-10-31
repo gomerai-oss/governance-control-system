@@ -120,11 +120,11 @@ class ModelTests(unittest.TestCase):
             "scope github": manifest_doc(scope=[".github/workflows/x.yml"]),
             "scope missions": manifest_doc(scope=["missions/**"]),
             "scope empty": manifest_doc(scope=[]),
-            "sal with deps": manifest_doc(stack={"id": "S-1", "kind": "SAL"}, depends_on=["M-UP-001"]),
+            "parallel with deps": manifest_doc(stack={"id": "S-1", "kind": "PARALLEL"}, depends_on=["M-UP-001"]),
             "deps without stack": manifest_doc(depends_on=["M-UP-001"]),
-            "self dependency": manifest_doc(stack={"id": "S-1", "kind": "ISAL"}, depends_on=[MID]),
+            "self dependency": manifest_doc(stack={"id": "S-1", "kind": "CHAINED"}, depends_on=[MID]),
             "bad stack kind": manifest_doc(stack={"id": "S-1", "kind": "LOOP"}),
-            "bad dep id": manifest_doc(stack={"id": "S-1", "kind": "ISAL"}, depends_on=["lower"]),
+            "bad dep id": manifest_doc(stack={"id": "S-1", "kind": "CHAINED"}, depends_on=["lower"]),
             "not json": "{",
             "not object": "[]",
             "missing": None,
@@ -186,15 +186,15 @@ class ModelTests(unittest.TestCase):
                 parse_manifest(manifest_doc(branch=bad), MID)
 
     def test_config_landing_branches(self):
-        base = {**config(), "l1_capture": {"path": "UPG/Q.md", "branch_prefix": "capture/"}}
+        base = {**config(), "l1_capture": {"path": "change-specs/Q.md", "branch_prefix": "capture/"}}
         self.assertEqual(load_config_from(base | {"landing_branches": ["release"]})["landing_branches"], ["release"])
         for bad in ("release", ["stack/S-9"], ["mission/x"], ["capture/x"], ["a", "a"], ["a b"], [1]):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 load_config_from(base | {"landing_branches": bad})
 
     def test_stack_fields(self):
-        m = parse_manifest(manifest_doc(stack={"id": "S-1", "kind": "ISAL"}, depends_on=["M-UP-001"]), MID)
-        self.assertEqual((m.stack_id, m.stack_kind, m.depends_on), ("S-1", "ISAL", ("M-UP-001",)))
+        m = parse_manifest(manifest_doc(stack={"id": "S-1", "kind": "CHAINED"}, depends_on=["M-UP-001"]), MID)
+        self.assertEqual((m.stack_id, m.stack_kind, m.depends_on), ("S-1", "CHAINED", ("M-UP-001",)))
 
     def test_scope_overlap(self):
         from mission_router.model import scopes_overlap
@@ -508,7 +508,7 @@ class GateTests(unittest.TestCase):
             "authority file": open_pr("A2", 1, files=(("tools/demo/a.py", "added"), (".github/workflows/x.yml", "added"))),
             "router code": open_pr("A2", 1, files=(("tools/agent_workflow/mission_router/gate.py", "modified"),)),
             "mission record": open_pr("A2", 1, files=((f"missions/{MID}/mission.json", "modified"),)),
-            "rename out of authority": open_pr("A2", 1, files=(("tools/demo/w.yaml", "renamed", "governance/reviewer_execution/sal3/temporary-review-waiver.yaml"),)),
+            "rename out of authority": open_pr("A2", 1, files=(("tools/demo/w.yaml", "renamed", "governance/reviewer_execution/merge/temporary-review-waiver.yaml"),)),
             "unsafe path": open_pr("A2", 1, files=(("tools/demo/../../AGENTS.md", "added"),)),
             "wrong author": open_pr("A2", 1, author=A3B),
             "user account with the agent's name": open_pr("A2", 1, author_type="User"),
@@ -1232,27 +1232,27 @@ class RouterLoopTests(unittest.TestCase):
         self.sweep()
         self.assertEqual(self.gh.prs[n]["merged_by"], BOT)
 
-    def test_per_leg_sal_missions_run_side_by_side(self):
-        self.start_mission("M-SAL-ONE", scope=("tools/m-sal-one/**",), stack={"id": "S-1", "kind": "SAL", "landing": "per-leg"})
-        self.start_mission("M-SAL-TWO", scope=("tools/m-sal-two/**",), stack={"id": "S-1", "kind": "SAL", "landing": "per-leg"})
-        self.finish("M-SAL-TWO")
-        self.finish("M-SAL-ONE")
+    def test_per_leg_parallel_missions_run_side_by_side(self):
+        self.start_mission("M-PARALLEL-ONE", scope=("tools/m-parallel-one/**",), stack={"id": "S-1", "kind": "PARALLEL", "landing": "per-leg"})
+        self.start_mission("M-PARALLEL-TWO", scope=("tools/m-parallel-two/**",), stack={"id": "S-1", "kind": "PARALLEL", "landing": "per-leg"})
+        self.finish("M-PARALLEL-TWO")
+        self.finish("M-PARALLEL-ONE")
         tree = self.gh.commits[self.gh.branches["main"]][1]
-        self.assertIn("tools/m-sal-one/app.py", tree)
-        self.assertIn("tools/m-sal-two/app.py", tree)
+        self.assertIn("tools/m-parallel-one/app.py", tree)
+        self.assertIn("tools/m-parallel-two/app.py", tree)
 
     def test_overlapping_scope_cannot_start_while_other_is_active(self):
-        self.start_mission("M-SAL-ONE", scope=("tools/shared/**",), stack={"id": "S-1", "kind": "SAL"})
-        n = self.start_mission("M-SAL-TWO", scope=("tools/shared/sub/**",), stack={"id": "S-1", "kind": "SAL"})
+        self.start_mission("M-PARALLEL-ONE", scope=("tools/shared/**",), stack={"id": "S-1", "kind": "PARALLEL"})
+        n = self.start_mission("M-PARALLEL-TWO", scope=("tools/shared/sub/**",), stack={"id": "S-1", "kind": "PARALLEL"})
         self.assertEqual(self.gh.prs[n]["state"], "open")
         self.assertTrue(any("overlaps" in c for c in self.bot_comments(n)))
 
-    def test_per_leg_isal_waits_for_dependency_then_builds_on_it(self):
-        self.start_mission("M-UP-001", scope=("tools/m-up-001/**",), stack={"id": "S-2", "kind": "ISAL", "landing": "per-leg"})
-        n = self.start_mission("M-DOWN-001", scope=("tools/m-down-001/**",), stack={"id": "S-2", "kind": "ISAL", "landing": "per-leg"},
+    def test_per_leg_chained_waits_for_dependency_then_builds_on_it(self):
+        self.start_mission("M-UP-001", scope=("tools/m-up-001/**",), stack={"id": "S-2", "kind": "CHAINED", "landing": "per-leg"})
+        n = self.start_mission("M-DOWN-001", scope=("tools/m-down-001/**",), stack={"id": "S-2", "kind": "CHAINED", "landing": "per-leg"},
                                depends_on=["M-UP-001"])
         self.assertEqual(self.gh.prs[n]["state"], "open")
-        self.assertTrue(any("ISAL dependency M-UP-001" in c for c in self.bot_comments(n)))
+        self.assertTrue(any("CHAINED dependency M-UP-001" in c for c in self.bot_comments(n)))
         self.finish("M-UP-001")
         self.sweep()
         down_int = "mission/M-DOWN-001/integration"
@@ -1264,8 +1264,8 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(self.gh.prs[n]["merged_by"], BOT)
 
     def test_dependency_cycle_rejected(self):
-        a = self.start_mission("M-CYC-A", scope=("tools/m-cyc-a/**",), stack={"id": "S-3", "kind": "ISAL"}, depends_on=["M-CYC-B"])
-        b = self.start_mission("M-CYC-B", scope=("tools/m-cyc-b/**",), stack={"id": "S-3", "kind": "ISAL"}, depends_on=["M-CYC-A"])
+        a = self.start_mission("M-CYC-A", scope=("tools/m-cyc-a/**",), stack={"id": "S-3", "kind": "CHAINED"}, depends_on=["M-CYC-B"])
+        b = self.start_mission("M-CYC-B", scope=("tools/m-cyc-b/**",), stack={"id": "S-3", "kind": "CHAINED"}, depends_on=["M-CYC-A"])
         for n in (a, b):
             self.assertEqual(self.gh.prs[n]["state"], "open")
             self.assertTrue(any("cycle" in c for c in self.bot_comments(n)))
@@ -1309,9 +1309,9 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(self.gh.prs[n]["merged_by"], BOT)
 
     def test_cancel_after_done_changes_nothing(self):
-        self.start_mission("M-SAL-ONE", scope=("tools/m-sal-one/**",))
-        self.finish("M-SAL-ONE")
-        issue = self.cancel("M-SAL-ONE")
+        self.start_mission("M-PARALLEL-ONE", scope=("tools/m-parallel-one/**",))
+        self.finish("M-PARALLEL-ONE")
+        issue = self.cancel("M-PARALLEL-ONE")
         self.assertIn("mission:done", [l["name"] for l in issue["labels"]])
 
     def test_handoff_names_the_runtime(self):
@@ -1356,8 +1356,8 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(contexts[MID].manifest.roles["A3"].agent, "a3")
 
     def test_survey_skips_finished_missions(self):
-        self.start_mission("M-SAL-ONE", scope=("tools/m-sal-one/**",))
-        self.finish("M-SAL-ONE")
+        self.start_mission("M-PARALLEL-ONE", scope=("tools/m-parallel-one/**",))
+        self.finish("M-PARALLEL-ONE")
         self.start_mission("M-OLD-001", scope=("tools/old/**",))
         self.cancel("M-OLD-001")
         self.assertEqual(MissionRouter(self.gh, config(), CLASSIFY, log=self.logs.append).survey(), {})
@@ -1398,14 +1398,14 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(self.gh.branches["main"], main_before)
 
     def test_finished_mission_gets_no_new_issue_when_the_listing_misses(self):
-        self.start_mission("M-SAL-ONE", scope=("tools/m-sal-one/**",))
-        self.finish("M-SAL-ONE")
+        self.start_mission("M-PARALLEL-ONE", scope=("tools/m-parallel-one/**",))
+        self.finish("M-PARALLEL-ONE")
         self.gh.issue_listing_misses = True
         self.sweep()
-        self.assertEqual(len([i for i in self.gh.issues.values() if i["title"] == "[mission] M-SAL-ONE"]), 1)
+        self.assertEqual(len([i for i in self.gh.issues.values() if i["title"] == "[mission] M-PARALLEL-ONE"]), 1)
         self.drop_tracking_markers(100)  # a mission from before the marks, with no record in config.json
         self.sweep()
-        self.assertEqual(len([i for i in self.gh.issues.values() if i["title"] == "[mission] M-SAL-ONE"]), 1)
+        self.assertEqual(len([i for i in self.gh.issues.values() if i["title"] == "[mission] M-PARALLEL-ONE"]), 1)
 
     def test_listing_backfills_a_missing_mark(self):
         self.start_mission()
@@ -1478,15 +1478,15 @@ class RouterLoopTests(unittest.TestCase):
         (issue,) = [i for i in self.gh.issues.values() if i["title"] == f"[stack] {sid}"]
         return issue
 
-    def open_isal(self, sid="S-9"):
-        stack = {"id": sid, "kind": "ISAL"}
+    def open_chained(self, sid="S-9"):
+        stack = {"id": sid, "kind": "CHAINED"}
         plans = [self.open_plan("M-LEG-001", stack), self.open_plan("M-LEG-002", stack, ["M-LEG-001"]),
                  self.open_plan("M-LEG-003", stack, ["M-LEG-002"])]
         self.sweep()
         return plans
 
-    def test_isal_stack_lands_whole_after_one_approval(self):
-        p1, p2, p3 = self.open_isal()
+    def test_chained_stack_lands_whole_after_one_approval(self):
+        p1, p2, p3 = self.open_chained()
         fingerprint = self.stack_fingerprint(p1)
         for mid in ("M-LEG-001", "M-LEG-002", "M-LEG-003"):
             self.assertIn(f"`{mid}`", [c for c in self.bot_comments(p1) if c.startswith("Stack `")][-1])
@@ -1523,14 +1523,14 @@ class RouterLoopTests(unittest.TestCase):
             (mi,) = [i for i in self.gh.issues.values() if i["title"] == f"[mission] {mid}"]
             self.assertEqual(mi["state"], "closed")
 
-    def test_isal_first_blocker_blocks_everything_and_reports_it(self):
-        p1, p2, p3 = self.open_isal()
+    def test_chained_first_blocker_blocks_everything_and_reports_it(self):
+        p1, p2, p3 = self.open_chained()
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
         main_before = self.gh.branches["main"]
         self.run_loop("M-LEG-001", "S-9")
         self.assertEqual(self.gh.prs[p2]["merged_by"], BOT)
-        n = self.run_loop("M-LEG-002", "S-9", "BLOCKED", ["needs the PMS API key, which no agent holds"])
+        n = self.run_loop("M-LEG-002", "S-9", "BLOCKED", ["needs the vendor API key, which no agent holds"])
         self.assertEqual(self.gh.prs[n]["merged_by"], BOT, "a blocker is recorded on the integration branch")
         self.sweep()
         self.assertEqual(self.gh.prs[p3]["state"], "open", "loop 3 never starts after loop 2's blocker")
@@ -1540,7 +1540,7 @@ class RouterLoopTests(unittest.TestCase):
         self.assertIn("mission:blocked", [l["name"] for l in issue["labels"]])
         body = issue["body"]
         self.assertIn("## Blockers", body)
-        self.assertIn("needs the PMS API key", body)
+        self.assertIn("needs the vendor API key", body)
         self.assertIn(f"#{n}", body)  # where
         self.assertRegex(body, r"`M-LEG-002`\*\*, round 1, 2026-")  # when
         self.assertIn("| 1 | `M-LEG-001` | - | PASS |", body)
@@ -1551,7 +1551,7 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(self.gh.branches["main"], main_before)
 
     def test_closing_a_blocked_stacks_review_closes_it_for_good(self):
-        p1, p2, p3 = self.open_isal()
+        p1, p2, p3 = self.open_chained()
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
         self.run_loop("M-LEG-001", "S-9")
@@ -1565,12 +1565,12 @@ class RouterLoopTests(unittest.TestCase):
         self.sweep()
         self.assertEqual(set(member_issues().values()), {"closed"})
         self.assertEqual(self.stack_issue("S-9")["state"], "closed", "the router does not reopen a closed review")
-        n = self.open_plan("M-LEG-009", {"id": "S-9", "kind": "ISAL"})
+        n = self.open_plan("M-LEG-009", {"id": "S-9", "kind": "CHAINED"})
         self.sweep()
         self.assertTrue(any("restart the plans as a new stack" in c for c in self.bot_comments(n)))
 
     def test_closed_review_releases_the_stacks_files_to_a_new_stack(self):
-        p1, p2, p3 = self.open_isal()
+        p1, p2, p3 = self.open_chained()
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
         self.run_loop("M-LEG-001", "S-9")
@@ -1580,28 +1580,28 @@ class RouterLoopTests(unittest.TestCase):
         self.gh.prs[p3]["state"] = "closed"  # the plan that never started is withdrawn
         self.sweep()
         self.sweep()  # the members' issues are closed now, so the closed stack has no open member left
-        n = self.open_plan("M-NEW-002", {"id": "S-10", "kind": "ISAL"}, scope=("tools/m-leg-002/**", "tools/m-leg-001/x.py"))
+        n = self.open_plan("M-NEW-002", {"id": "S-10", "kind": "CHAINED"}, scope=("tools/m-leg-002/**", "tools/m-leg-001/x.py"))
         self.sweep()
         self.assertFalse(any("overlaps" in c for c in self.bot_comments(n)),
                          "a closed review frees the files of its passed and blocked missions")
         self.stack_fingerprint(n)
 
-    def test_sal_stack_records_a_blocker_and_carries_on(self):
-        stack = {"id": "S-8", "kind": "SAL"}
-        p1, p2 = self.open_plan("M-SAL-AAA", stack), self.open_plan("M-SAL-BBB", stack)
+    def test_parallel_stack_records_a_blocker_and_carries_on(self):
+        stack = {"id": "S-8", "kind": "PARALLEL"}
+        p1, p2 = self.open_plan("M-PARALLEL-AAA", stack), self.open_plan("M-PARALLEL-BBB", stack)
         self.sweep()
         self.gh.comment_as(p2, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
-        self.assertEqual((self.gh.prs[p1]["merged_by"], self.gh.prs[p2]["merged_by"]), (BOT, BOT), "SAL loops run side by side")
-        self.run_loop("M-SAL-AAA", "S-8", "BLOCKED")
+        self.assertEqual((self.gh.prs[p1]["merged_by"], self.gh.prs[p2]["merged_by"]), (BOT, BOT), "PARALLEL loops run side by side")
+        self.run_loop("M-PARALLEL-AAA", "S-8", "BLOCKED")
         self.sweep()
         self.assertIn("mission:stack-active", [l["name"] for l in self.stack_issue("S-8")["labels"]], "the other loop carries on")
-        self.run_loop("M-SAL-BBB", "S-8")
+        self.run_loop("M-PARALLEL-BBB", "S-8")
         self.sweep()
         issue = self.stack_issue("S-8")
         self.assertIn("mission:blocked", [l["name"] for l in issue["labels"]])
         self.assertIn("| PASS |", issue["body"])
-        self.assertNotIn("tools/m-sal-bbb/app.py", self.gh.commits[self.gh.branches["main"]][1], "a blocked stack lands nothing")
+        self.assertNotIn("tools/m-parallel-bbb/app.py", self.gh.commits[self.gh.branches["main"]][1], "a blocked stack lands nothing")
 
     # ---- Amendment 004: one blocked leg tried again on its own; plans checked before approval
     def mission_issue(self, mid):
@@ -1619,24 +1619,24 @@ class RouterLoopTests(unittest.TestCase):
         self.sweep()
         return n
 
-    def blocked_sal(self):
-        stack = {"id": "S-8", "kind": "SAL"}
-        p1, p2 = self.open_plan("M-SAL-AAA", stack), self.open_plan("M-SAL-BBB", stack)
+    def blocked_parallel(self):
+        stack = {"id": "S-8", "kind": "PARALLEL"}
+        p1, p2 = self.open_plan("M-PARALLEL-AAA", stack), self.open_plan("M-PARALLEL-BBB", stack)
         self.sweep()
         self.gh.comment_as(p2, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
-        self.run_loop("M-SAL-AAA", "S-8", "BLOCKED", ["the suite's tearDown raced a background git gc"])
-        self.run_loop("M-SAL-BBB", "S-8")
+        self.run_loop("M-PARALLEL-AAA", "S-8", "BLOCKED", ["the suite's tearDown raced a background git gc"])
+        self.run_loop("M-PARALLEL-BBB", "S-8")
         self.sweep()
         self.assertIn("mission:blocked", [l["name"] for l in self.stack_issue("S-8")["labels"]])
         return p1, p2
 
-    def test_retry_reviews_one_blocked_sal_leg_again_and_lands_the_stack(self):
-        self.blocked_sal()
-        aaa, bbb = self.mission_issue("M-SAL-AAA"), self.mission_issue("M-SAL-BBB")
+    def test_retry_reviews_one_blocked_parallel_leg_again_and_lands_the_stack(self):
+        self.blocked_parallel()
+        aaa, bbb = self.mission_issue("M-PARALLEL-AAA"), self.mission_issue("M-PARALLEL-BBB")
         self.assertTrue(any("/mission retry" in c for c in self.bot_comments(aaa["number"])), "the block says how to retry it")
         self.assertTrue(any("/mission retry" in c for c in self.bot_comments(self.stack_issue("S-8")["number"])))
-        bbb_before = (self.gh.branches["mission/M-SAL-BBB/integration"], bbb["body"])
+        bbb_before = (self.gh.branches["mission/M-PARALLEL-BBB/integration"], bbb["body"])
         main_before = self.gh.branches["main"]
         self.gh.comment_as(aaa["number"], HITL, "/mission retry")
         self.sweep()
@@ -1644,27 +1644,27 @@ class RouterLoopTests(unittest.TestCase):
         self.assertTrue(any("A3 reviews the same build again" in c for c in self.bot_comments(aaa["number"])))
         stack_issue = self.stack_issue("S-8")
         self.assertIn("mission:stack-active", [l["name"] for l in stack_issue["labels"]])
-        self.assertTrue(any(c.startswith("**Stack resumed.**") and "`M-SAL-AAA` (round 2)" in c
+        self.assertTrue(any(c.startswith("**Stack resumed.**") and "`M-PARALLEL-AAA` (round 2)" in c
                             for c in self.bot_comments(stack_issue["number"])))
-        self.assertEqual((self.gh.branches["mission/M-SAL-BBB/integration"], bbb["body"]), bbb_before,
+        self.assertEqual((self.gh.branches["mission/M-PARALLEL-BBB/integration"], bbb["body"]), bbb_before,
                          "the leg that passed is not run again")
         self.assertEqual(self.gh.branches["main"], main_before)
-        n = self.rereview("M-SAL-AAA", "S-8", 2, "PASS")
+        n = self.rereview("M-PARALLEL-AAA", "S-8", 2, "PASS")
         self.assertEqual(self.gh.prs[n]["merged_by"], BOT)
         land = self.gh.open_pr("stack/S-8", "main", A3B)
         self.sweep()
         self.assertEqual(self.gh.prs[land]["merged_by"], BOT)
         tree = self.gh.commits[self.gh.branches["main"]][1]
-        for path in ("tools/m-sal-aaa/app.py", "tools/m-sal-bbb/app.py", "missions/M-SAL-AAA/reviews/round-1.json",
-                     "missions/M-SAL-AAA/reviews/round-2.json"):
+        for path in ("tools/m-parallel-aaa/app.py", "tools/m-parallel-bbb/app.py", "missions/M-PARALLEL-AAA/reviews/round-1.json",
+                     "missions/M-PARALLEL-AAA/reviews/round-2.json"):
             self.assertIn(path, tree)
 
     def test_a_second_block_after_a_retry_is_reported_again(self):
-        self.blocked_sal()
+        self.blocked_parallel()
         number = self.stack_issue("S-8")["number"]
-        self.gh.comment_as(self.mission_issue("M-SAL-AAA")["number"], HITL, "/mission retry")
+        self.gh.comment_as(self.mission_issue("M-PARALLEL-AAA")["number"], HITL, "/mission retry")
         self.sweep()
-        self.rereview("M-SAL-AAA", "S-8", 2, "BLOCKED", ["still blocked: the check fails on every run"])
+        self.rereview("M-PARALLEL-AAA", "S-8", 2, "BLOCKED", ["still blocked: the check fails on every run"])
         self.sweep()
         self.sweep()
         issue = self.stack_issue("S-8")
@@ -1674,8 +1674,8 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(len([c for c in self.bot_comments(number) if c.startswith("**Stack resumed.**")]), 1)
 
     def test_retry_counts_only_from_hitl_and_not_after_the_review_closed(self):
-        self.blocked_sal()
-        aaa = self.mission_issue("M-SAL-AAA")
+        self.blocked_parallel()
+        aaa = self.mission_issue("M-PARALLEL-AAA")
         self.gh.comment_as(aaa["number"], A2B, "/mission retry", "Bot")
         self.gh.comment_as(aaa["number"], "mallory", "/mission retry")
         self.sweep()
@@ -1688,8 +1688,8 @@ class RouterLoopTests(unittest.TestCase):
         self.assertIn("mission:blocked", [l["name"] for l in aaa["labels"]])
         self.assertFalse(any("A3 reviews the same build again" in c for c in self.bot_comments(aaa["number"])))
 
-    def test_retry_of_an_isal_blocker_releases_the_loops_it_held(self):
-        p1, p2, p3 = self.open_isal()
+    def test_retry_of_an_chained_blocker_releases_the_loops_it_held(self):
+        p1, p2, p3 = self.open_chained()
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
         self.run_loop("M-LEG-001", "S-9")
@@ -1726,7 +1726,7 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(self.gh.prs[n]["state"], "open")
 
     def test_one_approval_binds_every_plan_at_its_commit(self):
-        p1, p2, p3 = self.open_isal()
+        p1, p2, p3 = self.open_chained()
         fingerprint = self.stack_fingerprint(p1)
         self.gh.push("mission/M-LEG-002/a1", {"missions/M-LEG-002/PLAN.md": "changed after the approval request"})
         self.gh.comment_as(p1, HITL, f"/mission approve {fingerprint}")
@@ -1735,9 +1735,9 @@ class RouterLoopTests(unittest.TestCase):
         self.assertNotEqual(self.stack_fingerprint(p1), fingerprint, "a new request names the new commits")
 
     def test_a_plan_from_anyone_but_a1_does_not_join_the_stack(self):
-        p1, p2, p3 = self.open_isal()
+        p1, p2, p3 = self.open_chained()
         fingerprint = self.stack_fingerprint(p1)
-        doc = manifest_doc(scope=("tools/m-evil-001/**",), stack={"id": "S-9", "kind": "ISAL"}).replace(MID, "M-EVIL-001")
+        doc = manifest_doc(scope=("tools/m-evil-001/**",), stack={"id": "S-9", "kind": "CHAINED"}).replace(MID, "M-EVIL-001")
         self.gh.push("mission/M-EVIL-001/a1", {"missions/M-EVIL-001/mission.json": doc}, base="main", by=A2B)
         self.gh.open_pr("mission/M-EVIL-001/a1", "main", A2B)
         self.gh.comment_as(p1, HITL, f"/mission approve {fingerprint}")
@@ -1745,7 +1745,7 @@ class RouterLoopTests(unittest.TestCase):
         self.assertEqual(self.gh.prs[p1]["merged_by"], BOT, "a plan from another identity cannot change the stack")
 
     def test_landing_pr_rules(self):
-        p1, _, _ = self.open_isal()
+        p1, _, _ = self.open_chained()
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
         self.run_loop("M-LEG-001", "S-9")
@@ -1851,7 +1851,7 @@ class RouterLoopTests(unittest.TestCase):
 
     def test_per_leg_stacks_in_config_keep_landing_one_by_one(self):
         self.router.per_leg_stacks = frozenset({"S-9"})
-        p1, _, _ = self.open_isal()
+        p1, _, _ = self.open_chained()
         self.assertTrue(any("/mission approve " + self.gh.branches["mission/M-LEG-001/a1"] in c for c in self.bot_comments(p1)))
         self.gh.comment_as(p1, HITL, "/mission approve " + self.gh.branches["mission/M-LEG-001/a1"])
         self.sweep()
@@ -1868,7 +1868,7 @@ class RouterLoopTests(unittest.TestCase):
         self.assertIn("tools/m-leg-001/app.py", self.gh.commits[self.gh.branches["main"]][1])
 
     def test_files_of_an_unlanded_stack_stay_reserved(self):
-        p1, _, _ = self.open_isal()
+        p1, _, _ = self.open_chained()
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
         self.sweep()
         self.run_loop("M-LEG-001", "S-9")  # passed onto the stack branch, not yet on main
@@ -1877,13 +1877,13 @@ class RouterLoopTests(unittest.TestCase):
         self.assertTrue(any("overlaps" in c and "M-LEG-001" in c for c in self.bot_comments(n)))
 
     def test_a_stack_has_one_kind(self):
-        p1 = self.open_plan("M-KIND-AAA", {"id": "S-7", "kind": "SAL"})
-        p2 = self.open_plan("M-KIND-BBB", {"id": "S-7", "kind": "ISAL"})
+        p1 = self.open_plan("M-KIND-AAA", {"id": "S-7", "kind": "PARALLEL"})
+        p2 = self.open_plan("M-KIND-BBB", {"id": "S-7", "kind": "CHAINED"})
         self.sweep()
         self.assertTrue(any("a stack has one kind" in c for c in self.bot_comments(p1) + self.bot_comments(p2)))
 
-    def test_isal_blocker_holds_a_parallel_branch_already_running_and_one_not_started(self):
-        stack = {"id": "S-6", "kind": "ISAL"}
+    def test_chained_blocker_holds_a_parallel_branch_already_running_and_one_not_started(self):
+        stack = {"id": "S-6", "kind": "CHAINED"}
         pa, pb = self.open_plan("M-ROOT-AAA", stack), self.open_plan("M-ROOT-BBB", stack)
         pc = self.open_plan("M-ROOT-CCC", stack)
         self.gh.prs[pc]["draft"] = True  # not ready yet; the approval still covers its commit
@@ -1896,29 +1896,29 @@ class RouterLoopTests(unittest.TestCase):
         self.gh.push("mission/M-ROOT-BBB/a2-r1", {"tools/m-root-bbb/app.py": "v1"}, base=b_integ)
         n = self.gh.open_pr("mission/M-ROOT-BBB/a2-r1", b_integ, A2B)
         self.sweep()
-        self.assertEqual(self.gh.prs[n]["state"], "open", "the first blocker holds everything else in an ISAL")
+        self.assertEqual(self.gh.prs[n]["state"], "open", "the first blocker holds everything else in an CHAINED")
         (issue_b,) = [i for i in self.gh.issues.values() if i["title"] == "[mission] M-ROOT-BBB"]
         self.assertIn("blocked by M-ROOT-AAA", issue_b["body"])
         self.gh.prs[pc]["draft"] = False
         self.sweep()
-        self.assertEqual(self.gh.prs[pc]["state"], "open", "nothing more starts in a blocked ISAL")
+        self.assertEqual(self.gh.prs[pc]["state"], "open", "nothing more starts in a blocked CHAINED")
         self.assertTrue(any("is blocked" in c for c in self.bot_comments(pc)))
 
     def test_a_landed_stack_id_cannot_start_again(self):
-        self.test_isal_stack_lands_whole_after_one_approval()
-        n = self.open_plan("M-LEG-004", {"id": "S-9", "kind": "ISAL"})
+        self.test_chained_stack_lands_whole_after_one_approval()
+        n = self.open_plan("M-LEG-004", {"id": "S-9", "kind": "CHAINED"})
         self.sweep()
         self.assertTrue(any("already landed" in c for c in self.bot_comments(n)))
 
 
 class StackUnitTests(unittest.TestCase):
     def test_stack_landing_is_whole_by_default_and_can_go_back_to_per_leg(self):
-        m = parse_manifest(manifest_doc(stack={"id": "S-1", "kind": "ISAL"}), MID)
+        m = parse_manifest(manifest_doc(stack={"id": "S-1", "kind": "CHAINED"}), MID)
         self.assertEqual((m.landing, m.lands_with_stack), ("stack", True))
-        m = parse_manifest(manifest_doc(stack={"id": "S-1", "kind": "SAL", "landing": "per-leg"}), MID)
+        m = parse_manifest(manifest_doc(stack={"id": "S-1", "kind": "PARALLEL", "landing": "per-leg"}), MID)
         self.assertEqual((m.landing, m.lands_with_stack), ("per-leg", False))
         self.assertFalse(parse_manifest(manifest_doc(), MID).lands_with_stack)
-        for stack in ({"id": "S-1", "kind": "SAL", "landing": "later"}, {"id": "S-1", "kind": "SAL", "x": 1}):
+        for stack in ({"id": "S-1", "kind": "PARALLEL", "landing": "later"}, {"id": "S-1", "kind": "PARALLEL", "x": 1}):
             with self.subTest(stack), self.assertRaises(MissionInputError):
                 parse_manifest(manifest_doc(stack=stack), MID)
 
@@ -2010,7 +2010,7 @@ class AuthorityTests(unittest.TestCase):
                     load_config(path)
 
 
-QUEUE = "UPG/CONTROL_MATRIX/L1-CAPTURE-QUEUE.md"
+QUEUE = "change-specs/CONTROL_MATRIX/L1-CAPTURE-QUEUE.md"
 QUEUE_DOC = "# L1 Capture Queue\n\n## Entries\n\n### CAPTURE-2026-001 — first\n\n- **Status:** DRAFT\n- **Capture:** one\n"
 
 
@@ -2145,7 +2145,7 @@ class CaptureRouteTests(unittest.TestCase):
         self.assertEqual(self.gh.file_at(QUEUE, "main"), QUEUE_DOC + capture_entry(2) + capture_entry(3))
 
     def test_capture_waits_while_a_mission_may_change_the_queue(self):
-        RouterLoopTests.start_mission(self._loop(), scope=("UPG/CONTROL_MATRIX/**",))
+        RouterLoopTests.start_mission(self._loop(), scope=("change-specs/CONTROL_MATRIX/**",))
         n = self.capture()
         self.assertEqual(self.gh.prs[n]["state"], "open")
         self.assertEqual(self.check(n)["status"], "in_progress")
@@ -2155,7 +2155,7 @@ class CaptureRouteTests(unittest.TestCase):
         RouterLoopTests.start_mission(self._loop(), scope=("tools/demo/**",))
         self.assertEqual(self.gh.prs[self.capture()]["state"], "closed")
         loop = self._loop()
-        RouterLoopTests.start_mission(loop, mid="M-DEMO-002", scope=("UPG/CONTROL_MATRIX/**",))
+        RouterLoopTests.start_mission(loop, mid="M-DEMO-002", scope=("change-specs/CONTROL_MATRIX/**",))
         (issue,) = [i for i in self.gh.issues.values() if i["title"] == "[mission] M-DEMO-002"]
         self.gh.comment_as(issue["number"], HITL, "/mission cancel")
         self.sweep()
@@ -2163,7 +2163,7 @@ class CaptureRouteTests(unittest.TestCase):
         self.assertEqual(self.gh.prs[n]["state"], "closed")
 
     def test_blocked_mission_outside_a_stack_does_not_hold_captures(self):
-        RouterLoopTests.start_mission(self._loop(), scope=("UPG/CONTROL_MATRIX/**",))
+        RouterLoopTests.start_mission(self._loop(), scope=("change-specs/CONTROL_MATRIX/**",))
         (issue,) = [i for i in self.gh.issues.values() if i["title"] == f"[mission] {MID}"]
         for _ in range(3):
             self.gh.comment_as(issue["number"], BOT, "**Mission Agent: A2 round 1 did not finish.**\n\n"
@@ -2196,7 +2196,7 @@ class CaptureRouteTests(unittest.TestCase):
         self.assertIn(load_config().get("l1_capture"), (None, {"path": QUEUE, "branch_prefix": "capture/"}))
         for route in ({"path": QUEUE}, {"path": QUEUE, "branch_prefix": "mission/"}, {"path": QUEUE, "branch_prefix": "stack/"},
                       {"path": QUEUE, "branch_prefix": "capture"}, {"path": QUEUE, "branch_prefix": "Capture/"},
-                      {"path": QUEUE, "branch_prefix": ""}, {"path": "UPG/*.md", "branch_prefix": "capture/"},
+                      {"path": QUEUE, "branch_prefix": ""}, {"path": "change-specs/*.md", "branch_prefix": "capture/"},
                       {"path": "../x.md", "branch_prefix": "capture/"}, {"path": QUEUE, "branch_prefix": "capture/", "x": 1},
                       [QUEUE], "capture/"):
             with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
@@ -2302,7 +2302,7 @@ class TargetBranchTests(unittest.TestCase):
         self.assertEqual(self.gh.prs[n]["merged_by"], BOT)
 
     def test_a_stack_starts_from_and_lands_on_its_branch(self):
-        stack = {"id": "S-REL", "kind": "SAL"}
+        stack = {"id": "S-REL", "kind": "PARALLEL"}
         p1 = self.plan("M-REL-001", stack=stack, approve=False)
         self.plan("M-REL-002", stack=stack, approve=False, into="release")  # A1 may open it against its branch too
         self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
@@ -2327,20 +2327,20 @@ class TargetBranchTests(unittest.TestCase):
         self.assertTrue(any("stack S-REL has already landed on release" in c for c in self.bot_comments(n)))
 
     def test_a_stack_has_one_branch(self):
-        stack = {"id": "S-MIX", "kind": "SAL", "landing": "per-leg"}
+        stack = {"id": "S-MIX", "kind": "PARALLEL", "landing": "per-leg"}
         self.plan("M-MIX-001", stack=stack)
         n = self.plan("M-MIX-002", branch=None, stack=stack)
         self.assertEqual(self.gh.prs[n]["state"], "open")
         self.assertTrue(any("stack S-MIX lands on release in M-MIX-001 but on main here" in c for c in self.bot_comments(n)))
 
-    def test_an_isal_dependency_must_land_where_the_mission_builds(self):
+    def test_an_chained_dependency_must_land_where_the_mission_builds(self):
         self.router.per_leg_stacks = frozenset({"S-DEP"})
-        stack = {"id": "S-DEP", "kind": "ISAL"}
+        stack = {"id": "S-DEP", "kind": "CHAINED"}
         self.plan("M-DEP-001", branch=None, stack=stack)
         self.build_and_review("M-DEP-001", "main")
         n = self.plan("M-DEP-002", stack=stack, depends_on=["M-DEP-001"])
         self.assertEqual(self.gh.prs[n]["state"], "open")
-        self.assertTrue(any("ISAL dependency M-DEP-001 landed on main, which this mission does not build on" in c
+        self.assertTrue(any("CHAINED dependency M-DEP-001 landed on main, which this mission does not build on" in c
                             for c in self.bot_comments(n)))
 
     def test_a_plan_carrying_mains_newer_work_is_refused(self):
@@ -2351,7 +2351,7 @@ class TargetBranchTests(unittest.TestCase):
                         "nothing from main reaches the target through a plan")
 
     def test_disagreeing_plans_halt_the_stack_status(self):
-        stack = {"id": "S-TWO", "kind": "SAL"}
+        stack = {"id": "S-TWO", "kind": "PARALLEL"}
         self.plan("M-TWO-001", stack=stack, approve=False)
         self.plan("M-TWO-002", branch="staging", stack=stack, approve=False)
         status = self.router.stack_status("S-TWO")
