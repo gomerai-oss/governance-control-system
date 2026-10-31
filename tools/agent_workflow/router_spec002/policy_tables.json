@@ -44,7 +44,6 @@
       {"exact": "tools/offline_validation/pilot_grant.py"},
       {"exact": "tools/offline_validation/production_grant.py"},
       {"exact": "tools/offline_validation/version.py"},
-      {"exact": "tools/pms_drift_review/pms_drift_review.py"},
       {"exact": "tools/reviewer_execution/conformance.py"},
       {"exact": "tools/reviewer_execution/contracts.py"},
       {"prefix": "tools/reviewer_execution/lifecycle/"},

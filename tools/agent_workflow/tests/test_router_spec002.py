@@ -55,7 +55,7 @@ class RaisingSource:
         raise RuntimeError("api down")
 
 
-def vqt(pr_class=None, **extra):
+def reviewer(pr_class=None, **extra):
     block = {"handoff_block_id": REVIEWER}
     if pr_class is not None:
         block["pr_class"] = pr_class
@@ -71,29 +71,29 @@ class SpecVectorTests(unittest.TestCase):
     """ROUTER-POLICY-SPEC-002 section 7. Columns: pr_type, disposition, reason, exit, merge_allowed."""
 
     VECTORS = [
-        (1, lambda: run([INERT_FILE], vqt("PLAN_ONLY"), False), ("PLAN", "ACKNOWLEDGED", "POLICY_PASS", 0, False)),
-        (2, lambda: run([INERT_FILE, CODE_FILE], vqt("PLAN_ONLY"), True), ("PLAN", "DENIED", "CLASS_MISMATCH", 1, False)),
-        (3, lambda: run([AGENTS_FILE], vqt("DOC_WORKFLOW"), True),
+        (1, lambda: run([INERT_FILE], reviewer("PLAN_ONLY"), False), ("PLAN", "ACKNOWLEDGED", "POLICY_PASS", 0, False)),
+        (2, lambda: run([INERT_FILE, CODE_FILE], reviewer("PLAN_ONLY"), True), ("PLAN", "DENIED", "CLASS_MISMATCH", 1, False)),
+        (3, lambda: run([AGENTS_FILE], reviewer("DOC_WORKFLOW"), True),
          ("REVIEW_REQUEST", "HITL_REQUIRED", "AGENT_POLICY_CHANGE", 0, False)),
-        (4, lambda: run([CODE_FILE], vqt("DOC_WORKFLOW"), True),
+        (4, lambda: run([CODE_FILE], reviewer("DOC_WORKFLOW"), True),
          ("REVIEW_REQUEST", "DENIED", "CLASS_MISMATCH", 1, False)),
-        (5, lambda: run([INERT_FILE], vqt("DOC_WORKFLOW"), True),
+        (5, lambda: run([INERT_FILE], reviewer("DOC_WORKFLOW"), True),
          ("REVIEW_REQUEST", "WAIVED", "OPERATOR_WAIVER", 0, True)),
-        (6, lambda: run([CODE_FILE, "tools/example/other.py"], vqt("BOUNDED_IMPLEMENT"), True),
+        (6, lambda: run([CODE_FILE, "tools/example/other.py"], reviewer("BOUNDED_IMPLEMENT"), True),
          ("REVIEW_REQUEST", "WAIVED", "OPERATOR_WAIVER", 0, True)),
-        (7, lambda: run([WAIVER_CONFIG], vqt("BOUNDED_IMPLEMENT"), True),
+        (7, lambda: run([WAIVER_CONFIG], reviewer("BOUNDED_IMPLEMENT"), True),
          ("REVIEW_REQUEST", "DENIED", "AUTHORITY_VIOLATION", 1, False)),
         (8, lambda: run([INERT_FILE], None, False), ("DOCS_ONLY", "ACKNOWLEDGED", "POLICY_PASS", 0, True)),
         (9, lambda: run([CODE_FILE], None, False), ("DOCS_ONLY", "DENIED", "NO_BLOCK", 1, False)),
         (10, lambda: run([INERT_FILE], {"handoff_block_id": "STOP_ESCALATE"}, False),
          ("ESCALATION", "ACKNOWLEDGED", "POLICY_PASS", 0, False)),
-        (11, lambda: run([CURSOR_RULE], vqt("PLAN_ONLY"), False),
+        (11, lambda: run([CURSOR_RULE], reviewer("PLAN_ONLY"), False),
          ("PLAN", "HITL_REQUIRED", "AGENT_POLICY_CHANGE", 0, False)),
-        (12, lambda: run([INERT_FILE], vqt("DOC_WORKFLOW"), False, shas=(SHA, SHA2)),
+        (12, lambda: run([INERT_FILE], reviewer("DOC_WORKFLOW"), False, shas=(SHA, SHA2)),
          ("UNKNOWN", "DENIED", "DIFF_UNKNOWN", 1, False)),
-        (13, lambda: run([INERT_FILE], vqt("SOMETHING_NEW"), False),
+        (13, lambda: run([INERT_FILE], reviewer("SOMETHING_NEW"), False),
          ("REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
-        (14, lambda: run([INERT_FILE], vqt(), False), ("REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
+        (14, lambda: run([INERT_FILE], reviewer(), False), ("REVIEW_REQUEST", "DENIED", "UNKNOWN_CLASS", 1, False)),
     ]
 
     def test_all_fourteen_vectors(self):
@@ -106,21 +106,21 @@ class SpecVectorTests(unittest.TestCase):
     def test_vector_7_holds_for_every_block_and_waiver(self):
         blocks = [None, {"handoff_block_id": "STOP_ESCALATE"}, {"handoff_block_id": "CLOSEOUT"}]
         blocks += [{"handoff_block_id": "STOP_ESCALATE_TO_HITL"}, {"handoff_block_id": "PLAN"}]
-        blocks += [vqt(c) for c in ALL_CLASSES] + [vqt(), vqt("NOPE")]
+        blocks += [reviewer(c) for c in ALL_CLASSES] + [reviewer(), reviewer("NOPE")]
         for block, waiver in itertools.product(blocks, (True, False)):
             with self.subTest(block=block, waiver=waiver):
                 d = run([INERT_FILE, WAIVER_CONFIG], block, waiver)
                 self.assertEqual((d.reason, d.exit_code, d.merge_allowed), ("AUTHORITY_VIOLATION", 1, False))
 
     def test_vector_12_binds_no_sha(self):
-        d = run([INERT_FILE], vqt("DOC_WORKFLOW"), False, shas=(SHA, SHA2))
+        d = run([INERT_FILE], reviewer("DOC_WORKFLOW"), False, shas=(SHA, SHA2))
         self.assertIsNone(d.head_sha)
         self.assertIsNone(d.file_list_digest)
 
 
 def _scenario_space():
     blocks = [None, {"handoff_block_id": "STOP_ESCALATE"}, {"handoff_block_id": "CLOSEOUT"}, {"handoff_block_id": "X"}, {}]
-    blocks += [vqt(c) for c in ALL_CLASSES] + [vqt(), vqt("plan_only"), vqt(7)]
+    blocks += [reviewer(c) for c in ALL_CLASSES] + [reviewer(), reviewer("plan_only"), reviewer(7)]
     blocks += [{"handoff_block_id": "STOP_ESCALATE", "pr_class": c} for c in ("PLAN_ONLY", "BOUNDED_IMPLEMENT", "NOPE")]
     blocks += [{"handoff_block_id": "STOP_ESCALATE_TO_HITL"}, {"handoff_block_id": "PLAN"}]
     blocks += [{"handoff_block_id": "PLAN", "pr_class": c} for c in ("PLAN_ONLY", "BOUNDED_IMPLEMENT", "NOPE")]
@@ -154,7 +154,7 @@ class InvariantTests(unittest.TestCase):
                     continue
                 for waiver in (True, False):
                     with self.subTest(cls=name, family=family, waiver=waiver):
-                        d = run([INERT_FILE, path], vqt(name), waiver)
+                        d = run([INERT_FILE, path], reviewer(name), waiver)
                         self.assertEqual((d.disposition, d.exit_code, d.merge_allowed), ("DENIED", 1, False))
 
     def test_2_waiver_cannot_override_steps_1_to_4(self):
@@ -231,7 +231,7 @@ class InvariantTests(unittest.TestCase):
             ".GITHUB/codeowners",
         ]
         for path in authority_paths:
-            for block, waiver in itertools.product([None, vqt("BOUNDED_IMPLEMENT"), vqt("IMPLEMENT_ONLY")], (True, False)):
+            for block, waiver in itertools.product([None, reviewer("BOUNDED_IMPLEMENT"), reviewer("IMPLEMENT_ONLY")], (True, False)):
                 with self.subTest(path=path, block=block, waiver=waiver):
                     d = run([path], block, waiver)
                     self.assertEqual((d.reason, d.exit_code, d.merge_allowed), ("AUTHORITY_VIOLATION", 1, False))
@@ -244,7 +244,7 @@ class InvariantTests(unittest.TestCase):
             FileChange("docs/copy.md", "copied", ".github/CODEOWNERS"),
         ]:
             with self.subTest(change=change):
-                d = run([change], vqt("BOUNDED_IMPLEMENT"), True)
+                d = run([change], reviewer("BOUNDED_IMPLEMENT"), True)
                 self.assertEqual(d.reason, "AUTHORITY_VIOLATION")
 
     def test_6_unknown_input_denied(self):
@@ -258,12 +258,12 @@ class InvariantTests(unittest.TestCase):
             ("waiver missing", lambda: run([INERT_FILE], None, None), "INVALID_INPUT"),
             ("waiver string", lambda: run([INERT_FILE], None, "true"), "INVALID_INPUT"),
             ("waiver int", lambda: run([INERT_FILE], None, 1), "INVALID_INPUT"),
-            ("unknown class", lambda: run([INERT_FILE], vqt("SUPER_IMPLEMENT")), "UNKNOWN_CLASS"),
-            ("class case", lambda: run([INERT_FILE], vqt("plan_only")), "UNKNOWN_CLASS"),
-            ("class padded", lambda: run([INERT_FILE], vqt(" PLAN_ONLY")), "UNKNOWN_CLASS"),
-            ("class non-string", lambda: run([INERT_FILE], vqt(["PLAN_ONLY"])), "UNKNOWN_CLASS"),
-            ("missing class", lambda: run([INERT_FILE], vqt()), "UNKNOWN_CLASS"),
-            ("empty class", lambda: run([INERT_FILE], vqt("")), "UNKNOWN_CLASS"),
+            ("unknown class", lambda: run([INERT_FILE], reviewer("SUPER_IMPLEMENT")), "UNKNOWN_CLASS"),
+            ("class case", lambda: run([INERT_FILE], reviewer("plan_only")), "UNKNOWN_CLASS"),
+            ("class padded", lambda: run([INERT_FILE], reviewer(" PLAN_ONLY")), "UNKNOWN_CLASS"),
+            ("class non-string", lambda: run([INERT_FILE], reviewer(["PLAN_ONLY"])), "UNKNOWN_CLASS"),
+            ("missing class", lambda: run([INERT_FILE], reviewer()), "UNKNOWN_CLASS"),
+            ("empty class", lambda: run([INERT_FILE], reviewer("")), "UNKNOWN_CLASS"),
             ("unknown class on optional block",
              lambda: run([INERT_FILE], {"handoff_block_id": "STOP_ESCALATE", "pr_class": "NOPE"}), "UNKNOWN_CLASS"),
             ("incomplete listing", lambda: run([INERT_FILE], None, complete=False), "DIFF_UNKNOWN"),
@@ -305,20 +305,20 @@ class InvariantTests(unittest.TestCase):
 
 class EvaluationOrderTests(unittest.TestCase):
     def test_authority_beats_agent_policy_and_class(self):
-        d = run([AGENTS_FILE, CODE_FILE, WAIVER_CONFIG], vqt("NOPE"), True)
+        d = run([AGENTS_FILE, CODE_FILE, WAIVER_CONFIG], reviewer("NOPE"), True)
         self.assertEqual((d.decided_at_step, d.reason, d.offending_paths), (2, "AUTHORITY_VIOLATION", (WAIVER_CONFIG,)))
 
     def test_agent_policy_beats_class_check(self):
-        d = run([AGENTS_FILE, CODE_FILE], vqt("PLAN_ONLY"), False)
+        d = run([AGENTS_FILE, CODE_FILE], reviewer("PLAN_ONLY"), False)
         self.assertEqual((d.decided_at_step, d.disposition, d.merge_allowed), (3, "HITL_REQUIRED", False))
 
     def test_implement_class_touching_agent_policy_still_hitl(self):
-        d = run([CODE_FILE, ".cursor/rules/new.mdc"], vqt("BOUNDED_IMPLEMENT"), True)
+        d = run([CODE_FILE, ".cursor/rules/new.mdc"], reviewer("BOUNDED_IMPLEMENT"), True)
         self.assertEqual((d.disposition, d.merge_allowed), ("HITL_REQUIRED", False))
 
     def test_waived_plan_merges_unwaived_plan_does_not(self):
         # A1 decision S-1: "Plan / Waived by operator" is mergeable.
-        for block in [vqt("PLAN_ONLY"), {"handoff_block_id": "PLAN"}, {"handoff_block_id": "PLAN", "pr_class": "PLAN_ONLY"}]:
+        for block in [reviewer("PLAN_ONLY"), {"handoff_block_id": "PLAN"}, {"handoff_block_id": "PLAN", "pr_class": "PLAN_ONLY"}]:
             with self.subTest(block=block):
                 d = run([INERT_FILE], block, True)
                 self.assertEqual((d.pr_type, d.disposition, d.exit_code, d.merge_allowed), ("PLAN", "WAIVED", 0, True))
@@ -347,20 +347,20 @@ class EvaluationOrderTests(unittest.TestCase):
                 self.assertEqual(a, b)
                 self.assertFalse(a.merge_allowed)
 
-    def test_waiver_ignored_outside_vqt_review_requests(self):
+    def test_waiver_ignored_outside_reviewer_review_requests(self):
         for block in [None, {"handoff_block_id": "CLOSEOUT"}, {"handoff_block_id": "STOP_ESCALATE"},
                       {"handoff_block_id": "STOP_ESCALATE_TO_HITL"}]:
             with self.subTest(block=block):
                 self.assertEqual(run([INERT_FILE], block, True).disposition, "ACKNOWLEDGED")
 
-    def test_vqt_request_without_waiver_never_merges(self):
+    def test_reviewer_request_without_waiver_never_merges(self):
         # SPEC-002 amendment 2026-10-19: a request is not an approval.
         for pr_class, files in [("IMPLEMENT_ONLY", [CODE_FILE]), ("BOUNDED_IMPLEMENT", [CODE_FILE, TOOL_CONFIG_FILE]),
                                 ("DOC_WORKFLOW", [INERT_FILE, EVIDENCE_FILE])]:
             with self.subTest(pr_class=pr_class):
-                d = run(files, vqt(pr_class), False)
+                d = run(files, reviewer(pr_class), False)
                 self.assertEqual((d.disposition, d.exit_code, d.merge_allowed), ("ACKNOWLEDGED", 0, False))
-                d = run(files, vqt(pr_class), True)
+                d = run(files, reviewer(pr_class), True)
                 self.assertEqual((d.disposition, d.exit_code, d.merge_allowed), ("WAIVED", 0, True))
 
     def test_closeout_carries_inert_only(self):
@@ -388,9 +388,9 @@ class EvaluationOrderTests(unittest.TestCase):
     def test_evidence_takes_precedence_over_inert(self):
         # A1 decision S-3: PROBE_EVIDENCE ranks above INERT, so plans cannot carry evidence Markdown.
         evidence_md = "change-specs/SPEC-X-001/evidence/notes.md"
-        d = run([evidence_md], vqt("PLAN_ONLY"), True)
+        d = run([evidence_md], reviewer("PLAN_ONLY"), True)
         self.assertEqual((d.reason, d.merge_allowed), ("CLASS_MISMATCH", False))
-        d = run([evidence_md], vqt("DOC_WORKFLOW"), True)
+        d = run([evidence_md], reviewer("DOC_WORKFLOW"), True)
         self.assertEqual((d.disposition, d.merge_allowed), ("WAIVED", True))
 
 
@@ -415,7 +415,7 @@ class PathAttackTests(unittest.TestCase):
             "",
         ]:
             with self.subTest(path=path):
-                d = run([path], vqt("BOUNDED_IMPLEMENT"), True)
+                d = run([path], reviewer("BOUNDED_IMPLEMENT"), True)
                 self.assertEqual((d.reason, d.merge_allowed), ("DIFF_UNKNOWN", False))
 
     def test_rejected_previous_path_denies(self):
@@ -639,7 +639,7 @@ class GitHubSourceTests(unittest.TestCase):
         benign = [{"filename": "docs/a.md", "status": "modified"}]
         malicious = [{"filename": WAIVER_CONFIG, "status": "modified"}]
         runner = self.make_runner([SHA, SHA], {SHA: malicious, SHA2: benign})
-        d = evaluate(self.source(runner), vqt("DOC_WORKFLOW"), True)
+        d = evaluate(self.source(runner), reviewer("DOC_WORKFLOW"), True)
         self.assertEqual((d.reason, d.merge_allowed), ("AUTHORITY_VIOLATION", False))
 
     def test_short_listing_is_incomplete(self):
@@ -667,7 +667,7 @@ class GitHubSourceTests(unittest.TestCase):
 
     def test_rename_metadata_carried(self):
         files = [{"filename": "docs/a.md", "status": "renamed", "previous_filename": WAIVER_CONFIG}]
-        d = evaluate(self.source(self.make_runner([SHA, SHA], {SHA: files})), vqt("BOUNDED_IMPLEMENT"), True)
+        d = evaluate(self.source(self.make_runner([SHA, SHA], {SHA: files})), reviewer("BOUNDED_IMPLEMENT"), True)
         self.assertEqual(d.reason, "AUTHORITY_VIOLATION")
 
     def test_bad_identifiers_rejected(self):
