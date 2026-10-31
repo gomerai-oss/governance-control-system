@@ -22,6 +22,7 @@
       {"prefix": "tools/agent_workflow/mcp_gateway/"},
       {"prefix": "tools/agent_workflow/mcp_auth/"},
       {"prefix": "tools/agent_workflow/retrieval/"},
+      {"prefix": "tools/agent_workflow/secrets_boundary/"},
       {"exact": "tools/agent_workflow/epap/ed25519.py"},
       {"exact": "tools/agent_workflow/epap/links.py"},
       {"exact": "tools/agent_workflow/epap/signing.py"},

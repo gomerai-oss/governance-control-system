@@ -50,6 +50,9 @@ from retrieval import corpus as corpus_mod
 from retrieval import records as retrieval_records
 from retrieval import retrieve
 
+from secrets_boundary import gate as boundary
+from secrets_boundary import records as boundary_records
+
 from mcp_gateway import protocol
 from mcp_gateway import session as session_mod
 
@@ -328,9 +331,12 @@ class Gateway:
     # -- evidence ----------------------------------------------------------
 
     def _append(self, entry: Mapping) -> None:
-        line = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+        """Append one entry, secrets redacted: the log leaves the run with its artifact. Unwritable is OSError."""
+        admitted = boundary.admit_context(json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        if not admitted.allow:
+            raise OSError("the secrets boundary failed on an evidence entry")
         with open(self.log_path, "a", encoding="utf-8") as handle:
-            handle.write(line)
+            handle.write(admitted.text + "\n")
             handle.flush()
 
     def _mission(self) -> Optional[dict]:
@@ -394,7 +400,23 @@ class Gateway:
         grant = decision.record["answers"]["sot_authority"]["grant"]
         structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name,
                       "grant": grant["id"], "result": result, "citations": cites}
-        return _tool_result(structured, json.dumps(structured, sort_keys=True), False)
+        return self._admitted(request_id, tool, structured, now)
+
+    def _admitted(self, request_id: str, tool: Tool, structured: dict, now: int) -> dict:
+        """The secrets boundary's context check: every secret in a result is redacted before the agent sees it."""
+        admitted = boundary.admit_context(json.dumps(structured, sort_keys=True))
+        try:
+            self._append({"entry": "boundary", "request_id": request_id, "tool": tool.name,
+                          "mission": self._mission(), "record": boundary_records.record(admitted, now)})
+        except OSError:
+            return _refused(request_id, tool.name, "the evidence log cannot be written; the result is withheld")
+        if not admitted.allow:
+            return _refused(request_id, tool.name, "the secrets boundary failed; the result is withheld")
+        try:
+            redacted = json.loads(admitted.text)
+        except ValueError:
+            return _refused(request_id, tool.name, "the redacted result is not JSON; the result is withheld")
+        return _tool_result(redacted, admitted.text, False)
 
     @staticmethod
     def _denied(request_id: str, tool: Tool, decision: decide.Decision) -> dict:

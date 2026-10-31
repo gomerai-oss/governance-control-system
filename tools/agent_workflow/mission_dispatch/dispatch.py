@@ -33,12 +33,16 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from secrets_boundary import gate as boundary
+from secrets_boundary import records as boundary_records
 
 from mission_router.model import (
     AGENT_RE,
@@ -89,6 +93,9 @@ DEFAULT_TIMEOUT = 3600.0
 MESSAGE_MAX_BYTES = 8192
 PATCH_MAX_BYTES = 5 * 1024 * 1024
 PATCH_FILE, MESSAGE_OUT, RESULT_FILE = "change.patch", "message.txt", "result.json"
+# Secrets boundary: a fresh canary per run (beside the checkout, never in it), given to the agent as a planted
+# secret; the output check refuses any change that carries it, and the record goes out with the change.
+CANARY_FILE, CANARY_ENV, CANARY_PREFIX, BOUNDARY_OUT = "canary", "MISSION_RUN_CANARY", "SBX-CANARY-", "boundary.json"
 # Only regular files: no symbolic links (120000) and no submodules (160000).
 ALLOWED_MODES = ("100644", "100755", "000000")
 
@@ -366,13 +373,62 @@ def leaks(text: str, secrets: Sequence[str]) -> bool:
 
 
 def scrub(path: Path, secrets: Sequence[str]) -> None:
-    """Replace every model login in ``path`` (the agent log) before it can be uploaded."""
-    if not secrets or path.is_symlink() or not path.is_file():
+    """Replace every model login in ``path`` (the agent log), then every other secret the boundary finds."""
+    if path.is_symlink() or not path.is_file():
         return
     text = path.read_text(encoding="utf-8", errors="replace")
     for secret in secrets:
         text = text.replace(secret, "***")
-    path.write_text(text, encoding="utf-8")
+    admitted = boundary.admit_context(text, secrets)
+    path.write_text(admitted.text if admitted.allow else "[agent log withheld: the secrets boundary failed]\n",
+                    encoding="utf-8")
+
+
+def added_content(patch: str, tree: Path) -> Dict[str, bytes]:
+    """What the agent wrote, per path: the patch's added lines, or the whole file when git shows it as binary.
+
+    Lines the change only keeps or removes are not the agent's output, so a credential-shaped fixture already in
+    the repository does not refuse a change that merely touches its file.
+    """
+    added: Dict[str, List[str]] = {}
+    binary: List[str] = []
+    path = ""
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            path = line.rsplit(" b/", 1)[-1]
+            added.setdefault(path, [])
+        elif line.startswith("+++ "):
+            continue
+        elif (line == "GIT binary patch" or line.startswith("Binary files ")) and path:
+            binary.append(path)
+        elif line.startswith("+") and path:
+            added[path].append(line[1:])
+    out = {p: "\n".join(lines).encode("utf-8") for p, lines in added.items()}
+    for p in binary:
+        file = tree / p
+        out[p] = b"" if file.is_symlink() or not file.is_file() else file.read_bytes()
+    return out
+
+
+def plant_canary(root: Path) -> str:
+    """Write this run's canary beside the checkout (read-only) and return it."""
+    value = CANARY_PREFIX + secrets.token_hex(16)
+    path = root / CANARY_FILE
+    path.write_text(value, encoding="utf-8")
+    path.chmod(0o400)
+    return value
+
+
+def run_canary(root: Path) -> str:
+    path = root / CANARY_FILE
+    if path.is_symlink() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def known_secrets(root: Path, environ: Mapping[str, str]) -> List[str]:
+    canary = run_canary(root)
+    return secret_values(environ) + ([canary] if canary else [])
 
 
 # ------------------------------------------------------------------ the task
@@ -591,6 +647,7 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
             (checkout.tree / A2_NOTES_FILE).write_text(
                 notes.encode("utf-8")[:A2_NOTES_MAX_BYTES].decode("utf-8", "replace") + "\n", encoding="utf-8")
     (checkout.tree / TASK_FILE).write_text(task_text(job, default_branch, bool(notes)), encoding="utf-8")
+    plant_canary(root)
     if job.role == "A3" and job.checks:
         report = checks_report / CHECKS_MD if checks_report else None
         if report is None or report.is_symlink() or not report.is_file():
@@ -626,6 +683,9 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
     except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
     env = agent_env(environ, checkout.tree, checkout.git_dir, checkout.empty)
+    canary = run_canary(root)
+    if canary:
+        env[CANARY_ENV] = canary
     try:
         with open(log_path, "w", encoding="utf-8") as out:
             done = subprocess.run(argv, cwd=str(checkout.tree), env=env, stdout=out, stderr=subprocess.STDOUT,
@@ -638,7 +698,7 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
         if job.runtime == CURSOR_CLI:
             remove_cursor_config(checkout.tree)
             binding.remove_cursor_mcp(checkout.tree)
-        scrub(log_path, secret_values(environ))
+        scrub(log_path, known_secrets(root, environ))
     if done.returncode != 0:
         raise DispatchError(f"{job.runtime} exited {done.returncode}")
     return log_path
@@ -670,9 +730,16 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     if leaks(patch, secret_values(environ)) or leaks(message, secret_values(environ)):
         raise DispatchError("the change contains the runtime's model login; refusing to hand it on")
     out_dir.mkdir(parents=True, exist_ok=True)
+    admitted = boundary.admit_output(added_content(patch, checkout.tree), {"message": message},
+                                     known_secrets(root, environ))
+    record = boundary_records.record(admitted, int(time.time()))
+    (out_dir / BOUNDARY_OUT).write_text(boundary_records.dumps(record) + "\n", encoding="utf-8")
+    if not admitted.allow:
+        raise DispatchError(f"the secrets boundary refused the change ({admitted.reason}); refusing to hand it on")
     (out_dir / PATCH_FILE).write_text(patch, encoding="utf-8")
     (out_dir / MESSAGE_OUT).write_text(message, encoding="utf-8")
-    result = {"job": job.key, "verdict": verdict or "", "paths": sorted(c.path for c in changes)}
+    result = {"job": job.key, "verdict": verdict or "", "paths": sorted(c.path for c in changes),
+              "boundary": {"allow": record["allow"], "findings": len(record["findings"])}}
     kept = binding.keep_evidence(root, out_dir)
     if kept:
         result["binding"] = kept
