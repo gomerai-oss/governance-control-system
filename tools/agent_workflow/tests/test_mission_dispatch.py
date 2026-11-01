@@ -48,9 +48,9 @@ from mission_dispatch.dispatch import (
     still_wanted,
     task_text,
 )
-from mission_dispatch import binding, runtimes
+from mission_dispatch import binding, blast, runtimes
 from mission_dispatch.runtimes import CLAUDE_CODE, CURSOR_CLI, INBOX_DIR, SandboxError, agent_env, argv_for
-from mission_dispatch.workspace import git_env
+from mission_dispatch.workspace import Change, git_env
 from secrets_boundary import gate as boundary
 
 from mission_router.model import (failures_since_retry, parse_manifest, verdict_path)
@@ -1011,10 +1011,11 @@ class FlowTests(unittest.TestCase):
 
     def test_checks_as_another_account_get_an_empty_environment(self):
         argv = check_argv("make test", "mission-checks", "/usr/bin:/bin")
-        self.assertEqual(argv[:6], ["sudo", "-n", "-u", "mission-checks", "--", "env"])
-        self.assertIn("-i", argv)
+        self.assertEqual(argv[:5], ["sudo", "-n", "-u", "mission-checks", "--"])
+        self.assertEqual(argv[5:5 + len(blast.limits_argv())], blast.limits_argv(), "capped as that account (§3h)")
+        self.assertEqual(argv[5 + len(blast.limits_argv()):][:2], ["env", "-i"])
         self.assertEqual(argv[-3:], ["bash", "-c", "make test"])
-        self.assertEqual(check_argv("make test", None, "/bin"), ["bash", "-c", "make test"])
+        self.assertEqual(check_argv("make test", None, "/bin"), [*blast.limits_argv(), "bash", "-c", "make test"])
         for bad in ("root; id", "../x", "Mission"):
             with self.assertRaises(DispatchError):
                 check_argv("x", bad, "/bin")
@@ -1029,6 +1030,156 @@ class FlowTests(unittest.TestCase):
         self.assertIsNone(outcome(self.job(), survey_for(AWAIT_A2, head=self.base, blocked=True), lambda b: []),
                           "a failure already on record is not reported twice")
 
+
+
+def completed(argv, code=0, out="", err=""):
+    return subprocess.CompletedProcess(list(argv), code, out, err)
+
+
+class FakeFirewall:
+    """Stands in for sudo iptables and the probe: records every command, answers the probe with ``probe``."""
+
+    def __init__(self, probe=None, fail=None, counters=""):
+        self.calls, self.probe, self.fail, self.counters = [], probe, fail, counters
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        if self.fail and self.fail in argv:
+            return completed(argv, 1, err="iptables: permission denied")
+        if "python3" in argv:
+            return completed(argv, 0, json.dumps(self.probe) + "\n" if self.probe is not None else "Traceback")
+        if "-S" in argv:
+            return completed(argv, 0, self.counters)
+        return completed(argv)
+
+
+CLOSED = {"tcp": "closed", "dns": "closed", "resolver": "closed"}
+
+
+class BlastRadiusTests(unittest.TestCase):
+    """Ring 5 (MISSION-DISPATCH-001 §3h): checks without network, and caps on every check and agent run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.root)}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def network(self, mode, fake):
+        return blast.CheckNetwork("mission-checks", mode, run=fake, probe_host=lambda: "140.82.112.3")
+
+    def test_mode_defaults_to_observe_and_refuses_anything_else(self):
+        self.assertEqual(blast.mode({}), blast.OBSERVE)
+        self.assertEqual(blast.mode({"blast_radius": "enforce"}), blast.ENFORCE)
+        for bad in ("off", "", True, "ENFORCE"):
+            with self.assertRaises(blast.BlastError):
+                blast.mode({"blast_radius": bad})
+
+    def test_a_check_runs_under_the_caps(self):
+        """Attack: a check forks without bound, opens files without bound, or writes a file to fill the disk."""
+        job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", "0" * 40, ("tools/demo/**",), "t",
+                  ("ulimit -u; ulimit -n; ulimit -f",))
+        (result,) = run_checks(job, self.root, self.root / "checks", self.env, timeout=30)
+        self.assertEqual(result["output_tail"].split(),
+                         [str(blast.MAX_PROCESSES), str(blast.MAX_OPEN_FILES), str(blast.MAX_FILE_BYTES // 1024)])
+
+    def test_the_agent_runs_under_the_caps(self):
+        work = self.root / "work"
+        (work / "checkout").mkdir(parents=True)
+        job = Job(MID, "A2", 1, "a2", A2B, "claude-code", "0" * 40, ("tools/demo/**",), "t")
+        with mock.patch("mission_dispatch.dispatch.Checkout") as checkout:
+            checkout.return_value = SimpleNamespace(tree=work / "checkout", git_dir=work / "git", empty=work / "e")
+            log = run_agent(job, work, self.env, self.root, timeout=60, binaries=fake_runtime(self.root, """
+                import resource
+                print("LIMITS", resource.getrlimit(resource.RLIMIT_NPROC)[0], resource.getrlimit(resource.RLIMIT_NOFILE)[0],
+                      resource.getrlimit(resource.RLIMIT_FSIZE)[0])
+            """))
+        self.assertIn(f"LIMITS {blast.MAX_PROCESSES} {blast.MAX_OPEN_FILES} {blast.MAX_FILE_BYTES}", log.read_text())
+
+    def test_claude_code_is_capped_in_turns(self):
+        argv = argv_for(CLAUDE_CODE, self.root / "checkout", "p", self.root)
+        self.assertEqual(argv[argv.index("--max-turns") + 1], str(blast.CLAUDE_MAX_TURNS))
+
+    def test_a_change_of_more_than_300_files_is_refused(self):
+        """Attack: a build so wide that every later check and review is swamped."""
+        job = Job(MID, "A2", 1, "a2", A2B, "claude-code", "0" * 40, ("tools/demo/**",), "t")
+        wide = [Change("A ", f"tools/demo/f{i}.py") for i in range(blast.MAX_CHANGED_FILES + 1)]
+        problems, _ = check_changes(job, self.root, wide, [])
+        self.assertEqual(problems, [f"the change touches {blast.MAX_CHANGED_FILES + 1} files, more than "
+                                    f"{blast.MAX_CHANGED_FILES}"])
+        problems, _ = check_changes(job, self.root, wide[:blast.MAX_CHANGED_FILES], [])
+        self.assertEqual(problems, [])
+
+    def test_the_agent_log_keeps_only_its_tail(self):
+        log = self.root / "agent.log"
+        log.write_bytes(b"a" * 100 + b"END")
+        blast.keep_tail(log, 10)
+        self.assertTrue(log.read_bytes().endswith(b"aaaaaaaEND"))
+        self.assertIn(b"earlier output cut", log.read_bytes())
+        blast.keep_tail(log, 10 ** 6)  # under the limit: unchanged
+        self.assertTrue(log.read_bytes().endswith(b"aaaaaaaEND"))
+
+    def test_enforcing_rejects_all_but_loopback_and_refuses_loopback_dns(self):
+        """Attack: a check reaches the internet directly, or carries data out through the runner's local resolver."""
+        for tool in blast.FIREWALLS:
+            rules = [argv[4:] for argv in blast.firewall_argv("mission-checks", True) if argv[2] == tool]
+            self.assertEqual(rules[0], ["-N", blast.CHAIN])
+            self.assertEqual(rules[-1], ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", "mission-checks",
+                                         "-j", blast.CHAIN], "only that account's packets enter the chain")
+            chain = [" ".join(r) for r in rules[1:-1]]
+            self.assertIn("--dport 53", chain[0])
+            self.assertIn("--dport 53", chain[1])
+            self.assertTrue(chain[0].endswith("-j REJECT") and chain[1].endswith("-j REJECT"))
+            self.assertTrue(chain[2].endswith("-o lo -j ACCEPT"), "loopback DNS is refused before loopback is allowed")
+            self.assertTrue(chain[3].endswith("-j REJECT"))
+        observing = [" ".join(a) for a in blast.firewall_argv("mission-checks", False)]
+        self.assertFalse([a for a in observing if "REJECT" in a], "observing only counts")
+        for bad in ("root; id", "", "-j"):
+            with self.assertRaises(blast.BlastError):
+                blast.firewall_argv(bad, True)
+
+    def test_enforcing_fails_the_job_when_the_probe_gets_through(self):
+        for leak in ("tcp", "dns", "resolver"):
+            fake = FakeFirewall({**CLOSED, leak: "open"})
+            with self.assertRaisesRegex(blast.BlastError, leak):
+                self.network(blast.ENFORCE, fake).close()
+        record = self.network(blast.ENFORCE, FakeFirewall(CLOSED)).close()
+        self.assertEqual((record["network"], record["rules"]), ("closed", "reject"))
+
+    def test_enforcing_fails_the_job_when_the_rules_or_the_probe_fail(self):
+        with self.assertRaisesRegex(blast.BlastError, "could not be closed"):
+            self.network(blast.ENFORCE, FakeFirewall(CLOSED, fail="ip6tables")).close()
+        with self.assertRaisesRegex(blast.BlastError, "not proven closed"):
+            self.network(blast.ENFORCE, FakeFirewall(None)).close()
+
+    def test_observing_records_an_open_network_and_counts_what_the_checks_sent(self):
+        counters = (f"-N {blast.CHAIN}\n-A {blast.CHAIN} -o lo -p udp -m comment --comment {blast.TAG} -c 2 120\n"
+                    f"-A {blast.CHAIN} -o lo -j ACCEPT -c 50 9000\n-A {blast.CHAIN} -m comment --comment {blast.TAG} -c 5 300\n")
+        fake = FakeFirewall({**CLOSED, "tcp": "open"}, counters=counters)
+        net = self.network(blast.OBSERVE, fake)
+        self.assertEqual(net.close()["network"], "open")
+        self.assertIn(["sudo", "-n", "iptables", "-w", "-Z", blast.CHAIN], fake.calls, "the probe is not counted")
+        self.assertEqual(net.report()["packets_sent"], 14, "two firewalls, loopback traffic not counted")
+        broken = self.network(blast.OBSERVE, FakeFirewall(None, fail="iptables")).close()
+        self.assertTrue(broken["rules"].startswith("not installed") and broken["network"] == "open")
+
+    def test_the_network_record_goes_to_a3_with_the_results(self):
+        job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", "0" * 40, ("tools/demo/**",), "t", ("true",))
+        net = self.network(blast.ENFORCE, FakeFirewall(CLOSED))
+        net.close()
+        run_checks(job, self.root, self.root / "checks", self.env, timeout=30, network=net.report)
+        self.assertIn("network: closed (blast radius `enforce`)", (self.root / "checks" / "CHECKS.md").read_text())
+        self.assertEqual(json.loads((self.root / "checks" / "checks.json").read_text())["network"]["network"], "closed")
+
+    def test_the_probe_itself_reports_a_closed_network_as_closed(self):
+        """The probe script, run here against an address nothing listens on, says closed rather than failing."""
+        done = subprocess.run([sys.executable, "-I", "-c", blast.PROBE_SCRIPT, "127.0.0.1", "127.0.0.1", "1"],
+                              capture_output=True, text=True, timeout=60)
+        probe = json.loads(done.stdout.strip().splitlines()[-1])
+        self.assertEqual((probe["tcp"], probe["dns"]), ("closed", "closed"))
+        self.assertIn(probe["resolver"], ("open", "closed"))
 
 
 class LandTests(unittest.TestCase):
