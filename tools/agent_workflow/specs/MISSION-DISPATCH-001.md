@@ -1,6 +1,6 @@
 # MISSION-DISPATCH-001: starting the assigned agent and opening its PR as that agent
 
-**Status:** proposed with the code in `tools/agent_workflow/mission_dispatch/` and `.github/workflows/mission-agent.yml`.
+**Status:** LIVE, with the code in `tools/agent_workflow/mission_dispatch/` and `.github/workflows/mission-agent.yml`: it has started every mission agent since M-ZERO-002 (2026-10-22). Marked current on HITL direction, 2026-11-01 (M-METHOD-001, after-it-lands step 1). Earlier status: proposed.
 **Depends on:** MISSION-ROUTER-001 (the router decides and merges; this only starts agents and opens their PRs).
 **Amendment 002 (2026-10-22, with MISSION-ROUTER-001 Amendment 002):** an A3 PASS goes to the mission's landing branch
 (its stack branch when the stack lands as a whole); A3 may hand in a `BLOCKED` verdict, and A2 records blockers instead
