@@ -510,6 +510,8 @@ class GateTests(unittest.TestCase):
             "mission record": open_pr("A2", 1, files=((f"missions/{MID}/mission.json", "modified"),)),
             "rename out of authority": open_pr("A2", 1, files=(("tools/demo/w.yaml", "renamed", "governance/reviewer_execution/merge/temporary-review-waiver.yaml"),)),
             "unsafe path": open_pr("A2", 1, files=(("tools/demo/../../AGENTS.md", "added"),)),
+            "empty path (stress test F9: deny, never skip)": open_pr("A2", 1, files=(("tools/demo/a.py", "added"), ("", "added"))),
+            "empty previous path": open_pr("A2", 1, files=(("tools/demo/a.py", "renamed", ""),)),
             "wrong author": open_pr("A2", 1, author=A3B),
             "user account with the agent's name": open_pr("A2", 1, author_type="User"),
             "hitl user": open_pr("A2", 1, author=HITL, author_type="User"),

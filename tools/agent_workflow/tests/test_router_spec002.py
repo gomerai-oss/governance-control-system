@@ -576,6 +576,18 @@ class EnforcementSurfaceTests(unittest.TestCase):
             with self.subTest(workflow=rel):
                 self.assertEqual(tables.classify(normalize_path(rel)), "AUTHORITY")
 
+    def test_every_workflow_action_is_pinned_to_a_commit(self):
+        """Stress test F8: a tag can be moved to new code; a 40-hex commit cannot. Every `uses:` names a commit."""
+        live = self.REPO / ".github" / "workflows"
+        workflows = sorted((live if live.is_dir() else self.REPO / "packaging" / "workflows").glob("*.y*ml"))
+        self.assertTrue(workflows)
+        for wf in workflows:
+            for number, line in enumerate(wf.read_text(encoding="utf-8").splitlines(), 1):
+                match = re.match(r"\s*-?\s*uses:\s*([^\s#]+)", line)
+                if match and not match.group(1).startswith("./"):
+                    with self.subTest(workflow=wf.name, line=number):
+                        self.assertRegex(match.group(1), r"@[0-9a-f]{40}$")
+
     def test_dispatcher_gateway_closure_is_authority(self):
         """The MCP gateway the dispatcher launches for agent runs, its import closure and the permission data it and
         the runtime binding read are AUTHORITY: a mission cannot change what an agent may reach."""

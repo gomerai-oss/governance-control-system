@@ -32,6 +32,7 @@ Nothing here merges, touches the default branch, or force-pushes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -833,17 +834,36 @@ def run_checks(job: Job, tree: Path, out_dir: Path, environ: Mapping[str, str],
                 subprocess.run(["sudo", "-n", "pkill", "-KILL", "-u", run_as], capture_output=True)
         results.append({"index": index, "command": command, "exit_code": code,
                         "passed": code == 0, "output_tail": output[-CHECK_OUTPUT_CHARS:]})
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / CHECKS_JSON).write_text(json.dumps({"job": job.key, "commit": job.base_sha, "results": results},
-                                                  indent=2) + "\n", encoding="utf-8")
+    _results_dir(out_dir)
+    _write_result(out_dir / CHECKS_JSON, json.dumps({"job": job.key, "commit": job.base_sha, "results": results},
+                                                    indent=2) + "\n")
     lines = [f"# Checks on `{job.base_sha}`", "",
              f"{sum(r['passed'] for r in results)} of {len(results)} passed.", ""]
     for r in results:
         status = "PASS" if r["passed"] else ("FAIL" if r["exit_code"] is not None else "NOT RUN")
         lines += [f"## {r['index']}. {status} (exit {r['exit_code']})", "", "```", r["command"], "```", "",
                   "Last output:", "", "````text", r["output_tail"].replace("````", "``​``"), "````", ""]
-    (out_dir / CHECKS_MD).write_text("\n".join(lines), encoding="utf-8")
+    _write_result(out_dir / CHECKS_MD, "\n".join(lines))
     return results
+
+
+def _results_dir(out_dir: Path) -> None:
+    """The checks' results folder: never a link, created private, and ours. The code under review ran before this."""
+    if out_dir.is_symlink() or (out_dir.exists() and not out_dir.is_dir()):
+        raise DispatchError(f"{out_dir} is not a plain folder; refusing to write the checks' results there")
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if out_dir.is_symlink() or out_dir.stat().st_uid != os.getuid():
+        raise DispatchError(f"{out_dir} is not this account's own folder; refusing to write the checks' results there")
+
+
+def _write_result(path: Path, text: str) -> None:
+    """Write one results file without following a link someone planted in its place."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise DispatchError(f"cannot write {path.name} safely: {exc.strerror}") from None
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def outcome(job: Job, survey: Survey, pulls_from: Callable[[str], list]) -> Optional[str]:

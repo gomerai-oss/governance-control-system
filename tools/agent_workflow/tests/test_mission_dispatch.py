@@ -979,6 +979,30 @@ class FlowTests(unittest.TestCase):
         self.assertIn("GIT_CONFIG_KEY_0=gc.auto", argv)
         self.assertEqual(argv[-3:], ["bash", "-c", "make test"])
 
+    def test_checks_results_never_follow_a_planted_link(self):
+        """Stress test F6 (hygiene): code under review runs before the results are written, so it may have planted
+        links where they go. Neither a linked folder nor a linked file is written through."""
+        job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", self.base, ("tools/demo/**",), "t", ("true",))
+        target = self.root / "victim.txt"
+        target.write_text("untouched\n")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        linked_dir = self.root / "linked-checks"
+        linked_dir.symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaisesRegex(DispatchError, "not a plain folder"):
+            run_checks(job, self.root, linked_dir, self.env, timeout=30)
+        self.assertEqual(list(elsewhere.iterdir()), [], "nothing was written through the linked folder")
+        out = self.root / "checks"
+        out.mkdir()
+        (out / "CHECKS.md").symlink_to(target)
+        with self.assertRaisesRegex(DispatchError, "cannot write CHECKS.md safely"):
+            run_checks(job, self.root, out, self.env, timeout=30)
+        self.assertEqual(target.read_text(), "untouched\n")
+        fresh = self.root / "fresh-checks"
+        run_checks(job, self.root, fresh, self.env, timeout=30)
+        self.assertEqual(fresh.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((fresh / "CHECKS.md").stat().st_mode & 0o777, 0o600)
+
     def test_check_timeouts_are_reported(self):
         job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", self.base, ("tools/demo/**",), "t", ("sleep 5",))
         results = run_checks(job, self.root, self.root / "checks", self.env, timeout=0.5)

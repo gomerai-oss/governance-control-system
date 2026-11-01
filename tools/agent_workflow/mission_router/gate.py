@@ -198,7 +198,7 @@ def evaluate(
         hitl_reasons.append(f"the promotion diff against {default_branch} is too large to list completely")
     own_manifest = manifest_path(ref.mission_id)  # approved by HITL at A1; A2/A3 cannot change it
     for change in promotion_files:
-        for path in filter(None, (change.path, change.previous_path)):
+        for path in _paths(change):
             if path == own_manifest and change.status == "added":
                 continue
             try:
@@ -265,7 +265,7 @@ def evaluate_landing(
     if not promotion_complete:
         hitl_reasons.append(f"the stack's diff against {default_branch} is too large to list completely")
     for change in promotion_files:
-        for path in filter(None, (change.path, change.previous_path)):
+        for path in _paths(change):
             if path in own_manifests and change.status == "added":
                 continue  # each mission's own plan, approved by HITL when the stack started
             try:
@@ -360,7 +360,7 @@ def _check_a1_files(pr: OpenStagePR, c: _Checks) -> None:
     manifest_file = manifest_path(pr.ref.mission_id)
     seen_manifest = False
     for change in pr.files:
-        for path in filter(None, (change.path, change.previous_path)):
+        for path in _paths(change):
             c.require(path.startswith(root), f"A1 PRs may only change {root}; found {path}")
             c.require(not path.startswith(root + "reviews/"), f"A1 PRs may not write review records ({path})")
         c.require(change.status in _ALLOWED_STATUSES, f"unsupported change type {change.status} for {change.path}")
@@ -398,7 +398,7 @@ def plan_findings(manifest: Manifest, classify) -> list:
 def _check_build_files(files: Sequence[FileChange], manifest: Manifest, classify, c: _Checks) -> None:
     for change in files:
         c.require(change.status in _ALLOWED_STATUSES, f"unsupported change type {change.status} for {change.path}")
-        for path in filter(None, (change.path, change.previous_path)):
+        for path in _paths(change):
             try:
                 family = classify(path)
             except ValueError:
@@ -407,6 +407,11 @@ def _check_build_files(files: Sequence[FileChange], manifest: Manifest, classify
             c.require(not path.startswith("missions/"), f"A2 may not change mission records ({path})")
             c.require(in_scope(path, manifest.build_scope), f"{path} is outside the approved build_scope")
             c.require(family != "AUTHORITY", f"{path} is AUTHORITY under SPEC-002; it cannot go through a mission")
+
+
+def _paths(change: FileChange) -> Tuple[str, ...]:
+    """The change's path and any previous path. An empty path is kept, so the checks refuse it: deny, never skip."""
+    return (change.path,) + ((change.previous_path,) if change.previous_path is not None else ())
 
 
 def classify_or_raise(tables, normalize):

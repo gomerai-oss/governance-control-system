@@ -566,6 +566,23 @@ class KnownSecretTests(GatewayCase):
             self.assertEqual(self.gateway(self.write_session(session_doc("a2"))).known, ())
 
 
+class ArgumentSizeTests(GatewayCase):
+    """Stress test F10: a call's arguments are capped, and an over-limit call runs nothing and logs no arguments."""
+
+    def test_an_oversized_argument_is_refused_before_it_runs_or_is_logged(self):
+        self.doctrine_corpus()
+        session = self.write_session(session_doc("a2"))
+        huge = "q" * (64 * 1024 + 1)
+        responses = self.run_messages(self.gateway(session), [
+            initialize(), INITIALIZED, call(2, "search", {"keywords": ["quorum"], "query": huge}),
+            call(3, "search", {"keywords": ["quorum"], "query": "q" * 1000})])
+        self.assertEqual(responses[1]["error"]["code"], -32602)
+        self.assertIn("at most", responses[1]["error"]["message"])
+        self.assertFalse(responses[2]["result"]["isError"], "a normal call still works")
+        self.assertNotIn(huge, (self.evidence / server.DECISIONS_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(len(self.entries("retrieval")), 1, "only the normal call ran")
+
+
 class TraceTests(GatewayCase):
     """``trace``: the evidence graph's answer for one file, through the fabric like every other tool."""
 

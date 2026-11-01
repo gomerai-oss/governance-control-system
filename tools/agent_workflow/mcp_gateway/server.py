@@ -90,6 +90,9 @@ QUERY_ARGUMENT = "query"
 STRING_ARGUMENTS = ("query", "document_id", "path", "location", "status", "title", "date", "alias")
 LIST_ARGUMENTS = ("keywords",)
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The most a single call's arguments may hold, as UTF-8 JSON. A query or a keyword list is far smaller; anything
+# larger is refused before it is run or written to the evidence log.
+MAX_ARGUMENT_BYTES = 64 * 1024
 
 
 class GatewayError(RuntimeError):
@@ -197,6 +200,12 @@ def argument_problem(schema: Mapping, arguments: Any) -> Optional[str]:
     """Why ``arguments`` do not satisfy a catalog input schema, or None."""
     if not isinstance(arguments, dict):
         return "arguments must be an object"
+    try:
+        size = len(json.dumps(arguments, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return "arguments must be JSON"
+    if size > MAX_ARGUMENT_BYTES:
+        return f"arguments are {size} bytes; at most {MAX_ARGUMENT_BYTES} are accepted"
     properties = schema["properties"]
     unknown = sorted(k for k in arguments if k not in properties)
     if unknown:
