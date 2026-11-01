@@ -1107,6 +1107,10 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(server["args"][:2], ["-m", "mcp_gateway"])
         self.assertEqual(server["env"]["PYTHONPATH"], str(binding.gateway_root()), "the gateway runs from the tooling tree")
         session = Path(server["args"][server["args"].index("--session") + 1])
+        from mission_dispatch.workspace import Checkout
+        git_dir = Path(server["args"][server["args"].index("--git-dir") + 1])
+        self.assertEqual(git_dir, Checkout(self.work).git_dir.resolve(), "trace reads the checkout's own git dir")
+        self.assertNotIn(checkout, git_dir.parents, "the git dir stays outside the work tree")
         for path in (Path(config_path), session):
             self.assertNotIn(checkout, path.resolve().parents, "binding files live outside the checkout")
             self.assertFalse(path.stat().st_mode & 0o222, "binding files are read-only")

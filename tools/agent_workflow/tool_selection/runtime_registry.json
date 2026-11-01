@@ -86,6 +86,14 @@
       "resource": {"repo": "checkout", "path": "."},
       "input_schema": {"type": "object", "properties": {"document_id": {"type": "string"}, "path": {"type": "string"}},
                        "additionalProperties": true}
+    },
+    {
+      "name": "mcp__governed-retrieval__trace",
+      "capability": "artifact_lookup",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
+                       "additionalProperties": true}
     }
   ]
 }

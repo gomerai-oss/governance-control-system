@@ -25,6 +25,7 @@ MODES = (OFF, ENFORCE)
 CONFIG_KEY = "runtime_binding"
 
 BINDING_DIR = "binding"  # under the job root, beside checkout/ and git/
+GIT_DIR = "git"  # the checkout's git dir under the job root (workspace.Checkout.git_dir)
 SESSION_FILE, MCP_FILE, BINDING_FILE, EVIDENCE_DIR = "session.json", "mcp.json", "binding.json", "evidence"
 CURSOR_MCP = ".cursor/mcp.json"
 GATEWAY_SERVER = "governed-retrieval"
@@ -97,12 +98,18 @@ def check(tools: Any, allowed: Any, denied: Any, mcp_tools: Any) -> Tuple[tuple,
     return ordered, allowed, denied, tuple(dict.fromkeys(mcp_tools))
 
 
-def mcp_config(checkout: Path, session: Path, evidence: Path) -> dict:
-    """The one MCP server an agent may use, as the dispatcher writes it: the gateway from the tooling tree."""
+def mcp_config(checkout: Path, session: Path, evidence: Path, git_dir: Optional[Path] = None) -> dict:
+    """The one MCP server an agent may use, as the dispatcher writes it: the gateway from the tooling tree.
+
+    ``git_dir`` is the checkout's git dir, kept outside the work tree; the gateway's ``trace`` reads history there.
+    """
+    args = ["-m", GATEWAY_MODULE, "--root", str(checkout.resolve()), "--session", str(session.resolve()),
+            "--evidence-dir", str(evidence.resolve())]
+    if git_dir is not None:
+        args += ["--git-dir", str(git_dir.resolve())]
     return {"mcpServers": {GATEWAY_SERVER: {
         "command": "python3",
-        "args": ["-m", GATEWAY_MODULE, "--root", str(checkout.resolve()), "--session", str(session.resolve()),
-                 "--evidence-dir", str(evidence.resolve())],
+        "args": args,
         "env": {"PYTHONPATH": str(gateway_root())},
     }}}
 
@@ -147,7 +154,9 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
     _write_readonly(session_path, session)
     config = ""
     if mcp_tools:
-        _write_readonly(out / MCP_FILE, mcp_config(checkout, session_path, evidence))
+        git_dir = Path(root) / GIT_DIR
+        _write_readonly(out / MCP_FILE, mcp_config(checkout, session_path, evidence,
+                                                   git_dir if git_dir.is_dir() else None))
         config = str((out / MCP_FILE).resolve())
     bound = Bound(tools, allowed, denied, mcp_tools, config)
     try:

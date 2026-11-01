@@ -103,6 +103,22 @@
         "additionalProperties": false,
         "minProperties": 1
       }
+    },
+    {
+      "name": "trace",
+      "description": "What made one file what it is: every first-parent change to it at the checkout's HEAD, newest first, each a proven mission (plan, approval, review verdict, specs) or a hand merge or direct commit with no independent review.",
+      "action": "epap.artifact_lookup",
+      "resource": "index:epap-evidence",
+      "corpus_scope": ["corpus:epap-evidence"],
+      "retrieval_method": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Exact repo-relative path"}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
     }
   ]
 }

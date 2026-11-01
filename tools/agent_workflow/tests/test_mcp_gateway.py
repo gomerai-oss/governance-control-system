@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,7 +36,7 @@ NOW = 1_800_000_000
 MISSION = "M-TEST-GW-001"
 BASE_SHA = "0123456789abcdef0123456789abcdef01234567"
 ALL_RESOURCES = ("corpus:governance-doctrine", "index:epap-evidence")
-ALL_TOOLS = ["artifact_status", "cite", "evidence_chain", "retrieve", "search"]
+ALL_TOOLS = ["artifact_status", "cite", "evidence_chain", "retrieve", "search", "trace"]
 RAG_TOOLS = ["cite", "retrieve", "search"]
 
 
@@ -180,7 +181,7 @@ class VectorTests(GatewayCase):
         responses = self.run_messages(self.gateway(session_path), [
             initialize(), INITIALIZED, list_tools(2), call(3, "evidence_chain", {"keywords": ["closure"]})])
         self.assertEqual(sorted(t["name"] for t in responses[1]["result"]["tools"]),
-                         ["artifact_status", "evidence_chain"])
+                         ["artifact_status", "evidence_chain", "trace"])
         result = responses[2]["result"]
         self.assertFalse(result["isError"], result)
         body = result["structuredContent"]
@@ -268,7 +269,7 @@ class VectorTests(GatewayCase):
                 responses = self.run_messages(gateway, [
                     initialize(), list_tools(2), call(3, "retrieve", {"keywords": ["quorum"]})])
                 self.assertEqual(sorted(t["name"] for t in responses[1]["result"]["tools"]),
-                                 ["artifact_status", "evidence_chain"])
+                                 ["artifact_status", "evidence_chain", "trace"])
                 self.assertToolDenied(responses[2], 7)
                 self.assertEqual(self.entries("retrieval", evidence), [])
                 self.assertEqual(gateway.policy["missions"][MISSION]["approvals"],
@@ -539,3 +540,91 @@ class ShippedDataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TraceTests(GatewayCase):
+    """``trace``: the evidence graph's answer for one file, through the fabric like every other tool."""
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_evidence_graph as EG
+        from evidence_graph import history as H
+
+        self.EG = EG
+        (self.outside / "fixture").mkdir()
+        self.fx = EG.Fixture(self.outside / "fixture")
+        seed = self.fx.seed()
+        self.mission = self.fx.mission(seed)
+        side = self.fx.commit(EG.HITL, "hand edit", self.mission["landing"], {EG.APP: "hand\n"})
+        self.hand = self.fx.merge(EG.HITL, "Merge pull request #7 from hitl-user/hand-edit",
+                                  self.mission["landing"], side)
+        self.fx.set_main(self.hand)
+        # The dispatcher's layout: the git dir lies outside the work tree, which has no .git of its own.
+        self.git_dir = self.outside / "git"
+        (self.fx.root / ".git").rename(self.git_dir)
+        self.root = self.fx.root
+        ids = H.load_identities(str(self.fx.config))
+        isolated = {k: self.fx.env[k] for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+        for patcher in (mock.patch.object(H, "load_identities", lambda path=None: ids),
+                        mock.patch.dict(os.environ, isolated)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def trace(self, arguments, seat="a2", **kw):
+        session_path = self.write_session(session_doc(seat))
+        responses = self.run_messages(self.gateway(session_path, **kw),
+                                      [initialize(), INITIALIZED, call(2, "trace", arguments)])
+        return responses[1]
+
+    def test_trace_names_every_change_to_a_file_newest_first_through_a_separate_git_dir(self):
+        result = self.trace({"path": self.EG.APP}, git_dir=self.git_dir)["result"]
+        self.assertFalse(result["isError"], result)
+        body = result["structuredContent"]
+        self.assertEqual(body["grant"], "G-MISSION-BUILDER-EPAP-READ")
+        self.assertEqual(body["result"]["schema"], server.TRACE_SCHEMA)
+        self.assertEqual(body["result"]["head"], self.hand)
+        changes = body["result"]["changes"]
+        self.assertEqual([c["kind"] for c in changes], ["hand_merge", "mission", "direct"])
+        self.assertEqual(changes[0], {"kind": "hand_merge", "commit": self.hand, "pr": 7, "independent_review": "none"})
+        landing = changes[1]
+        self.assertEqual((landing["mission"], landing["commit"], landing["plan"]),
+                         (self.EG.MID, self.mission["landing"], self.mission["plan"]))
+        self.assertEqual((landing["approval"], landing["verdict"], landing["reviewed_sha"], landing["proven"]),
+                         ("router", "PASS", self.mission["merges"][1], True))
+        self.assertEqual(landing["specs"], ["docs/specs/DEMO-SPEC-001.md"])
+        self.assertEqual(len(body["lines"]), 3)
+        self.assertTrue(body["lines"][0].startswith("hand-merge #7 "), body["lines"])
+        self.assertTrue(body["lines"][1].startswith(f"mission {self.EG.MID} landing "), body["lines"])
+        traces = self.entries("trace")
+        self.assertEqual(len(traces), 1)
+        self.assertEqual((traces[0]["path"], traces[0]["head"], traces[0]["changes"]), (self.EG.APP, self.hand, 3))
+        self.assertEqual(self.entries("decision")[0]["record"]["disposition"], "ALLOW")
+        self.assertEqual(len(self.entries("boundary")), 1)
+
+    def test_reviewer_seat_may_trace_too(self):
+        result = self.trace({"path": self.EG.APP}, seat="a3", git_dir=self.git_dir)["result"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["grant"], "G-MISSION-REVIEWER-EPAP-READ")
+
+    def test_a_path_that_never_changed_has_no_changes(self):
+        result = self.trace({"path": "no/such/file.py"}, git_dir=self.git_dir)["result"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["structuredContent"]["result"]["changes"], [])
+
+    def test_no_history_is_refused_and_logged(self):
+        result = self.trace({"path": self.EG.APP})["result"]  # no git dir, and the work tree has no .git
+        self.assertTrue(result["isError"], result)
+        self.assertIn("trace failed (GitError)", result["content"][0]["text"])
+        self.assertEqual([e["reason"] for e in self.entries("trace_error")], ["GitError"])
+        self.assertEqual(self.entries("trace"), [])
+
+    def test_trace_needs_exactly_a_path(self):
+        for arguments in ({}, {"path": self.EG.APP, "keywords": ["x"]}, {"path": 7}):
+            with self.subTest(arguments=arguments):
+                response = self.trace(arguments, git_dir=self.git_dir)
+                self.assertEqual(response["error"]["code"], -32602, response)
+
+    def test_a_git_dir_that_is_not_a_directory_refuses_to_start(self):
+        with self.assertRaises(server.GatewayError):
+            self.gateway(self.write_session(session_doc("a2")), git_dir=self.outside / "missing")
