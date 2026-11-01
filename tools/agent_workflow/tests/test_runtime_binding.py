@@ -50,7 +50,7 @@ NOW = 1_800_000_000
 MISSION_ID = "M-TEST-BIND-001"
 BASE_SHA = "0123456789abcdef0123456789abcdef01234567"
 SEATS = ("A2", "A3")
-GATEWAY_TOOLS = ("retrieve", "search", "cite", "evidence_chain", "artifact_status")
+GATEWAY_TOOLS = ("retrieve", "search", "cite", "evidence_chain", "artifact_status", "trace")
 NEVER = ("Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit")
 PRINCIPAL = {"A2": "a2", "A3": "a3"}
 
@@ -106,7 +106,7 @@ class SpecVectors(Base):
         self.assertEqual(b.allowed_rules, ["Read(**)", "Edit(**)"])
         self.assertEqual(b.denied_rules, [])
         self.assertEqual(set(b.mcp_tools), set(GATEWAY_TOOLS))
-        self.assertEqual(len(b.mcp_tools), 5)
+        self.assertEqual(len(b.mcp_tools), 6)
         text = json.dumps([b.tools, b.allowed_rules, b.denied_rules, b.mcp_tools, b.session, b.audit])
         for name in NEVER:
             self.assertNotIn(name, text)

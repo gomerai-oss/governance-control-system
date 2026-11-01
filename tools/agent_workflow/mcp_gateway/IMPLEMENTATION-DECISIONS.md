@@ -41,3 +41,11 @@ There is no `__init__.py`: `mcp_gateway` is a namespace package, like the earlie
 
     Notifications are never answered. Incoming responses are ignored, because the server sends no requests. Blank lines are skipped. The loop serves until end of input.
 14. **Shipped data changes are exactly D1 and D3.** `mcp_auth/policy.json` gains `MISSION-ROUTER-001` (kind `HITL`), seats `a2`/`a3`, and the four read-only `G-MISSION-*` grants, which mirror the `G-BUILDER-*`/`G-REVIEWER-*` grants except for the authority reference. `retrieval/corpus.json` gains `corpus:epap-evidence`. `mcp_auth/IMPLEMENTATION-DECISIONS.md` resolution 13 ("shipped policy binds no identity") describes the policy before D1. That file is outside this loop's build scope and is left unchanged; the shipped policy still has no missions, so with the shipped data alone every request is still denied until a session overlay admits one.
+
+## `trace` (2026-11-01, hand-merged pipeline patch after M-EVGRAPH-001)
+
+- **Action and grants.** `trace` uses the fabric's existing read action `epap.artifact_lookup` on `index:epap-evidence`, which every mission seat was already granted and no tool used. No policy change was needed, and a DENY still runs nothing.
+- **What it reads.** `evidence_graph` walks the first-parent history of the checkout's `HEAD` once per gateway and proves every landing with rules R1-R8. The identities come from the tooling tree's `mission_router/config.json`, never the checkout's.
+- **Where the history is.** The dispatcher keeps the checkout's git dir outside the work tree and passes it as `--git-dir`. Without `--git-dir`, `trace` reads only a `.git` inside `--root`, and refuses rather than let git search an enclosing directory.
+- **Fail closed.** Any git or proof error returns nothing and logs `trace_error`. A result passes the secrets boundary like every other result.
+- **AUTHORITY.** The gateway now imports `evidence_graph`, so SPEC-002 lists it as AUTHORITY (amendment 2026-11-01).

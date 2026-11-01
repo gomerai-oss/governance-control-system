@@ -17,8 +17,13 @@ session, so the connector surface is never broader than the session's grants
 (stop 1 by construction). ``call_tool(name, arguments)`` builds the full fabric
 request, evaluates it with ``mcp_auth.decide.evaluate`` at the server's clock,
 appends the decision to ``decisions.jsonl`` in the evidence directory, and only
-on ``ALLOW`` runs ``retrieval.retrieve`` over the tool's corpus scope. A DENY
+on ``ALLOW`` runs ``retrieval.retrieve`` over the tool's corpus scope, or, for
+the ``trace`` tool (action ``epap.artifact_lookup``), asks the evidence graph which
+first-parent changes made one file what it is at the checkout's ``HEAD``. A DENY
 runs nothing and is never turned into a narrower ALLOW.
+
+``Gateway(..., git_dir=DIR)`` names the checkout's git dir when it lies outside the
+work tree (the dispatcher's layout); without it, ``trace`` reads ``root`` itself.
 
 Each line of ``decisions.jsonl`` is one JSON object with an ``entry`` field:
 
@@ -30,6 +35,9 @@ Each line of ``decisions.jsonl`` is one JSON object with an ``entry`` field:
 ``retrieval``        after an ALLOW: ``request_id``, ``tool``, ``mission``,
                      ``retrieval_request`` and ``link`` (the ``RETRIEVAL`` link material)
 ``retrieval_error``  after an ALLOW whose retrieval failed: nothing was returned
+``trace``            after an ALLOW of ``trace``: ``request_id``, ``tool``, ``mission``,
+                     ``path``, ``head`` and ``changes`` (how many were returned)
+``trace_error``      after an ALLOW whose trace failed: nothing was returned
 ``refusal``          a call naming no catalog tool: no action to decide, nothing run
 """
 
@@ -43,6 +51,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Tuple
 
+from evidence_graph import __main__ as evidence_cli
+from evidence_graph import graph as evidence_graph
+from evidence_graph import history as evidence_history
 from mcp_auth import decide
 from mcp_auth import policy as P
 from mcp_auth import records as auth_records
@@ -62,6 +73,8 @@ DECISIONS_FILE = "decisions.jsonl"
 CONNECTOR_ID = protocol.SERVER_NAME
 CAN_PRODUCE = ("audit_record",)
 SESSION_STOP = 13
+TRACE_ACTION = "epap.artifact_lookup"
+TRACE_SCHEMA = "evidence-trace-v1"
 
 CATALOG_FIELDS = frozenset({"schema", "catalog_version", "tools"})
 TOOL_FIELDS = frozenset({"name", "description", "action", "resource", "corpus_scope", "retrieval_method",
@@ -238,10 +251,14 @@ def _refused(request_id: str, tool: str, reason: str) -> dict:
 class Gateway:
     def __init__(self, root: Any, session_path: Any, evidence_dir: Any, *,
                  policy_path: Any = P.DEFAULT_PATH, catalog_path: Any = DEFAULT_CATALOG,
-                 corpus_registry: Any = None, clock: Optional[Callable[[], int]] = None):
+                 corpus_registry: Any = None, clock: Optional[Callable[[], int]] = None, git_dir: Any = None):
         self.root = Path(root)
         if not self.root.is_dir():
             raise GatewayError("--root is not a directory")
+        self.git_dir = Path(git_dir) if git_dir is not None else None
+        if self.git_dir is not None and not self.git_dir.is_dir():
+            raise GatewayError("--git-dir is not a directory")
+        self._history: Optional[Tuple[str, Any, list]] = None
         evidence = Path(evidence_dir)
         if not evidence.is_dir() or evidence.is_symlink():
             raise GatewayError("--evidence-dir is not a directory")
@@ -374,6 +391,8 @@ class Gateway:
         problem = argument_problem(tool.input_schema, arguments)
         if problem:
             raise protocol.RpcError(protocol.INVALID_PARAMS, f"invalid params: {problem}")
+        if tool.action == TRACE_ACTION:
+            return self._trace(request_id, tool, arguments["path"], decision, now)
         try:
             retrieval_request = retrieval_records.make_request(
                 request_id,
@@ -400,6 +419,61 @@ class Gateway:
         grant = decision.record["answers"]["sot_authority"]["grant"]
         structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name,
                       "grant": grant["id"], "result": result, "citations": cites}
+        return self._admitted(request_id, tool, structured, now)
+
+    def _walk(self) -> Tuple[str, Any, list]:
+        """The checkout's first-parent history at ``HEAD``, every landing proved; read once per gateway."""
+        if self._history is None:
+            if self.git_dir is None and not (self.root / ".git").exists():
+                # Never let git search upward from the checkout into some enclosing repository.
+                raise evidence_history.GitError("the checkout has no git history of its own")
+            repo = evidence_history.Repo(str(self.root), str(self.git_dir) if self.git_dir else None)
+            repo.ensure_full_history()
+            ids = evidence_history.load_identities()  # the tooling tree's router config, never the checkout's
+            head = repo.resolve("HEAD")
+            self._history = (head, repo, evidence_graph.walk(repo, ids, head))
+        return self._history
+
+    @staticmethod
+    def _change(entry: Any) -> dict:
+        commit = entry.commit.sha
+        if entry.kind == evidence_history.LANDING:
+            proof = entry.proof
+            final = proof.reviews.get(proof.round)
+            return {"kind": "mission", "commit": commit, "mission": proof.mission, "plan": proof.plan_sha,
+                    "approval": proof.approval_kind, "round": proof.round,
+                    "verdict": final.verdict if final else None,
+                    "reviewed_sha": final.reviewed_sha if final else None,
+                    "specs": list(proof.specs), "proven": proof.proven, "rules": proof.rules}
+        if entry.kind == evidence_history.HAND_MERGE:
+            return {"kind": "hand_merge", "commit": commit, "pr": entry.pr, "independent_review": "none"}
+        return {"kind": "direct", "commit": commit, "independent_review": "none"}
+
+    def _trace(self, request_id: str, tool: Tool, path: str, decision: decide.Decision, now: int) -> dict:
+        """Which first-parent changes made ``path`` what it is, newest first; any defect returns nothing."""
+        try:
+            head, repo, entries = self._walk()
+            repo.prefetch_files([e.commit for e in entries])
+            touched = [e for e in reversed(entries) if path in repo.files(e.commit)]
+            changes = [self._change(e) for e in touched]
+            lines = [evidence_cli.trace_line(e) for e in touched]
+        except Exception as exc:  # fail closed, as retrieval does
+            try:
+                self._append({"entry": "trace_error", "request_id": request_id, "tool": tool.name,
+                              "mission": self._mission(), "reason": type(exc).__name__})
+            except OSError:
+                pass
+            return _refused(request_id, tool.name, f"trace failed ({type(exc).__name__})")
+        try:
+            self._append({"entry": "trace", "request_id": request_id, "tool": tool.name, "mission": self._mission(),
+                          "path": path, "head": head, "changes": len(changes)})
+        except OSError:
+            return _refused(request_id, tool.name, "the evidence log cannot be written; the result is withheld")
+        grant = decision.record["answers"]["sot_authority"]["grant"]
+        structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name,
+                      "grant": grant["id"],
+                      "result": {"schema": TRACE_SCHEMA, "path": path, "head": head, "changes": changes},
+                      "lines": lines}
         return self._admitted(request_id, tool, structured, now)
 
     def _admitted(self, request_id: str, tool: Tool, structured: dict, now: int) -> dict:
