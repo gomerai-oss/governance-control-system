@@ -293,6 +293,23 @@ class OutputTests(unittest.TestCase):
                     for form in encodings(value):
                         self.assertNotIn(form, decision.reason)
 
+    def test_a_secret_in_a_file_name_is_refused(self):
+        """Stress test F3: names are output too, so a canary, a known value or a token shape in a path refuses."""
+        value = canary()
+        model = "model-login-" + secrets.token_hex(8)
+        token = "gh" + "p_" + "Q" * 36
+        for path, known in ((f"docs/{value}.md", ()), (f"docs/{model}.md", (model,)), (f"notes/{token}", ())):
+            with self.subTest(path=path[:20]):
+                decision = gate.admit_output({path: b"harmless\n"}, {}, known)
+                self.assertIs(decision.allow, False)
+                self.assertNotIn(value, decision.reason)
+                self.assertNotIn(model, decision.reason)
+                self.assertIn("[REDACTED:", decision.reason, "the file is named by its redacted name")
+                written = records.dumps(records.record(decision, 0))
+                self.assertNotIn(value, written)
+                self.assertNotIn(model, written)
+        self.assertIs(gate.admit_output({"docs/README.md": b"harmless\n"}, {}).allow, True)
+
     def test_p5_non_utf8_content_is_scanned_as_latin1(self):
         content = b"\xff\xfe" + canary().encode() + b"\x80"
         with self.assertRaises(UnicodeDecodeError):

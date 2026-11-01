@@ -87,3 +87,10 @@ with no entry for `proc`, which is absolute and outside any checkout.
 and `findings`, each finding being `kind`, `rule`, `digest` and `location` (the path or label for output,
 `context` for context). The redacted text is not recorded: it is input text. `dumps` writes sorted-key compact
 JSON.
+
+## Names, binary files and known values (2026-11-01, hand-merged after the pipeline stress test, findings F2, F3, F11)
+
+- **F2: binary files under their real names.** `dispatch.added_content` once parsed file names out of the diff headers (`rsplit(" b/")`). For names git quotes (any non-ASCII letter) or folders holding ` b/`, the parsed name was wrong, zero bytes were read, and a secret in that binary file passed. Paths now come from `git diff --cached --numstat -z` (`Checkout.staged_numstat`). Each text file's added lines come from its own diff (`Checkout.staged_file_patch`, `GIT_LITERAL_PATHSPECS=1`, so `*` in a name is not a pattern). Each binary file is read under its exact name.
+- **F3: names are output too.** `admit_output` scans every path as well as its content. A finding in a name never repeats it: every finding for that file is located by its redacted name, so neither `reason` nor the decision record carries the value. `collect` scans the names first, before any later error can quote a path, because those errors are posted to the tracking issue. Before this fix, a symlink named after the canary produced an error that quoted the canary.
+- **F11: the gateway knows the canary by value.** The dispatcher passes the run's canary in the gateway's environment (`binding.mcp_config`). The gateway passes it, and any model login in its environment, as known values to every `admit_context`. A hex-encoded canary in a result or evidence line is now redacted; before, only its plain shape was.
+- **Accepted limit (F7, pending HITL's acceptance).** Deliberately obfuscated secrets (split, reversed, double-encoded and similar) are not detected. The defence is that agents are never given readable secrets.

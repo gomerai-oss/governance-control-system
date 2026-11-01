@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .chain import LandingProof, prove
 from .history import DIRECT, HAND_MERGE, LANDING, Commit, Identities, Repo, classify
@@ -30,13 +30,18 @@ class Entry:
     proof: Optional[LandingProof] = None
 
 
-def walk(repo: Repo, ids: Identities, head: str) -> List[Entry]:
-    """The first-parent history of ``head``, oldest first, with every landing proved."""
+def walk(repo: Repo, ids: Identities, head: str,
+         verify: Optional[Callable[[LandingProof, Repo, Identities], None]] = None) -> List[Entry]:
+    """The first-parent history of ``head``, oldest first, with every landing proved.
+
+    ``verify`` (``github_record.verifier``) adds GitHub's own record of each landing to its proof."""
     entries = []
     for position, commit in enumerate(repo.first_parent(head)):
         kind, match = classify(commit)
         if kind == LANDING:
             proof = prove(repo, ids, commit, position, match.group(1), int(match.group(2)))
+            if verify is not None:
+                verify(proof, repo, ids)
             entries.append(Entry(commit, kind, position, proof=proof))
         elif kind == HAND_MERGE:
             entries.append(Entry(commit, kind, position, pr=int(match.group(1))))
@@ -163,9 +168,10 @@ def document(repo: Repo, ref: str, head: str, entries: List[Entry]) -> dict:
     return doc
 
 
-def build_graph(repo: Repo, ids: Identities, ref: str) -> Tuple[dict, List[Entry]]:
+def build_graph(repo: Repo, ids: Identities, ref: str,
+                verify: Optional[Callable[[LandingProof, Repo, Identities], None]] = None) -> Tuple[dict, List[Entry]]:
     """Refuse a shallow clone, resolve ``ref``, walk it and build the graph."""
     repo.ensure_full_history()
     head = repo.resolve(ref)
-    entries = walk(repo, ids, head)
+    entries = walk(repo, ids, head, verify)
     return document(repo, ref, head, entries), entries

@@ -1,5 +1,8 @@
 """``python3 -m evidence_graph build|check|trace``: prove every mission landing from git history.
 
+With ``--github OWNER/REPO`` (and ``GITHUB_TOKEN``), ``build`` and ``check`` also check each landing
+against GitHub's own record of its pull requests (``github_record``, rules G1-G4).
+
 Exit codes: ``build`` and ``check`` 0 with no findings, 1 with findings; ``trace`` 0 when the
 path appears, 2 when it never does. Usage errors, shallow clones, missing refs and git
 failures exit 2 with one line on stderr.
@@ -8,10 +11,14 @@ failures exit 2 with one line on stderr.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional
 
-from .graph import Entry, build_graph, canonical, counts, sorted_findings, walk
+from mission_router.github import GitHub
+
+from .github_record import verifier
+from .graph import Entry, build_graph, canonical, counts, document, sorted_findings, walk
 from .history import HAND_MERGE, LANDING, GitError, Repo, load_identities
 
 
@@ -26,11 +33,15 @@ def _parser() -> argparse.ArgumentParser:
     common.add_argument("--root", default=".", help="the repository (default .)")
     common.add_argument("--ref", default="HEAD", help="the ref whose first-parent history is walked (default HEAD)")
     common.add_argument("--config", default=None, help="mission_router config.json (default: the router's own)")
+    common.add_argument("--github", default=None, metavar="OWNER/REPO",
+                        help="also check each landing against GitHub's own record (rules G1-G4); "
+                             "reads GITHUB_TOKEN")
     parser = _Parser(prog="python3 -m evidence_graph", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build", parents=[common], help="write the evidence graph")
     build.add_argument("--out", required=True, help="the file the graph is written to")
-    sub.add_parser("check", parents=[common], help="report every landing that cannot be proven")
+    check = sub.add_parser("check", parents=[common], help="report every landing that cannot be proven")
+    check.add_argument("--out", default=None, help="also write the evidence graph here (one walk, one set of lookups)")
     trace = sub.add_parser("trace", parents=[common], help="list the first-parent changes to a path, newest first")
     trace.add_argument("path")
     return parser
@@ -68,9 +79,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(_one_line(f"config: {exc}"), file=sys.stderr)
         return 2
     repo = Repo(args.root)
+    verify = None
+    if args.github:
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            print("--github needs GITHUB_TOKEN", file=sys.stderr)
+            return 2
+        try:
+            verify = verifier(GitHub(token, args.github))
+        except ValueError as exc:
+            print(_one_line(f"--github: {exc}"), file=sys.stderr)
+            return 2
     try:
         if args.command == "build":
-            doc, _ = build_graph(repo, ids, args.ref)
+            doc, _ = build_graph(repo, ids, args.ref, verify)
             try:
                 with open(args.out, "wb") as handle:
                     handle.write(canonical(doc))
@@ -81,12 +103,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         repo.ensure_full_history()
         head = repo.resolve(args.ref)
-        entries = walk(repo, ids, head)
+        entries = walk(repo, ids, head, verify)
         if args.command == "check":
             for finding in sorted_findings(entries):
                 print(f"FINDING {finding['mission']} {finding['rule']} {finding['landing'][:12]} "
                       f"{_one_line(finding['detail'])}")
             total = counts(entries)
+            if args.out:
+                try:
+                    with open(args.out, "wb") as handle:
+                        handle.write(canonical(document(repo, args.ref, head, entries)))
+                except OSError as exc:
+                    print(_one_line(f"cannot write {args.out}: {exc}"), file=sys.stderr)
+                    return 2
             print(" ".join(f"{key}={total[key]}" for key in ("landings", "proven", "findings", "hand_merges", "direct")))
             return 0 if not total["findings"] else 1
 

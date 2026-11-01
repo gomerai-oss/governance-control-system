@@ -542,6 +542,30 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class KnownSecretTests(GatewayCase):
+    """Stress test F11: the run's canary is redacted by value, in every encoding the boundary knows, not only by shape."""
+
+    def test_an_encoded_canary_in_a_result_or_the_log_is_redacted(self):
+        canary = "SBX-" + "CANARY-" + "0123456789abcdef" * 2
+        encoded = canary.encode().hex()  # hex: only a known value catches it, no shape does
+        self.write("governance/doctrine/ALPHA-001.md", doc("Alpha", "the quorum rule"))
+        with mock.patch.dict(os.environ, {"MISSION_RUN_CANARY": canary}):
+            gateway = self.gateway(self.write_session(session_doc("a2")))
+        result = gateway.call_tool("retrieve", {"keywords": ["quorum"], "query": f"echo {encoded}"})
+        text = json.dumps(result)
+        self.assertNotIn(encoded, text)
+        self.assertIn("[REDACTED:known-hex:", text)
+        self.assertNotIn(encoded, (self.evidence / server.DECISIONS_FILE).read_text(encoding="utf-8"))
+        with mock.patch.dict(os.environ, {"MISSION_RUN_CANARY": ""}):
+            unknown = self.gateway(self.write_session(session_doc("a2")), evidence=self.outside)
+        self.assertIn(encoded, json.dumps(unknown.call_tool("retrieve", {"keywords": ["quorum"], "query": encoded})),
+                      "control: without the known value the hex form is not caught")
+
+    def test_without_the_canary_in_the_environment_only_shapes_are_known(self):
+        with mock.patch.dict(os.environ, {"MISSION_RUN_CANARY": ""}):
+            self.assertEqual(self.gateway(self.write_session(session_doc("a2"))).known, ())
+
+
 class TraceTests(GatewayCase):
     """``trace``: the evidence graph's answer for one file, through the fabric like every other tool."""
 

@@ -384,29 +384,27 @@ def scrub(path: Path, secrets: Sequence[str]) -> None:
                     encoding="utf-8")
 
 
-def added_content(patch: str, tree: Path) -> Dict[str, bytes]:
-    """What the agent wrote, per path: the patch's added lines, or the whole file when git shows it as binary.
+def added_content(checkout: Checkout, base: str, env: Mapping[str, str]) -> Dict[str, bytes]:
+    """What the agent wrote, per exact path: the added lines of each text file, or the whole file when git counts it
+    as binary.
 
-    Lines the change only keeps or removes are not the agent's output, so a credential-shaped fixture already in
-    the repository does not refuse a change that merely touches its file.
+    Paths come from git (``--numstat -z``), never from parsing diff headers, so a name git quotes (non-ASCII) or one
+    holding `` b/`` is read under its real name. Lines the change only keeps or removes are not the agent's output,
+    so a credential-shaped fixture already in the repository does not refuse a change that merely touches its file.
     """
-    added: Dict[str, List[str]] = {}
-    binary: List[str] = []
-    path = ""
-    for line in patch.split("\n"):
-        if line.startswith("diff --git "):
-            path = line.rsplit(" b/", 1)[-1]
-            added.setdefault(path, [])
-        elif line.startswith("+++ "):
+    out: Dict[str, bytes] = {}
+    for path, binary in checkout.staged_numstat(base, env):
+        file = checkout.tree / path
+        if binary:
+            out[path] = b"" if file.is_symlink() or not file.is_file() else file.read_bytes()
             continue
-        elif (line == "GIT binary patch" or line.startswith("Binary files ")) and path:
-            binary.append(path)
-        elif line.startswith("+") and path:
-            added[path].append(line[1:])
-    out = {p: "\n".join(lines).encode("utf-8") for p, lines in added.items()}
-    for p in binary:
-        file = tree / p
-        out[p] = b"" if file.is_symlink() or not file.is_file() else file.read_bytes()
+        lines, body = [], False
+        for line in checkout.staged_file_patch(base, path, env).split("\n"):
+            if line.startswith("@@"):
+                body = True
+            elif body and line.startswith("+"):
+                lines.append(line[1:])
+        out[path] = "\n".join(lines).encode("utf-8")
     return out
 
 
@@ -716,6 +714,10 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     try:
         checkout.stage(git)
         changes, modes = _staged(checkout, job.base_sha, git)
+        # Names first: every later error quotes paths, and those errors are posted to the tracking issue.
+        named = boundary.admit_output({c.path: b"" for c in changes}, {}, known_secrets(root, environ))
+        if not named.allow:
+            raise DispatchError(f"the secrets boundary refused a file name ({named.reason}); refusing to hand it on")
         message_path = checkout.tree / MESSAGE_FILE
         raw = b"" if message_path.is_symlink() or not message_path.is_file() else message_path.read_bytes()
         problems, verdict = check_changes(job, checkout.tree, changes, modes, read_message(raw, job, None))
@@ -730,7 +732,7 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     if leaks(patch, secret_values(environ)) or leaks(message, secret_values(environ)):
         raise DispatchError("the change contains the runtime's model login; refusing to hand it on")
     out_dir.mkdir(parents=True, exist_ok=True)
-    admitted = boundary.admit_output(added_content(patch, checkout.tree), {"message": message},
+    admitted = boundary.admit_output(added_content(checkout, job.base_sha, git), {"message": message},
                                      known_secrets(root, environ))
     record = boundary_records.record(admitted, int(time.time()))
     (out_dir / BOUNDARY_OUT).write_text(boundary_records.dumps(record) + "\n", encoding="utf-8")

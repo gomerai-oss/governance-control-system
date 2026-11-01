@@ -35,3 +35,17 @@ The layout is the plan's. There is no `__init__.py`: `evidence_graph` is a names
 12. **Digest.** `digest` is the SHA-256 hex of the canonical bytes of the document without `digest`, including the final newline.
 13. **Command line.** Argument errors print one line, `python3 -m evidence_graph: <message>`, and exit 2. A config that does not load, a shallow clone, a missing ref and a git failure print one line and exit 2. The shallow-clone line is exactly `shallow clone: full history required`. `build` checks the clone and the ref before it writes, so nothing is written on exit 2. A `trace` path that never changed prints one line on stderr and exits 2. Finding details are folded onto one line in `check`'s output. A `trace` field that a failed rule left unknown (plan, approval, verdict, reviewed sha) prints as `-`.
 14. **Tests** build their repositories with plumbing (`read-tree`, `hash-object`, `update-index`, `write-tree`, `commit-tree`, `update-ref`), so every parent is exact. A merge's tree is its second parent's, and each side branch contains the merge's first parent, which is how the router's merges look. Authors are set per commit with `-c user.name=… -c user.email=…`. Dates are fixed, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` point at an empty file, and every inherited `GIT_*` variable is dropped. This isolation also applies to the direct function calls. No test reads this repository's own history.
+
+## GitHub's own record (2026-11-01, hand-merged after the pipeline stress test, finding F4)
+
+- **Why.** Rules R1-R8 read every identity from commit author names and e-mails, which whoever writes a commit chooses. A fixture mission whose commits all claimed the bots' names rated `proven`: self-certification, not independent proof.
+- **What.** `github_record.py` adds G1-G4. Each merge the chain names must be the merge commit of a merged pull request on the expected stage branch, opened and merged by the expected logins:
+  - the landing, A3's PR, merged by the bot;
+  - the approval, the plan PR, merged by the bot after a HITL `/mission approve <head>` that names the plan commit, or merged by a HITL login;
+  - each build, A2's PR, merged by the bot;
+  - each failed round, A3's PR, merged by the bot.
+
+  Every commit GitHub lists in A2's pull request is checked against the build scope and the router's "no `missions/`" rule, whatever author name it carries.
+- **How it reads GitHub.** Only with `--github OWNER/REPO` and `GITHUB_TOKEN`, through `mission_router.github`, with GET calls only. An unreadable record is a finding, never a pass. Without `--github` the package reads no network, as before.
+- **One walk in CI.** `check --out` writes the same graph `build` would, so Policy CI walks and reads GitHub once per run.
+- **Real history.** All 11 router landings on `main` at `538efde6` pass G1-G4 (95 API reads).
