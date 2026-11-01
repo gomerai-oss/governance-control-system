@@ -44,6 +44,7 @@ Each line of ``decisions.jsonl`` is one JSON object with an ``entry`` field:
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -61,6 +62,7 @@ from retrieval import corpus as corpus_mod
 from retrieval import records as retrieval_records
 from retrieval import retrieve
 
+from secrets_boundary import detector as boundary_detector
 from secrets_boundary import gate as boundary
 from secrets_boundary import records as boundary_records
 
@@ -73,6 +75,9 @@ DECISIONS_FILE = "decisions.jsonl"
 CONNECTOR_ID = protocol.SERVER_NAME
 CAN_PRODUCE = ("audit_record",)
 SESSION_STOP = 13
+# Values the secrets boundary redacts by value, in every encoding it knows, when they are in the gateway's
+# environment: the run's canary (the dispatcher passes it) and any model login the runtime handed down.
+KNOWN_SECRET_ENV = ("MISSION_RUN_CANARY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_API_KEY")
 TRACE_ACTION = "epap.artifact_lookup"
 TRACE_SCHEMA = "evidence-trace-v1"
 
@@ -85,6 +90,9 @@ QUERY_ARGUMENT = "query"
 STRING_ARGUMENTS = ("query", "document_id", "path", "location", "status", "title", "date", "alias")
 LIST_ARGUMENTS = ("keywords",)
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The most a single call's arguments may hold, as UTF-8 JSON. A query or a keyword list is far smaller; anything
+# larger is refused before it is run or written to the evidence log.
+MAX_ARGUMENT_BYTES = 64 * 1024
 
 
 class GatewayError(RuntimeError):
@@ -192,6 +200,12 @@ def argument_problem(schema: Mapping, arguments: Any) -> Optional[str]:
     """Why ``arguments`` do not satisfy a catalog input schema, or None."""
     if not isinstance(arguments, dict):
         return "arguments must be an object"
+    try:
+        size = len(json.dumps(arguments, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return "arguments must be JSON"
+    if size > MAX_ARGUMENT_BYTES:
+        return f"arguments are {size} bytes; at most {MAX_ARGUMENT_BYTES} are accepted"
     properties = schema["properties"]
     unknown = sorted(k for k in arguments if k not in properties)
     if unknown:
@@ -259,6 +273,8 @@ class Gateway:
         if self.git_dir is not None and not self.git_dir.is_dir():
             raise GatewayError("--git-dir is not a directory")
         self._history: Optional[Tuple[str, Any, list]] = None
+        self.known = tuple(v for v in (os.environ.get(k, "") for k in KNOWN_SECRET_ENV)
+                           if len(v) >= boundary_detector.MIN_KNOWN)
         evidence = Path(evidence_dir)
         if not evidence.is_dir() or evidence.is_symlink():
             raise GatewayError("--evidence-dir is not a directory")
@@ -349,7 +365,8 @@ class Gateway:
 
     def _append(self, entry: Mapping) -> None:
         """Append one entry, secrets redacted: the log leaves the run with its artifact. Unwritable is OSError."""
-        admitted = boundary.admit_context(json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        admitted = boundary.admit_context(json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+                                          self.known)
         if not admitted.allow:
             raise OSError("the secrets boundary failed on an evidence entry")
         with open(self.log_path, "a", encoding="utf-8") as handle:
@@ -478,7 +495,7 @@ class Gateway:
 
     def _admitted(self, request_id: str, tool: Tool, structured: dict, now: int) -> dict:
         """The secrets boundary's context check: every secret in a result is redacted before the agent sees it."""
-        admitted = boundary.admit_context(json.dumps(structured, sort_keys=True))
+        admitted = boundary.admit_context(json.dumps(structured, sort_keys=True), self.known)
         try:
             self._append({"entry": "boundary", "request_id": request_id, "tool": tool.name,
                           "mission": self._mission(), "record": boundary_records.record(admitted, now)})

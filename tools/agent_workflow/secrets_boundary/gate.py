@@ -99,10 +99,14 @@ def _output_findings(files: Mapping[str, bytes], texts: Mapping[str, str], known
     for path in sorted(files):
         if not isinstance(path, str):
             raise TypeError("file paths must be strings")
+        in_name = detector.scan(path, known)  # the name is output too
+        # A name that holds a secret is never repeated: every finding for that file is located by its redacted name.
+        where = redact(path, in_name) if in_name else path
         rule = paths.denied(path)
         if rule:
-            found.append((path, PathDenial(PATH_KIND, rule, detector.digest(path))))
-        found.extend((path, finding) for finding in detector.scan(_content_text(files[path]), known))
+            found.append((where, PathDenial(PATH_KIND, rule, detector.digest(path))))
+        found.extend((where, finding) for finding in in_name)
+        found.extend((where, finding) for finding in detector.scan(_content_text(files[path]), known))
     for label in sorted(texts):
         if not isinstance(label, str) or not isinstance(texts[label], str):
             raise TypeError("text labels and values must be strings")

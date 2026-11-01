@@ -126,6 +126,21 @@ class Checkout:
                 modes.append((path, meta[1:].split(" ")[1]))
         return modes
 
+    def staged_numstat(self, base: str, env: Mapping[str, str]) -> List[Tuple[str, bool]]:
+        """(exact path, is binary) for every staged change since ``base``; ``-z`` keeps every path byte for byte."""
+        out = self._git("diff", "--cached", "--numstat", "-z", "--no-renames", base, "--", env=env)
+        entries = []
+        for record in out.split("\0"):
+            if record:
+                added, deleted, path = record.split("\t", 2)
+                entries.append((path, added == "-" and deleted == "-"))
+        return entries
+
+    def staged_file_patch(self, base: str, path: str, env: Mapping[str, str]) -> str:
+        """The staged diff of exactly ``path`` since ``base``, with no context lines (the path is matched literally)."""
+        return self._git("diff", "--cached", "--no-renames", "--no-ext-diff", "--no-textconv", "-U0", base, "--", path,
+                         env={**env, "GIT_LITERAL_PATHSPECS": "1"})
+
     def apply(self, patch: str, env: Mapping[str, str]) -> None:
         """Apply and stage ``patch``. git refuses paths outside the tree and paths behind a symbolic link."""
         # Run from the top of the work tree: git apply resolves paths against the working directory.

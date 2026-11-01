@@ -51,6 +51,7 @@ from mission_dispatch.dispatch import (
 from mission_dispatch import binding, runtimes
 from mission_dispatch.runtimes import CLAUDE_CODE, CURSOR_CLI, INBOX_DIR, SandboxError, agent_env, argv_for
 from mission_dispatch.workspace import git_env
+from secrets_boundary import gate as boundary
 
 from mission_router.model import (failures_since_retry, parse_manifest, verdict_path)
 from mission_router.state import AWAIT_A1, AWAIT_A2, AWAIT_A3, MissionState
@@ -862,6 +863,18 @@ class FlowTests(unittest.TestCase):
         self.assertNotIn(canary, (self.root / "out" / BOUNDARY_OUT).read_text())
         self.assertFalse((self.root / "out" / "change.patch").exists(), "nothing is handed on")
 
+    def test_a_file_named_after_the_canary_is_refused_without_repeating_it(self):
+        """Stress test F3: the name is checked before any error can quote it, and the error never repeats it."""
+        job = self.job()
+        work = self.agent(job, f'os.symlink("x", "tools/demo/" + os.environ["{CANARY_ENV}"])')
+        canary = run_canary(work)
+        with self.assertRaises(DispatchError) as caught:
+            collect(job, work, self.root / "out", self.env)
+        self.assertIn("refused a file name", str(caught.exception))
+        self.assertNotIn(canary, str(caught.exception))
+        self.assertIn("[REDACTED:", str(caught.exception))
+        self.assertFalse((self.root / "out" / "change.patch").exists(), "nothing is handed on")
+
     def test_a_change_adding_a_credential_shaped_value_or_file_is_refused(self):
         token = "gh" + "p_" + "Z" * 36
         cases = {
@@ -886,15 +899,48 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "out" / "result.json").read_text())["boundary"],
                          {"allow": True, "findings": 0})
 
+    def _staged_checkout(self, before, after):
+        """A Checkout whose git dir sits beside its work tree (the dispatcher's layout), ``after`` staged over ``before``."""
+        from mission_dispatch.workspace import Checkout
+        root = self.root / "staged"
+        checkout = Checkout(root)
+        checkout.tree.mkdir(parents=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_AUTHOR_NAME="t",
+                   GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "init", "-q", "--separate-git-dir", str(checkout.git_dir), str(checkout.tree)],
+                       check=True, env=env)
+        (checkout.tree / ".git").unlink()
+        for files in (before, after):
+            for path, data in files.items():
+                target = checkout.tree / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            checkout.stage(env)
+            if files is before:
+                checkout._git("commit", "-q", "--allow-empty", "-m", "base", env=env)
+                base = checkout._git("rev-parse", "HEAD", env=env).strip()
+        return checkout, base, env
+
     def test_only_added_lines_are_the_agents_output(self):
         key = "AK" + "IA" + "B" * 16
-        patch = "\n".join([
-            "diff --git a/tools/demo/f.py b/tools/demo/f.py", "--- a/tools/demo/f.py", "+++ b/tools/demo/f.py",
-            "@@ -1,2 +1,2 @@", f" FIXTURE = {key!r}", "-x = 1", "+x = 2",
-            "diff --git a/tools/demo/g.bin b/tools/demo/g.bin", "GIT binary patch", "literal 3", "zcmZ"])
-        (self.root / "tools/demo").mkdir(parents=True)
-        (self.root / "tools/demo/g.bin").write_bytes(b"\x00\x01")
-        self.assertEqual(added_content(patch, self.root), {"tools/demo/f.py": b"x = 2", "tools/demo/g.bin": b"\x00\x01"})
+        checkout, base, env = self._staged_checkout(
+            {"tools/demo/f.py": f"FIXTURE = {key!r}\nx = 1\n".encode()},
+            {"tools/demo/f.py": f"FIXTURE = {key!r}\nx = 2\n".encode(), "tools/demo/g.bin": b"\x00\x01"})
+        self.assertEqual(added_content(checkout, base, env), {"tools/demo/f.py": b"x = 2", "tools/demo/g.bin": b"\x00\x01"})
+
+    def test_binary_files_are_read_under_their_real_names(self):
+        """Stress test F2: a quoted name (non-ASCII) or a folder holding ' b/' once hid a binary file from the boundary."""
+        token = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        blob = b"\x00\x01" + token.encode() + b"\x00"
+        names = ["tools/demo/caf\u00e9.bin", "tools/demo/dir b/y.bin", "tools/demo/star*.bin", "tools/demo/plain.bin"]
+        checkout, base, env = self._staged_checkout({"README.md": b"x\n"}, {name: blob for name in names})
+        content = added_content(checkout, base, env)
+        self.assertEqual(sorted(content), sorted(names))
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(content[name], blob)
+                self.assertFalse(boundary.admit_output({name: content[name]}, {}).allow)
 
     def test_the_log_is_cleared_of_credential_shaped_values_too(self):
         token = "gh" + "s_" + "Q" * 36
@@ -932,6 +978,30 @@ class FlowTests(unittest.TestCase):
         argv = check_argv("make test", "mission-checks", "/usr/bin:/bin")
         self.assertIn("GIT_CONFIG_KEY_0=gc.auto", argv)
         self.assertEqual(argv[-3:], ["bash", "-c", "make test"])
+
+    def test_checks_results_never_follow_a_planted_link(self):
+        """Stress test F6 (hygiene): code under review runs before the results are written, so it may have planted
+        links where they go. Neither a linked folder nor a linked file is written through."""
+        job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", self.base, ("tools/demo/**",), "t", ("true",))
+        target = self.root / "victim.txt"
+        target.write_text("untouched\n")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        linked_dir = self.root / "linked-checks"
+        linked_dir.symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaisesRegex(DispatchError, "not a plain folder"):
+            run_checks(job, self.root, linked_dir, self.env, timeout=30)
+        self.assertEqual(list(elsewhere.iterdir()), [], "nothing was written through the linked folder")
+        out = self.root / "checks"
+        out.mkdir()
+        (out / "CHECKS.md").symlink_to(target)
+        with self.assertRaisesRegex(DispatchError, "cannot write CHECKS.md safely"):
+            run_checks(job, self.root, out, self.env, timeout=30)
+        self.assertEqual(target.read_text(), "untouched\n")
+        fresh = self.root / "fresh-checks"
+        run_checks(job, self.root, fresh, self.env, timeout=30)
+        self.assertEqual(fresh.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((fresh / "CHECKS.md").stat().st_mode & 0o777, 0o600)
 
     def test_check_timeouts_are_reported(self):
         job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", self.base, ("tools/demo/**",), "t", ("sleep 5",))
@@ -1106,6 +1176,7 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(list(config["mcpServers"]), ["governed-retrieval"])
         self.assertEqual(server["args"][:2], ["-m", "mcp_gateway"])
         self.assertEqual(server["env"]["PYTHONPATH"], str(binding.gateway_root()), "the gateway runs from the tooling tree")
+        self.assertEqual(server["env"]["MISSION_RUN_CANARY"], run_canary(self.work), "the gateway knows the canary by value")
         session = Path(server["args"][server["args"].index("--session") + 1])
         from mission_dispatch.workspace import Checkout
         git_dir = Path(server["args"][server["args"].index("--git-dir") + 1])

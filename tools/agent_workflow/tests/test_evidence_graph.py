@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ from unittest import mock
 AGENT_WORKFLOW = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT_WORKFLOW))
 
-from evidence_graph import graph, history  # noqa: E402
+from evidence_graph import github_record, graph, history  # noqa: E402
 
 PACKAGE = AGENT_WORKFLOW / "evidence_graph"
 MID = "M-DEMO-001"
@@ -407,13 +408,187 @@ class EvidenceGraphTests(unittest.TestCase):
             self.assertEqual(many.files(one.first_parent(one.resolve("HEAD"))[-1]), (), "a commit with no changes")
 
 
+class FakeGitHub:
+    """GitHub's record for a fixture repository: merged pull requests by merge commit, their comments and commits."""
+
+    def __init__(self):
+        self.pulls, self.comments, self.commits = {}, {}, {}
+        self.fail = False
+
+    def add(self, merge_sha, head_ref, head_sha, opener, merger, commits=(), comments=()):
+        number = len(self.pulls) + 1
+        self.pulls[number] = {"number": number, "merge_commit_sha": merge_sha, "merged_at": "2026-01-01T00:00:00Z",
+                              "head": {"ref": head_ref, "sha": head_sha}, "user": {"login": opener},
+                              "merged_by": {"login": merger}}
+        self.commits[number] = [{"sha": c} for c in commits]
+        self.comments[number] = list(comments)
+        return number
+
+    def get(self, path):
+        if self.fail:
+            raise RuntimeError("GitHub is down")
+        if path.startswith("/commits/") and path.endswith("/pulls"):
+            sha = path.split("/")[2]
+            return [pr for pr in self.pulls.values() if pr["merge_commit_sha"] == sha]
+        if path.startswith("/pulls/"):
+            return self.pulls[int(path.split("/")[2])]
+        raise AssertionError(f"unexpected GET {path}")
+
+    def paginate(self, path, limit=2000):
+        number = int(path.split("/")[2])
+        return iter(self.comments[number] if path.startswith("/issues/") else self.commits[number])
+
+
+def approve(sha, login=HITL, kind="User"):
+    return {"user": {"login": login, "type": kind}, "body": f"/mission approve {sha}"}
+
+
+class GitHubRecordTests(unittest.TestCase):
+    """G1-G4: each landing checked against GitHub's own record, not against commit author names."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self._tmp.name))
+        self.gh = FakeGitHub()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def genuine(self, verdicts=("PASS",), approval="router", skip=(), **change):
+        """A mission plus the record the router would have left; ``skip`` leaves stages out, ``change`` alters them."""
+        seed = self.fx.seed()
+        m = self.fx.mission(seed, verdicts=verdicts, approval=approval)
+        mid = f"mission/{MID}/"
+        if "a1" not in skip:
+            merger = BOT if approval == "router" else HITL
+            comments = change.get("a1_comments", [approve(m["plan"])] if approval == "router" else [])
+            self.gh.add(m["approval"], change.get("a1_ref", mid + "a1"), change.get("a1_head", m["plan"]), HITL,
+                        change.get("a1_merger", merger), comments=comments)
+        for k in range(1, len(verdicts) + 1):
+            if f"a2-r{k}" not in skip:
+                self.gh.add(m["merges"][k], mid + f"a2-r{k}", m["builds"][k], change.get("a2_opener", A2), BOT,
+                            commits=change.get("a2_commits", {}).get(k, [m["builds"][k]]))
+            if k < len(verdicts) and f"a3-r{k}" not in skip:
+                fail = self.fx.git("log", "--format=%H", "-1", f"--grep=merge A3 round {k} (FAIL)", m["landing"] + "^2")
+                self.gh.add(fail, mid + f"a3-r{k}", m["reviews"][k], change.get("a3_opener", A3), BOT)
+        if "landing" not in skip:
+            n = len(verdicts)
+            self.gh.add(m["landing"], change.get("landing_ref", mid + f"a3-r{n}"), m["reviews"][n],
+                        change.get("landing_opener", A3), change.get("landing_merger", BOT))
+        return m
+
+    def findings(self):
+        isolated = {k: self.fx.env[k] for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+        with mock.patch.dict(os.environ, isolated):
+            repo = history.Repo(str(self.fx.root))
+            doc, _ = graph.build_graph(repo, history.load_identities(str(self.fx.config)), "HEAD",
+                                       github_record.verifier(self.gh))
+        return doc, [(f["rule"], f["detail"]) for f in doc["findings"]]
+
+    def assert_rule(self, rule, text):
+        doc, found = self.findings()
+        self.assertTrue(any(r == rule and text in d for r, d in found), found)
+        self.assertFalse(nodes(doc)[f"mission:{MID}"]["proven"])
+
+    def test_g0_a_genuine_record_proves_the_mission(self):
+        self.genuine()
+        doc, found = self.findings()
+        self.assertEqual(found, [])
+        self.assertTrue(nodes(doc)[f"mission:{MID}"]["proven"])
+
+    def test_g0_a_genuine_two_round_record_and_a_hitl_merged_plan(self):
+        self.genuine(verdicts=("FAIL", "PASS"), approval="hitl-merge")
+        self.assertEqual(self.findings()[1], [])
+
+    def test_g1_a_landing_no_pull_request_merged_is_forged(self):
+        """Author names alone (the R rules) prove this mission; GitHub has no record of it."""
+        self.genuine(skip=("landing",))
+        self.assert_rule("G1", "is not the merge commit of any merged pull request")
+
+    def test_g1_landing_opened_or_merged_by_the_wrong_identity(self):
+        self.genuine(landing_opener=A2, landing_merger=HITL)
+        doc, found = self.findings()
+        self.assertTrue(any(r == "G1" and f"opened by {A2}" in d for r, d in found), found)
+        self.assertTrue(any(r == "G1" and f"merged by {HITL}" in d for r, d in found), found)
+
+    def test_g1_landing_from_the_wrong_branch(self):
+        self.genuine(landing_ref="feature/sneaky")
+        self.assert_rule("G1", "'feature/sneaky'")
+
+    def test_g2_no_approval_comment(self):
+        self.genuine(a1_comments=[])
+        self.assert_rule("G2", "has no HITL '/mission approve")
+
+    def test_g2_approval_by_a_bot_or_a_stranger_or_for_another_commit(self):
+        for name, login, kind, other in (("bot", HITL, "Bot", False), ("stranger", "stranger", "User", False),
+                                         ("other commit", HITL, "User", True)):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                seed = self.fx.seed()
+                m = self.fx.mission(seed)
+                comment = approve("1" * 40 if other else m["plan"], login=login, kind=kind)
+                self.gh.add(m["approval"], f"mission/{MID}/a1", m["plan"], HITL, BOT, comments=[comment])
+                self.gh.add(m["merges"][1], f"mission/{MID}/a2-r1", m["builds"][1], A2, BOT, commits=[m["builds"][1]])
+                self.gh.add(m["landing"], f"mission/{MID}/a3-r1", m["reviews"][1], A3, BOT)
+                self.assert_rule("G2", "has no HITL '/mission approve")
+
+    def test_g2_the_approved_head_is_not_the_plan(self):
+        self.genuine(a1_head="2" * 40, a1_comments=[approve("2" * 40)])
+        self.assert_rule("G2", "is not the plan commit")
+
+    def test_g2_a_hitl_merged_plan_merged_by_someone_else(self):
+        self.genuine(approval="hitl-merge", a1_merger=BOT)
+        self.assert_rule("G2", f"merged by {BOT}")
+
+    def test_g3_build_opened_by_an_impostor(self):
+        self.genuine(a2_opener="dev")
+        self.assert_rule("G3", "opened by dev")
+
+    def test_g3_a_build_commit_under_another_name_is_still_the_builders(self):
+        """A commit in A2's pull request authored under A3's name adds a verdict: R6 accepts it, G3 does not."""
+        seed = self.fx.seed()
+        m = self.fx.mission(seed)
+        forged = self.fx.commit(A3, "planted verdict", m["builds"][1],
+                                {f"{MDIR}reviews/round-9.json": "{}\n"})
+        self.gh.add(m["approval"], f"mission/{MID}/a1", m["plan"], HITL, BOT, comments=[approve(m["plan"])])
+        self.gh.add(m["merges"][1], f"mission/{MID}/a2-r1", m["builds"][1], A2, BOT, commits=[m["builds"][1], forged])
+        self.gh.add(m["landing"], f"mission/{MID}/a3-r1", m["reviews"][1], A3, BOT)
+        self.assert_rule("G3", f"changes {MDIR}reviews/round-9.json, which A2 may not change")
+
+    def test_g4_a_failed_round_reviewed_by_an_impostor(self):
+        self.genuine(verdicts=("FAIL", "PASS"), a3_opener="dev")
+        self.assert_rule("G4", "opened by dev")
+
+    def test_an_unreadable_record_is_a_finding_never_a_pass(self):
+        self.genuine()
+        self.gh.fail = True
+        self.assert_rule("G1", "GitHub's record cannot be read (RuntimeError)")
+
+    def test_check_out_writes_the_same_graph_as_build(self):
+        self.genuine()
+        out_check, out_build = self.fx.tmp / "check.json", self.fx.tmp / "build.json"
+        self.assertEqual(self.fx.cli("check", "--out", str(out_check)).returncode, 0)
+        self.assertEqual(self.fx.cli("build", "--out", str(out_build)).returncode, 0)
+        self.assertEqual(out_check.read_bytes(), out_build.read_bytes())
+
+    def test_check_with_github_needs_a_token(self):
+        self.fx.seed()
+        done = subprocess.run([sys.executable, "-m", "evidence_graph", "check", "--root", str(self.fx.root),
+                               "--config", str(self.fx.config), "--github", "o/r"], cwd=str(self.fx.tmp),
+                              capture_output=True, text=True,
+                              env={k: v for k, v in {**self.fx.env, "PYTHONPATH": str(AGENT_WORKFLOW)}.items()
+                                   if k != "GITHUB_TOKEN"})
+        self.assertEqual((done.returncode, done.stderr.strip()), (2, "--github needs GITHUB_TOKEN"))
+
+
 class PackageShapeTests(unittest.TestCase):
     def test_no_init_py_in_the_package(self):
         self.assertEqual(list(PACKAGE.rglob("__init__.py")), [])
 
     def test_imports_only_stdlib_and_mission_router(self):
-        allowed_roots = {"__future__", "argparse", "dataclasses", "hashlib", "json", "pathlib", "re", "subprocess", "sys",
-                         "typing", "mission_router"}
+        allowed_roots = {"__future__", "argparse", "dataclasses", "hashlib", "json", "os", "pathlib", "re", "subprocess",
+                         "sys", "typing", "mission_router"}
         for path in PACKAGE.glob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -425,6 +600,16 @@ class PackageShapeTests(unittest.TestCase):
                     continue
                 for name in names:
                     self.assertIn(name.split(".")[0], allowed_roots, f"{path.name} imports {name}")
+
+    def test_only_the_github_record_reads_the_network_and_only_reads(self):
+        """GitHub is read only with --github, through mission_router.github, and only with GET calls."""
+        for path in PACKAGE.glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if path.name not in ("github_record.py", "__main__.py"):
+                self.assertNotIn("mission_router.github", text, path.name)
+                self.assertNotIn("urllib", text, path.name)
+        calls = set(re.findall(r"self\.gh\.(\w+)\(", (PACKAGE / "github_record.py").read_text(encoding="utf-8")))
+        self.assertEqual(calls, {"get", "paginate"})
 
     def test_git_subcommands_are_read_only(self):
         self.assertEqual(history.READ_ONLY, ("rev-parse", "log", "show", "diff-tree", "ls-tree", "cat-file"))

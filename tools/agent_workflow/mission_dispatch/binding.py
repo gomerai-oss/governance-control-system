@@ -26,6 +26,7 @@ CONFIG_KEY = "runtime_binding"
 
 BINDING_DIR = "binding"  # under the job root, beside checkout/ and git/
 GIT_DIR = "git"  # the checkout's git dir under the job root (workspace.Checkout.git_dir)
+CANARY_FILE, CANARY_ENV = "canary", "MISSION_RUN_CANARY"  # dispatch.CANARY_FILE / CANARY_ENV: the run's canary
 SESSION_FILE, MCP_FILE, BINDING_FILE, EVIDENCE_DIR = "session.json", "mcp.json", "binding.json", "evidence"
 CURSOR_MCP = ".cursor/mcp.json"
 GATEWAY_SERVER = "governed-retrieval"
@@ -98,10 +99,12 @@ def check(tools: Any, allowed: Any, denied: Any, mcp_tools: Any) -> Tuple[tuple,
     return ordered, allowed, denied, tuple(dict.fromkeys(mcp_tools))
 
 
-def mcp_config(checkout: Path, session: Path, evidence: Path, git_dir: Optional[Path] = None) -> dict:
+def mcp_config(checkout: Path, session: Path, evidence: Path, git_dir: Optional[Path] = None,
+               canary: str = "") -> dict:
     """The one MCP server an agent may use, as the dispatcher writes it: the gateway from the tooling tree.
 
     ``git_dir`` is the checkout's git dir, kept outside the work tree; the gateway's ``trace`` reads history there.
+    ``canary`` is the run's canary, which the gateway redacts by value from every result and evidence line.
     """
     args = ["-m", GATEWAY_MODULE, "--root", str(checkout.resolve()), "--session", str(session.resolve()),
             "--evidence-dir", str(evidence.resolve())]
@@ -110,7 +113,7 @@ def mcp_config(checkout: Path, session: Path, evidence: Path, git_dir: Optional[
     return {"mcpServers": {GATEWAY_SERVER: {
         "command": "python3",
         "args": args,
-        "env": {"PYTHONPATH": str(gateway_root())},
+        "env": {"PYTHONPATH": str(gateway_root()), **({CANARY_ENV: canary} if canary else {})},
     }}}
 
 
@@ -154,9 +157,10 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
     _write_readonly(session_path, session)
     config = ""
     if mcp_tools:
-        git_dir = Path(root) / GIT_DIR
+        git_dir, canary_file = Path(root) / GIT_DIR, Path(root) / CANARY_FILE
+        canary = "" if canary_file.is_symlink() or not canary_file.is_file() else canary_file.read_text().strip()
         _write_readonly(out / MCP_FILE, mcp_config(checkout, session_path, evidence,
-                                                   git_dir if git_dir.is_dir() else None))
+                                                   git_dir if git_dir.is_dir() else None, canary))
         config = str((out / MCP_FILE).resolve())
     bound = Bound(tools, allowed, denied, mcp_tools, config)
     try:

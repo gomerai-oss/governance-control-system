@@ -32,6 +32,7 @@ Nothing here merges, touches the default branch, or force-pushes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -384,29 +385,27 @@ def scrub(path: Path, secrets: Sequence[str]) -> None:
                     encoding="utf-8")
 
 
-def added_content(patch: str, tree: Path) -> Dict[str, bytes]:
-    """What the agent wrote, per path: the patch's added lines, or the whole file when git shows it as binary.
+def added_content(checkout: Checkout, base: str, env: Mapping[str, str]) -> Dict[str, bytes]:
+    """What the agent wrote, per exact path: the added lines of each text file, or the whole file when git counts it
+    as binary.
 
-    Lines the change only keeps or removes are not the agent's output, so a credential-shaped fixture already in
-    the repository does not refuse a change that merely touches its file.
+    Paths come from git (``--numstat -z``), never from parsing diff headers, so a name git quotes (non-ASCII) or one
+    holding `` b/`` is read under its real name. Lines the change only keeps or removes are not the agent's output,
+    so a credential-shaped fixture already in the repository does not refuse a change that merely touches its file.
     """
-    added: Dict[str, List[str]] = {}
-    binary: List[str] = []
-    path = ""
-    for line in patch.split("\n"):
-        if line.startswith("diff --git "):
-            path = line.rsplit(" b/", 1)[-1]
-            added.setdefault(path, [])
-        elif line.startswith("+++ "):
+    out: Dict[str, bytes] = {}
+    for path, binary in checkout.staged_numstat(base, env):
+        file = checkout.tree / path
+        if binary:
+            out[path] = b"" if file.is_symlink() or not file.is_file() else file.read_bytes()
             continue
-        elif (line == "GIT binary patch" or line.startswith("Binary files ")) and path:
-            binary.append(path)
-        elif line.startswith("+") and path:
-            added[path].append(line[1:])
-    out = {p: "\n".join(lines).encode("utf-8") for p, lines in added.items()}
-    for p in binary:
-        file = tree / p
-        out[p] = b"" if file.is_symlink() or not file.is_file() else file.read_bytes()
+        lines, body = [], False
+        for line in checkout.staged_file_patch(base, path, env).split("\n"):
+            if line.startswith("@@"):
+                body = True
+            elif body and line.startswith("+"):
+                lines.append(line[1:])
+        out[path] = "\n".join(lines).encode("utf-8")
     return out
 
 
@@ -716,6 +715,10 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     try:
         checkout.stage(git)
         changes, modes = _staged(checkout, job.base_sha, git)
+        # Names first: every later error quotes paths, and those errors are posted to the tracking issue.
+        named = boundary.admit_output({c.path: b"" for c in changes}, {}, known_secrets(root, environ))
+        if not named.allow:
+            raise DispatchError(f"the secrets boundary refused a file name ({named.reason}); refusing to hand it on")
         message_path = checkout.tree / MESSAGE_FILE
         raw = b"" if message_path.is_symlink() or not message_path.is_file() else message_path.read_bytes()
         problems, verdict = check_changes(job, checkout.tree, changes, modes, read_message(raw, job, None))
@@ -730,7 +733,7 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     if leaks(patch, secret_values(environ)) or leaks(message, secret_values(environ)):
         raise DispatchError("the change contains the runtime's model login; refusing to hand it on")
     out_dir.mkdir(parents=True, exist_ok=True)
-    admitted = boundary.admit_output(added_content(patch, checkout.tree), {"message": message},
+    admitted = boundary.admit_output(added_content(checkout, job.base_sha, git), {"message": message},
                                      known_secrets(root, environ))
     record = boundary_records.record(admitted, int(time.time()))
     (out_dir / BOUNDARY_OUT).write_text(boundary_records.dumps(record) + "\n", encoding="utf-8")
@@ -831,17 +834,36 @@ def run_checks(job: Job, tree: Path, out_dir: Path, environ: Mapping[str, str],
                 subprocess.run(["sudo", "-n", "pkill", "-KILL", "-u", run_as], capture_output=True)
         results.append({"index": index, "command": command, "exit_code": code,
                         "passed": code == 0, "output_tail": output[-CHECK_OUTPUT_CHARS:]})
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / CHECKS_JSON).write_text(json.dumps({"job": job.key, "commit": job.base_sha, "results": results},
-                                                  indent=2) + "\n", encoding="utf-8")
+    _results_dir(out_dir)
+    _write_result(out_dir / CHECKS_JSON, json.dumps({"job": job.key, "commit": job.base_sha, "results": results},
+                                                    indent=2) + "\n")
     lines = [f"# Checks on `{job.base_sha}`", "",
              f"{sum(r['passed'] for r in results)} of {len(results)} passed.", ""]
     for r in results:
         status = "PASS" if r["passed"] else ("FAIL" if r["exit_code"] is not None else "NOT RUN")
         lines += [f"## {r['index']}. {status} (exit {r['exit_code']})", "", "```", r["command"], "```", "",
                   "Last output:", "", "````text", r["output_tail"].replace("````", "``​``"), "````", ""]
-    (out_dir / CHECKS_MD).write_text("\n".join(lines), encoding="utf-8")
+    _write_result(out_dir / CHECKS_MD, "\n".join(lines))
     return results
+
+
+def _results_dir(out_dir: Path) -> None:
+    """The checks' results folder: never a link, created private, and ours. The code under review ran before this."""
+    if out_dir.is_symlink() or (out_dir.exists() and not out_dir.is_dir()):
+        raise DispatchError(f"{out_dir} is not a plain folder; refusing to write the checks' results there")
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if out_dir.is_symlink() or out_dir.stat().st_uid != os.getuid():
+        raise DispatchError(f"{out_dir} is not this account's own folder; refusing to write the checks' results there")
+
+
+def _write_result(path: Path, text: str) -> None:
+    """Write one results file without following a link someone planted in its place."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise DispatchError(f"cannot write {path.name} safely: {exc.strerror}") from None
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def outcome(job: Job, survey: Survey, pulls_from: Callable[[str], list]) -> Optional[str]:
