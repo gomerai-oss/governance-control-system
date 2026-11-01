@@ -1,6 +1,6 @@
 # Router Policy Specification 002
 
-**Status:** DRAFT — A1 architecture, not yet HITL-approved
+**Status:** LIVE. `tools/agent_workflow/router_spec002/` enforces it on every mission PR, and the amendments below are in force. Marked current on HITL direction, 2026-11-01 (M-METHOD-001, after-it-lands step 1). Earlier status: DRAFT, A1 architecture.
 **Date:** 2026-10-19
 **Author:** A1
 **Basis:** Open Policy Agent (OPA) policy-engine model; Kubernetes admission-control architecture. Derived from research, not from any existing implementation.

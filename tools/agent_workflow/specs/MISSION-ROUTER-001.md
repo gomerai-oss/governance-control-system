@@ -1,6 +1,6 @@
 # MISSION-ROUTER-001: A1 → A2 → A3 mission router
 
-**Status:** DRAFT, built by A3 at HITL direction 2026-10-19, not yet HITL-approved
+**Status:** LIVE. The mission router has carried every mission since M-ZERO-002 landed on 2026-10-22, and the amendments below are part of what runs. Marked current on HITL direction, 2026-11-01 (M-METHOD-001, after-it-lands step 1). Earlier status: DRAFT, built by A3 at HITL direction 2026-10-19.
 **Amendment 001 (2026-10-20, HITL direction):** A1 is a human seat. A HITL login may open and push the A1 plan PR and is accepted as the A1 actor (§5a); the a1 App remains an accepted A1 actor while it is `ACTIVE` in the registry. A2 and A3 are unchanged.
 **Amendment 002 (2026-10-22, HITL direction, "option 2"):** a stack lands as a whole. Its passed missions collect on
 the stack branch `stack/<STACK-ID>`, and nothing reaches `main` until every mission in the stack has passed; then the
