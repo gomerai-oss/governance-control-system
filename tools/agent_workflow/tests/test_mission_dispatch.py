@@ -54,7 +54,7 @@ from mission_dispatch.workspace import Change, git_env
 from secrets_boundary import gate as boundary
 
 from mission_router.model import (failures_since_retry, parse_manifest, verdict_path)
-from mission_router.state import AWAIT_A1, AWAIT_A2, AWAIT_A3, MissionState
+from mission_router.state import AWAIT_A1, AWAIT_A2, AWAIT_A3, PAUSED, MissionState
 
 MID = "M-DEMO-001"
 BOT = "github-actions[bot]"
@@ -1058,6 +1058,21 @@ class FakeFirewall:
 
 
 CLOSED = {"tcp": "closed", "dns": "closed", "resolver": "closed"}
+
+
+class HaltTests(unittest.TestCase):
+    """Ring 5 (MISSION-DISPATCH-001 §3h item 5): a mission HITL halted starts no agent and publishes nothing."""
+
+    def test_a_halted_mission_is_planned_for_nobody(self):
+        jobs, _ = plan(survey_for(PAUSED, head="a" * 40))
+        self.assertEqual(jobs, [])
+
+    def test_a_run_already_going_when_hitl_halts_publishes_nothing(self):
+        job = plan(survey_for(AWAIT_A2, head="a" * 40))[0][0]
+        paused = survey_for(PAUSED, head="a" * 40)
+        self.assertIn("HITL halted the mission", still_wanted(job, paused))
+        self.assertIsNotNone(not_due(job, paused))
+        self.assertIsNone(outcome(job, paused, lambda b: []), "a halt is not reported as a failed run")
 
 
 class BlastRadiusTests(unittest.TestCase):

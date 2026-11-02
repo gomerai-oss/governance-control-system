@@ -56,6 +56,8 @@ MAX_AGENT_ATTEMPTS = 3
 FAILED_MARKER = "<!-- mission-dispatch:failed:{role}:{round} -->"
 _FAILED_RE = re.compile(r"<!-- mission-dispatch:failed:(A2|A3):([1-9][0-9]?) -->")
 _RETRY_RE = re.compile(r"(?m)^\s*/mission retry\s*$")
+_HALT_RE = re.compile(r"(?m)^\s*/mission halt\s*$")
+_RESUME_RE = re.compile(r"(?m)^\s*/mission resume\s*$")
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 REGISTRY_STATUSES = ("ACTIVE", "SUSPENDED", "RETIRED")
 _REGISTRY_ROW_RE = re.compile(r"^\|\s*([a-z0-9][a-z0-9-]{0,39})\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([A-Z]+)\s*\|")
@@ -315,6 +317,26 @@ def hitl_retries(comments: Sequence[dict], hitl: set) -> Tuple[str, ...]:
                         if (c.get("user") or {}).get("type") == "User"
                         and str((c.get("user") or {}).get("login", "")).casefold() in hitl
                         and _RETRY_RE.search(c.get("body") or "") and c.get("created_at")))
+
+
+def hitl_halt(comments: Sequence[dict], hitl: set) -> Optional[str]:
+    """The HITL login whose ``/mission halt`` is in force, or None (Amendment 010).
+
+    Comments are read in the order GitHub lists them (oldest first); a ``/mission resume`` after a halt lifts it.
+    Only HITL user accounts count. A comment carrying both commands counts as a halt: stopping wins.
+    """
+    halted_by: Optional[str] = None
+    for c in comments:
+        user = c.get("user") or {}
+        login = str(user.get("login", ""))
+        if user.get("type") != "User" or login.casefold() not in hitl:
+            continue
+        body = c.get("body") or ""
+        if _HALT_RE.search(body):
+            halted_by = login
+        elif _RESUME_RE.search(body):
+            halted_by = None
+    return halted_by
 
 
 def parse_iso(text: str) -> Optional[datetime]:

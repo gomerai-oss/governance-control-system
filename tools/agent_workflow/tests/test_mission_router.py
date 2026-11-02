@@ -1316,6 +1316,77 @@ class RouterLoopTests(unittest.TestCase):
         issue = self.cancel("M-PARALLEL-ONE")
         self.assertIn("mission:done", [l["name"] for l in issue["labels"]])
 
+    # ---- halt and resume (Amendment 010, ring 5)
+    def halt(self, mid=MID, login=HITL, type_="User", body="/mission halt"):
+        return self.cancel(mid, login, type_, body)
+
+    def test_hitl_halt_holds_every_stage_pr_open_and_resume_continues(self):
+        """Attack (the kill switch): a running mission must stop merging the moment HITL says so."""
+        self.start_mission()
+        issue = self.halt(body="Stopping to look at this.\n/mission halt")
+        self.assertEqual((issue["state"], self.labels()), ("open", ["agent:needs-hitl", "mission", "mission:paused"]))
+        self.assertIn(f"**Halted by HITL.** HITL {HITL} halted it with /mission halt", issue["body"])
+        self.assertIn('stage: "PAUSED"', issue["body"])
+        self.assertIn('paused_from: "AWAIT_A2"', issue["body"])
+        n = self.a2_round(1)
+        self.assertEqual(self.gh.prs[n]["state"], "open", "held, not merged")
+        self.assertNotIn("agent:blocked", [l["name"] for l in self.gh.prs[n].get("labels") or []], "held, not refused")
+        self.assertFalse(any("did not merge" in c for c in self.bot_comments(n)))
+        self.assertFalse(any("mission-dispatch:failed" in c for c in self.bot_comments(issue["number"])),
+                         "a halt never counts toward blocking the stage")
+        for _ in range(4):
+            self.sweep()
+        self.assertEqual(self.gh.prs[n]["state"], "open", "still held after more sweeps")
+        self.halt(body="/mission resume")
+        self.assertEqual(self.gh.prs[n]["merged_by"], BOT, "resume continues from where it stopped")
+        self.assertIn("mission:stage-a3", self.labels())
+
+    def test_halt_counts_only_from_a_hitl_user_on_its_own_line(self):
+        self.start_mission()
+        for login, type_, body in ((A2B, "Bot", "/mission halt"), ("someone", "User", "/mission halt"),
+                                   (HITL, "Bot", "/mission halt"), (HITL, "User", "please /mission halt this")):
+            with self.subTest(login=login, type_=type_, body=body):
+                self.halt(login=login, type_=type_, body=body)
+                self.assertIn("mission:stage-a2", self.labels())
+
+    def test_an_agent_cannot_resume_what_hitl_halted(self):
+        """Attack: the agent (or anyone not HITL) comments /mission resume to undo the halt."""
+        self.start_mission()
+        self.halt()
+        for login, type_ in ((A2B, "Bot"), ("someone", "User"), (HITL, "Bot")):
+            self.halt(login=login, type_=type_, body="/mission resume")
+            self.assertIn("mission:paused", self.labels())
+        n = self.a2_round(1)
+        self.assertEqual(self.gh.prs[n]["state"], "open")
+
+    def test_the_latest_command_wins_and_stopping_wins_a_tie(self):
+        self.start_mission()
+        self.halt(body="/mission resume")  # before any halt: nothing to lift
+        self.assertIn("mission:stage-a2", self.labels())
+        self.halt()
+        self.halt(body="/mission resume")
+        self.assertIn("mission:stage-a2", self.labels())
+        self.halt()
+        self.assertIn("mission:paused", self.labels(), "a new halt after a resume halts again")
+        self.halt(body="/mission resume\n/mission halt")
+        self.assertIn("mission:paused", self.labels(), "a comment with both is a halt")
+
+    def test_a_halted_mission_keeps_its_files(self):
+        self.start_mission("M-OLD-001", scope=("tools/shared/**",))
+        self.halt("M-OLD-001")
+        n = self.start_mission("M-NEW-001", scope=("tools/shared/**",))
+        self.assertEqual(self.gh.prs[n]["state"], "open", "the halted mission still reserves its build_scope")
+
+    def test_cancel_still_ends_a_halted_mission_and_halt_after_done_changes_nothing(self):
+        self.start_mission()
+        self.halt()
+        issue = self.cancel()
+        self.assertEqual((issue["state"], "mission:cancelled" in self.labels()), ("closed", True))
+        self.start_mission("M-PARALLEL-ONE", scope=("tools/m-parallel-one/**",))
+        self.finish("M-PARALLEL-ONE")
+        issue = self.halt("M-PARALLEL-ONE")
+        self.assertIn("mission:done", [l["name"] for l in issue["labels"]])
+
     def test_handoff_names_the_runtime(self):
         doc = json.loads(manifest_doc())
         doc["roles"]["A2"]["runtime"] = "claude-code"
@@ -1486,6 +1557,29 @@ class RouterLoopTests(unittest.TestCase):
                  self.open_plan("M-LEG-003", stack, ["M-LEG-002"])]
         self.sweep()
         return plans
+
+    def test_a_halt_on_the_stack_issue_holds_its_landing_until_resume(self):
+        """Attack (the kill switch): a stack that has fully passed must not land while HITL has halted it."""
+        p1, _, _ = self.open_chained("S-7")
+        self.gh.comment_as(p1, HITL, f"/mission approve {self.stack_fingerprint(p1)}")
+        self.sweep()
+        for mid in ("M-LEG-001", "M-LEG-002", "M-LEG-003"):
+            self.run_loop(mid, "S-7")
+        main_before = self.gh.branches["main"]
+        stack = self.stack_issue("S-7")
+        self.gh.comment_as(stack["number"], HITL, "/mission halt")
+        self.sweep()
+        self.assertIn("mission:paused", [l["name"] for l in self.stack_issue("S-7")["labels"]])
+        for mid in ("M-LEG-001", "M-LEG-002", "M-LEG-003"):
+            (mi,) = [i for i in self.gh.issues.values() if i["title"] == f"[mission] {mid}"]
+            self.assertIn("mission:paused", [l["name"] for l in mi["labels"]], f"{mid} is halted with its stack")
+        land = self.gh.open_pr("stack/S-7", "main", A3B)
+        self.sweep()
+        self.assertEqual((self.gh.prs[land]["state"], self.gh.branches["main"]), ("open", main_before))
+        self.gh.comment_as(stack["number"], HITL, "/mission resume")
+        self.sweep()
+        self.sweep()
+        self.assertEqual(self.gh.prs[land]["merged_by"], BOT)
 
     def test_chained_stack_lands_whole_after_one_approval(self):
         p1, p2, p3 = self.open_chained()
