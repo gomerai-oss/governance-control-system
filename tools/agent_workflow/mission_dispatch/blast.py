@@ -1,22 +1,27 @@
-"""Blast radius (ring 5): the checks run with no network, and every check and agent run is capped.
+"""Blast radius (ring 5): checks and agents with no open network, and every check and agent run capped.
 
 MISSION-DISPATCH-001 §3h, Amendment 012. The mode is ``"blast_radius"`` in ``config.json``:
 
-observe  (the default when the key is absent) the caps apply; the network rules only count what the checks
-         account sends, and the probe's result is recorded
-enforce  the network rules reject everything the checks account sends except on loopback, and loopback DNS too;
-         a probe that gets through fails the job before any check runs
+observe  (the default when the key is absent) the caps apply; the checks' network rules only count, and the
+         probe's result is recorded; the agent runs as before, as the runner, pointed at the egress proxy, which
+         admits everything and records it
+enforce  the checks' network rules reject everything except loopback, and loopback DNS too; a probe that gets
+         through fails the job before any check runs. The agent runs as its own account, whose only way out is
+         the egress proxy, which admits only the hosts listed for its runtime
 
-The rules match the checks account's user id, so the runner's own processes keep their network. Loopback DNS is
-refused because the runner's local resolver forwards queries to the internet, which would carry data out.
+The rules match one account's user id, so the runner's own processes keep their network. Loopback DNS is refused
+because the runner's local resolver forwards queries to the internet, which would carry data out.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -85,9 +90,14 @@ def mode(config: Mapping[str, Any]) -> str:
     return value
 
 
-def limits_argv() -> List[str]:
-    """prlimit prefix for one capped command: processes, size of any file written, open files."""
-    return ["prlimit", f"--nproc={MAX_PROCESSES}", f"--fsize={MAX_FILE_BYTES}", f"--nofile={MAX_OPEN_FILES}", "--"]
+def limits_argv(own_account: bool = True) -> List[str]:
+    """prlimit prefix for one capped command: size of any file written, open files, and processes.
+
+    The process cap counts every process of the account, so it applies only to a run with an account of its own
+    (``own_account``): on a shared account it would count the runner's own processes, or a laptop user's.
+    """
+    nproc = [f"--nproc={MAX_PROCESSES}"] if own_account else []
+    return ["prlimit", *nproc, f"--fsize={MAX_FILE_BYTES}", f"--nofile={MAX_OPEN_FILES}", "--"]
 
 
 def keep_tail(path: Path, limit: int = LOG_MAX_BYTES) -> None:
@@ -199,3 +209,174 @@ class CheckNetwork:
                         sent += int(found.group(1))
             self.record["packets_sent"] = sent
         return dict(self.record)
+
+
+# ------------------------------------------------------------------ the agent (§3h items 2 and 3)
+AGENT_ACCOUNT = "mission-agent"
+AGENT_CHAIN = "MISSION-AGENT-NET"
+POLICY_FILE = Path(__file__).resolve().parent / "egress-policy.json"
+EGRESS_LOG, EGRESS_READY, EGRESS_ERR = "egress.jsonl", "egress.port", "egress.err"
+EGRESS_START_TIMEOUT = 15.0
+EGRESS_MAX_BYTES = 4 * 1024 * 1024  # of egress.jsonl kept with the run's artifact
+PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+NO_PROXY_ENV = ("NO_PROXY", "no_proxy")
+
+
+def agent_home(account: str) -> Path:
+    return Path("/home") / account
+
+
+def agent_firewall_argv(account: str, port: int) -> List[List[str]]:
+    """Every command that closes ``account``'s network except a TCP connection to the proxy on 127.0.0.1."""
+    if not _ACCOUNT.fullmatch(account):
+        raise BlastError(f"{account!r} is not a usable account name")
+    if not (isinstance(port, int) and 0 < port < 65536):
+        raise BlastError(f"{port!r} is not a port")
+    tag = ["-m", "comment", "--comment", TAG]
+    commands = []
+    for tool in FIREWALLS:
+        base = ["sudo", "-n", tool, "-w"]
+        commands.append([*base, "-N", AGENT_CHAIN])
+        if tool == "iptables":
+            commands.append([*base, "-A", AGENT_CHAIN, "-o", "lo", "-p", "tcp", "-d", "127.0.0.1",
+                             "--dport", str(port), "-j", "ACCEPT"])
+        commands.append([*base, "-A", AGENT_CHAIN, *tag, "-j", "REJECT"])
+        commands.append([*base, "-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", account, "-j", AGENT_CHAIN])
+    return commands
+
+
+def run_as_argv(account: str, env_names: Sequence[str]) -> List[str]:
+    """sudo prefix that runs as ``account`` keeping exactly ``env_names`` (values never on a command line)."""
+    if not _ACCOUNT.fullmatch(account):
+        raise BlastError(f"{account!r} is not a usable account name")
+    names = sorted(n for n in env_names if n != "PATH")  # sudo's secure_path sets PATH
+    if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) for n in names):
+        raise BlastError("an environment name cannot be passed through sudo")
+    return ["sudo", "-n", "-u", account, f"--preserve-env={','.join(names)}", "--"]
+
+
+def account_env(env: Mapping[str, str], account: str, runner_home: str) -> Dict[str, str]:
+    """``env`` for a run as ``account``: its own HOME, and nothing pointing into the runner's home."""
+    home = str(agent_home(account))
+    kept = {k: v for k, v in env.items() if not (runner_home and runner_home.rstrip("/") + "/" in v + "/")}
+    kept["HOME"] = home
+    return kept
+
+
+class AgentEgress:
+    """The agent's way out for one run: the proxy, and under enforce the account's firewall and probe."""
+
+    def __init__(self, runtime: str, blast_mode: str, root: Path, account: Optional[str] = None,
+                 run: Runner = _run, popen: Callable[..., Any] = subprocess.Popen, policy: Path = POLICY_FILE,
+                 probe_host: Optional[Callable[[], str]] = None, log: Callable[[str], None] = print) -> None:
+        if blast_mode not in MODES:
+            raise BlastError(f"unknown blast-radius mode {blast_mode!r}")
+        if blast_mode == ENFORCE and not account:
+            raise BlastError("blast radius is enforced but the agent has no account of its own to run as")
+        self.runtime, self.mode, self.root, self.account = runtime, blast_mode, root, account
+        self.run, self.popen, self.policy, self.log = run, popen, policy, log
+        self.probe_host = probe_host or _probe_host
+        self.proc: Any = None
+        self.port = 0
+
+    def start(self) -> Dict[str, str]:
+        """Start the proxy (and close the account's network). Returns the variables that point the runtime at it."""
+        try:
+            self._start_proxy()
+            if self.account and self.mode == ENFORCE:
+                self._close_network()
+        except BlastError as exc:
+            if self.mode == ENFORCE:
+                self.stop()
+                raise
+            self.log(f"::warning::egress proxy not used in observe mode: {exc}")
+            self.stop()
+            return {}
+        url = f"http://127.0.0.1:{self.port}"
+        return {name: url for name in PROXY_ENV}
+
+    def _start_proxy(self) -> None:
+        ready = self.root / EGRESS_READY
+        if ready.exists() or ready.is_symlink():
+            ready.unlink()
+        tooling = str(Path(__file__).resolve().parents[1])
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": tooling, "LANG": "C.UTF-8"}
+        err_path = self.root / EGRESS_ERR  # a file, not a pipe: nothing reads it while the agent runs
+        with open(err_path, "wb") as err:
+            self.proc = self.popen([sys.executable, "-B", "-m", "egress", "serve", "--policy", str(self.policy),
+                                    "--runtime", self.runtime, "--mode", self.mode,
+                                    "--log", str(self.root / EGRESS_LOG), "--ready", str(ready)],
+                                   env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+        deadline = time.monotonic() + EGRESS_START_TIMEOUT
+        while not ready.is_file():
+            if self.proc.poll() is not None:
+                why = err_path.read_bytes()[-300:].decode("utf-8", "replace").strip()
+                raise BlastError(f"the egress proxy did not start: {why}")
+            if time.monotonic() > deadline:
+                raise BlastError("the egress proxy did not start in time")
+            time.sleep(0.05)
+        self.port = int(ready.read_text(encoding="utf-8").strip())
+
+    def _close_network(self) -> None:
+        for argv in agent_firewall_argv(self.account, self.port):
+            done = self.run(argv)
+            if done.returncode != 0:
+                raise BlastError(f"the agent's network could not be closed ({' '.join(argv[2:5])}: "
+                                 f"{(done.stderr or done.stdout or '').strip()[:200]})")
+        done = self.run(probe_argv(self.account, self.probe_host(), "/usr/local/bin:/usr/bin:/bin"))
+        try:
+            probe = json.loads((done.stdout or "").strip().splitlines()[-1])
+            opened = sorted(k for k, v in probe.items() if v != "closed")
+        except (ValueError, IndexError, AttributeError):
+            raise BlastError("the network probe gave no result, so the agent's network is not proven closed") from None
+        if opened or set(probe) != {"tcp", "dns", "resolver"}:
+            raise BlastError("the agent's network is still open past the proxy (" + ", ".join(opened) + ")")
+
+    def stop(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+
+
+def hand_over(root: Path, account: str, paths: Sequence[Path], run: Runner = _run) -> None:
+    """Give ``account`` the paths it works in for the run; everything else under ``root`` stays the runner's."""
+    for path in paths:
+        done = run(["sudo", "-n", "chown", "-R", "--no-dereference", f"{account}:{account}", str(path)])
+        if done.returncode != 0:
+            raise BlastError(f"cannot hand {path.name} to {account}: {(done.stderr or '').strip()[:200]}")
+
+
+def take_back(root: Path, account: str, run: Runner = _run) -> List[str]:
+    """Kill everything ``account`` runs, then give ``root`` back to the runner. Returns the problems found."""
+    problems = []
+    run(["sudo", "-n", "pkill", "-KILL", "-u", account])
+    if run(["pgrep", "-u", account]).returncode == 0:
+        problems.append(f"processes of {account} survived the run")
+    done = run(["sudo", "-n", "chown", "-R", "--no-dereference", f"{os.getuid()}:{os.getgid()}", str(root)])
+    if done.returncode != 0:
+        problems.append(f"cannot take {root} back from {account}")
+    return problems
+
+
+def keep_egress(root: Path, out_dir: Path) -> Dict[str, Any]:
+    """Copy the proxy's log next to collect's output (capped) and summarize it."""
+    src = root / EGRESS_LOG
+    if src.is_symlink() or not src.is_file():
+        return {}
+    data = src.read_bytes()
+    cut = len(data) > EGRESS_MAX_BYTES
+    data = data[:EGRESS_MAX_BYTES]
+    lines = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            lines.append(json.loads(line))
+        except ValueError:
+            continue
+    (out_dir / EGRESS_LOG).write_bytes(data)
+    hosts = sorted({str(l.get("host", "")) for l in lines if not l.get("listed")})
+    return {"lines": len(lines), "refused": sum(l.get("decision") == "refused" for l in lines),
+            "off_list": hosts[:50], "truncated": cut}

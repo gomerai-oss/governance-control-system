@@ -36,6 +36,7 @@ from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
 from . import binding, blast
+from .runtimes import BINARIES
 from .dispatch import (
     DispatchError,
     busy_lanes,
@@ -186,17 +187,42 @@ def _binding_mode(config: dict) -> str:
 def cmd_prepare(args) -> int:
     job = _job()
     config = load_config()
-    prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), _env("GITHUB_TOKEN"), os.environ, Path.home(),
+    prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), _env("GITHUB_TOKEN"), os.environ, _home(args),
             config["default_branch"], Path(args.checks_report) if args.checks_report else None,
             binding_mode=_binding_mode(config))
     _log(f"{job.key}: checkout ready at {job.base_sha}")
     return 0
 
 
+def _home(args) -> Path:
+    """The agent's home: its own account's under blast radius (§3h), else this account's."""
+    return blast.agent_home(args.run_as) if args.run_as else Path.home()
+
+
+def _blast_mode(config: dict) -> str:
+    try:
+        return blast.mode(config)
+    except blast.BlastError as exc:
+        raise DispatchError(str(exc)) from None
+
+
+def cmd_blast_mode(args) -> int:
+    """Print the blast-radius mode for the workflow (``mode=<observe|enforce>`` to GITHUB_OUTPUT)."""
+    value = _blast_mode(load_config())
+    _output("mode", value)
+    _log(f"blast radius: {value}")
+    return 0
+
+
 def cmd_run(args) -> int:
     job = _job()
-    log_path = run_agent(job, Path(args.root), os.environ, Path.home(), timeout=args.timeout,
-                         binding_mode=_binding_mode(load_config()))
+    config = load_config()
+    binaries = BINARIES
+    if args.runtime_dir:
+        binaries = {name: str(Path(args.runtime_dir) / binary) for name, binary in BINARIES.items()}
+    log_path = run_agent(job, Path(args.root), os.environ, _home(args), timeout=args.timeout, binaries=binaries,
+                         binding_mode=_binding_mode(config), blast_mode=_blast_mode(config),
+                         run_as=args.run_as or None)
     _log(f"{job.key}: {job.runtime} finished (log: {log_path})")
     return 0
 
@@ -267,11 +293,15 @@ def main(argv=None) -> int:
     sub.choices["checks"].add_argument("--timeout", type=float, default=900.0)
     sub.choices["checks"].add_argument("--run-as", help="unprivileged account to run the checks as")
     sub.choices["prepare"].add_argument("--checks-report")
+    sub.add_parser("blast-mode")
+    for name in ("prepare", "run"):
+        sub.choices[name].add_argument("--run-as", default="", help="the agent's own account (blast radius, §3h)")
+    sub.choices["run"].add_argument("--runtime-dir", default="", help="where the pinned runtimes are installed")
     sub.choices["collect"].add_argument("--out", required=True)
     sub.choices["publish"].add_argument("--artifact", required=True)
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
     args = parser.parse_args(argv)
-    steps = {"plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
+    steps = {"blast-mode": cmd_blast_mode, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land}
     try:
         return steps[args.step](args)

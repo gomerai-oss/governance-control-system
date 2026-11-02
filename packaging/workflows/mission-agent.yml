@@ -17,6 +17,9 @@ name: Mission Agent
 #   (environment mission-runtime); the read-only token is used in earlier steps and
 #   is never in the agent's process tree. It can only edit files in the checkout.
 #   A change containing the model login is refused; the agent log is scrubbed of it.
+#   Its way out is the egress proxy (blast radius, MISSION-DISPATCH-001 §3h). Under
+#   "enforce" it runs as its own account, mission-agent, whose network reaches only that
+#   proxy, with the runtimes, the tooling and the job outside the runner's home.
 # - publish: a separate VM running only the default branch's code. Its environment
 #   (mission-agent-<agent>, deployable from the default branch only) holds that one
 #   agent's App key. It re-checks the patch on a fresh clone, then pushes the stage
@@ -179,6 +182,24 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
 
+      - name: Blast radius (observe or enforce)
+        id: blast
+        if: steps.due.outputs.due == 'true'
+        run: |
+          python3 -m mission_dispatch blast-mode
+          if grep -qx 'mode=enforce' "$GITHUB_OUTPUT"; then
+            sudo useradd --create-home --shell /bin/bash mission-agent
+            sudo install -d -o root -g root -m 755 /opt/mission-runtime /opt/mission-runtime/bin
+            sudo cp -a tooling /opt/mission-tooling
+            sudo chown -R root:root /opt/mission-tooling
+            sudo chmod -R a+rX,go-w /opt/mission-tooling
+            sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /srv/mission-job
+            { echo "root=/srv/mission-job/mission"; echo "run_as=mission-agent"; echo "bin=/opt/mission-runtime/bin"
+              echo "pythonpath=/opt/mission-tooling/tools/agent_workflow"; } >> "$GITHUB_OUTPUT"
+          else
+            { echo "root=$RUNNER_TEMP/mission"; echo "run_as="; echo "bin="; echo "pythonpath=$PYTHONPATH"; } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Fetch the checks results
         if: steps.due.outputs.due == 'true' && matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
         continue-on-error: true  # without them A3 is told every check is "not run"
@@ -189,35 +210,55 @@ jobs:
 
       - name: Install Claude Code (pinned by SHA-256)
         if: steps.due.outputs.due == 'true' && matrix.job.runtime == 'claude-code'
+        env:
+          BIN: ${{ steps.blast.outputs.bin }}
         run: |
           pkg="$RUNNER_TEMP/claude-code.tgz"
           curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-${CLAUDE_CODE_VERSION}.tgz" -o "$pkg"
           echo "${CLAUDE_CODE_SHA256}  $pkg" | sha256sum --check --strict
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf "$pkg" -C "$HOME/.local/bin" --strip-components=1 package/claude
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/claude" --version
+          if [ -n "$BIN" ]; then  # enforce: root-owned, outside the runner's home
+            sudo tar -xzf "$pkg" -C "$BIN" --strip-components=1 --no-same-owner package/claude
+            "$BIN/claude" --version
+          else
+            mkdir -p "$HOME/.local/bin"
+            tar -xzf "$pkg" -C "$HOME/.local/bin" --strip-components=1 package/claude
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            "$HOME/.local/bin/claude" --version
+          fi
 
       - name: Install Cursor CLI (pinned by SHA-256)
         if: steps.due.outputs.due == 'true' && matrix.job.runtime == 'cursor-cli'
+        env:
+          BIN: ${{ steps.blast.outputs.bin }}
         run: |
           pkg="$RUNNER_TEMP/cursor-cli.tgz"
           curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_CLI_VERSION}/linux/x64/agent-cli-package.tar.gz" -o "$pkg"
           echo "${CURSOR_CLI_SHA256}  $pkg" | sha256sum --check --strict
-          dest="$HOME/.local/share/cursor-agent/versions/${CURSOR_CLI_VERSION}"
-          mkdir -p "$dest" "$HOME/.local/bin"
-          tar -xzf "$pkg" -C "$dest" --strip-components=1
-          ln -sf "$dest/cursor-agent" "$HOME/.local/bin/agent"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/agent" --version
+          if [ -n "$BIN" ]; then  # enforce: root-owned, outside the runner's home
+            dest="/opt/mission-runtime/cursor-agent/${CURSOR_CLI_VERSION}"
+            sudo mkdir -p "$dest"
+            sudo tar -xzf "$pkg" -C "$dest" --strip-components=1 --no-same-owner
+            sudo ln -sf "$dest/cursor-agent" "$BIN/agent"
+            "$BIN/agent" --version
+          else
+            dest="$HOME/.local/share/cursor-agent/versions/${CURSOR_CLI_VERSION}"
+            mkdir -p "$dest" "$HOME/.local/bin"
+            tar -xzf "$pkg" -C "$dest" --strip-components=1
+            ln -sf "$dest/cursor-agent" "$HOME/.local/bin/agent"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            "$HOME/.local/bin/agent" --version
+          fi
 
       - name: Prepare the checkout (read-only token, this step only)
         if: steps.due.outputs.due == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          JOB_ROOT: ${{ steps.blast.outputs.root }}
+          RUN_AS: ${{ steps.blast.outputs.run_as }}
+          PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
         run: >-
           python3 -m mission_dispatch prepare --repo "$GITHUB_REPOSITORY"
-          --root "$RUNNER_TEMP/mission" --checks-report "$RUNNER_TEMP/checks"
+          --root "$JOB_ROOT" --checks-report "$RUNNER_TEMP/checks" --run-as "$RUN_AS"
 
       - name: Run the agent (no GitHub token)
         if: steps.due.outputs.due == 'true'
@@ -225,7 +266,13 @@ jobs:
           ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
-        run: python3 -m mission_dispatch run --root "$RUNNER_TEMP/mission" --timeout 3600
+          JOB_ROOT: ${{ steps.blast.outputs.root }}
+          RUN_AS: ${{ steps.blast.outputs.run_as }}
+          PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
+          BIN: ${{ steps.blast.outputs.bin }}
+        run: >-
+          python3 -m mission_dispatch run --root "$JOB_ROOT" --timeout 3600
+          --run-as "$RUN_AS" --runtime-dir "$BIN"
 
       - name: Check and collect the change (no GitHub token; refuses one containing the model login)
         if: steps.due.outputs.due == 'true'
@@ -233,7 +280,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
-        run: python3 -m mission_dispatch collect --root "$RUNNER_TEMP/mission" --out "$RUNNER_TEMP/out"
+          JOB_ROOT: ${{ steps.blast.outputs.root }}
+          PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
+        run: python3 -m mission_dispatch collect --root "$JOB_ROOT" --out "$RUNNER_TEMP/out"
 
       - name: Hand the change to the publish job
         if: steps.due.outputs.due == 'true'
@@ -249,7 +298,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: agent-log-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
-          path: ${{ runner.temp }}/mission/agent.log
+          path: ${{ steps.blast.outputs.root }}/agent.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -258,7 +307,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: capacity-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
-          path: ${{ runner.temp }}/mission/capacity.json
+          path: ${{ steps.blast.outputs.root }}/capacity.json
           if-no-files-found: ignore
           retention-days: 1
 

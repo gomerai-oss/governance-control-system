@@ -195,11 +195,16 @@ are kept with the run's artifacts in both modes.
    `1.1.1.1:53`, and a lookup through the local resolver. In `"enforce"` any of them succeeding, or rules that cannot
    be installed, or a probe that gives no result, fails the job before any check runs; in `"observe"`
    the rules count instead of reject, and the result is recorded in `CHECKS.md` as `network: open` or `closed`.
-2. **The agent runs as its own account.** The agent runs as a fresh unprivileged account, `mission-agent`, with the
-   environment §3b already allows, its own home, and the runtimes installed root-owned and read-only outside the
-   runner's home (`/opt/mission-runtime`). The checkout and job root are handed to that account for the run and
-   back to the runner before `collect`. Every process of the account is killed after the run; if any survives, the
-   job fails. The MCP gateway runs as that account too, as the runtime's child, and needs no network.
+2. **The agent runs as its own account** under `"enforce"`. The agent runs as a fresh unprivileged account,
+   `mission-agent`, with the environment §3b already allows, its own home, and nothing that points into the
+   runner's home, which other accounts cannot enter. The runtimes (`/opt/mission-runtime`) and the tooling the
+   gateway runs from (`/opt/mission-tooling`) are installed root-owned and read-only, and the job root is
+   `/srv/mission-job/mission`. For the run that account gets only the checkout, its git directory and the
+   gateway's evidence folder; the canary, the binding record and the rest of the job root stay the runner's. The
+   model login reaches the runtime by environment only (`sudo --preserve-env`), never on a command line. Every
+   process of the account is killed after the run and the job root is taken back; if any process survives, the
+   job fails. The MCP gateway runs as that account too, as the runtime's child, and needs no network. Under
+   `"observe"` the agent runs as before, as the runner account, pointed at the proxy (item 3).
 3. **The agent's only way out is the egress proxy.** Firewall rules reject every outbound packet of
    `mission-agent`, DNS included, except to the egress proxy on loopback (`tools/agent_workflow/egress/`). The
    proxy runs as the runner account and accepts only HTTPS `CONNECT host:443`. It refuses an IP-literal host, any
@@ -207,10 +212,17 @@ are kept with the run's artifacts in both modes.
    `AUTHORITY` file, so the list changes only by a hand-merged PR). It resolves the name itself and refuses a name
    that resolves to a private, loopback or link-local address. It stops admitting after 256 MiB in total. Every
    decision is one line of `egress.jsonl` (time, host, port, allowed or refused, reason, bytes). The runtime is
-   pointed at the proxy with `HTTPS_PROXY`; a runtime that ignores it reaches nothing. In `"observe"` the proxy admits
-   any host on port 443 and records the ones off the list, and the firewall counts direct connections.
-4. **Caps.** Each check and the agent run under `prlimit`: at most 512 processes, 1 GiB per written file and 4096
-   open files. A change is at most 5 MiB (§3c) and at most 300 files. The agent log is cut to its last 8 MiB. Time
+   pointed at the proxy with `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`, and `NO_PROXY` is dropped; a runtime that
+   ignores them reaches nothing. Before the agent starts, a probe as that account must find a direct connection,
+   a DNS query and a lookup through the local resolver all refused, or the job fails. In `"observe"` the proxy
+   admits every tunnel and records what it would refuse; a request that is not a tunnel is still refused. The
+   proxy failing to start fails the job under `"enforce"` and is a warning under `"observe"`. `collect` keeps the
+   proxy's log (capped at 4 MiB) beside the patch, with a summary of the hosts off the list; `publish` never reads
+   it.
+4. **Caps.** Each check and the agent run under `prlimit`: 1 GiB per written file and 4096 open files, and, when
+   the run has an account of its own (the checks always, the agent under `"enforce"`), at most 512 processes. The
+   process cap counts every process of the account, so on the shared runner account it would count the runner's
+   own. A change is at most 5 MiB (§3c) and at most 300 files. The agent log is cut to its last 8 MiB. Time
    caps are unchanged: 15 minutes per check, 60 minutes per agent run. Claude Code runs with `--max-turns 200`. The
    pinned Cursor CLI has no turn cap, so it is bounded by time alone (§7).
 5. **HITL can halt a mission.** A job for a mission HITL halted (MISSION-ROUTER-001 Amendment 010) is not due: `plan`

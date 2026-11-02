@@ -672,15 +672,21 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
 
 def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, timeout: float = DEFAULT_TIMEOUT,
               binaries: Mapping[str, str] = BINARIES, now: Optional[datetime] = None,
-              binding_mode: str = binding.OFF) -> Path:
-    """Start the runtime in the prepared checkout with no GitHub credential. Returns the log path."""
+              binding_mode: str = binding.OFF, blast_mode: str = blast.OBSERVE, run_as: Optional[str] = None,
+              egress: Optional["blast.AgentEgress"] = None) -> Path:
+    """Start the runtime in the prepared checkout with no GitHub credential. Returns the log path.
+
+    The runtime's way out is the egress proxy (§3h). With ``run_as`` (required under enforce) it runs as that
+    account, which holds only the checkout, its git directory and the gateway's evidence folder for the run;
+    ``home`` is then that account's home.
+    """
     checkout = Checkout(root)
     log_path = root / "agent.log"
     try:
         bound = None
         if binding_mode == binding.ENFORCE:
             bound = binding.load(root)
-        argv = [*blast.limits_argv(),
+        argv = [*blast.limits_argv(own_account=bool(run_as)),
                 *argv_for(job.runtime, checkout.tree, prompt_text(job), home, binaries, job.model, bound)]
     except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
@@ -688,6 +694,21 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
     canary = run_canary(root)
     if canary:
         env[CANARY_ENV] = canary
+    try:
+        egress = egress or blast.AgentEgress(job.runtime, blast_mode, root, run_as)
+        for name in blast.NO_PROXY_ENV:
+            env.pop(name, None)
+        env.update(egress.start())
+        if run_as:
+            env = blast.account_env(env, run_as, environ.get("HOME", ""))
+            mine = (checkout.tree, checkout.git_dir, binding.binding_dir(root) / binding.EVIDENCE_DIR)
+            blast.hand_over(root, run_as, [p for p in mine if p.exists()], egress.run)
+            argv = [*blast.run_as_argv(run_as, list(env)), *argv]
+    except blast.BlastError as exc:
+        if egress is not None:
+            egress.stop()
+        raise DispatchError(str(exc)) from None
+    problems: List[str] = []
     try:
         with open(log_path, "w", encoding="utf-8") as out:
             done = subprocess.run(argv, cwd=str(checkout.tree), env=env, stdout=out, stderr=subprocess.STDOUT,
@@ -697,11 +718,16 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
     except OSError as exc:
         raise DispatchError(f"{job.runtime} could not start: {exc}") from None
     finally:
+        if run_as:
+            problems = blast.take_back(root, run_as, egress.run)
+        egress.stop()
         if job.runtime == CURSOR_CLI:
             remove_cursor_config(checkout.tree)
             binding.remove_cursor_mcp(checkout.tree)
         blast.keep_tail(log_path)
         scrub(log_path, known_secrets(root, environ))
+    if problems:
+        raise DispatchError("; ".join(problems))
     if done.returncode != 0:
         raise DispatchError(f"{job.runtime} exited {done.returncode}")
     return log_path
@@ -750,6 +776,9 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
     kept = binding.keep_evidence(root, out_dir)
     if kept:
         result["binding"] = kept
+    egress = blast.keep_egress(root, out_dir)
+    if egress:
+        result["egress"] = egress
     (out_dir / RESULT_FILE).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
 
@@ -803,7 +832,7 @@ def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str
 def check_argv(command: str, run_as: Optional[str], path: str) -> List[str]:
     """argv for one check, capped (§3h). With ``run_as`` it runs as that unprivileged user, with an empty environment."""
     if not run_as:
-        return [*blast.limits_argv(), "bash", "-c", command]
+        return [*blast.limits_argv(own_account=False), "bash", "-c", command]
     if not AGENT_RE.fullmatch(run_as):
         raise DispatchError(f"{run_as!r} is not a usable account name")
     return ["sudo", "-n", "-u", run_as, "--", *blast.limits_argv(), "env", "-i", f"PATH={path}",

@@ -1,0 +1,7 @@
+{
+  "schema": "egress-policy-v1",
+  "runtimes": {
+    "claude-code": [],
+    "cursor-cli": []
+  }
+}
