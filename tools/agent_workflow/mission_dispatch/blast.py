@@ -248,14 +248,36 @@ def agent_firewall_argv(account: str, port: int) -> List[List[str]]:
     return commands
 
 
-def run_as_argv(account: str, env_names: Sequence[str]) -> List[str]:
-    """sudo prefix that runs as ``account`` keeping exactly ``env_names`` (values never on a command line)."""
+# Run as the agent account between sudo and the runtime. sudo's PAM session adds the machine's /etc/environment, which
+# on GitHub's runners points XDG_CONFIG_HOME and NVM_DIR into the runner's home and overrides values sudo was asked
+# to keep (first enforced review, M-METHOD-003, 2026-11-02). So the environment is cleaned again here, as the agent
+# account, before the runtime starts: anything pointing into the runner's home is dropped, and HOME and the XDG
+# folders are the agent's own. Only the two homes are on the command line, never an environment value.
+XDG_DIRS = (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_CACHE_HOME", ".cache"),
+            ("XDG_STATE_HOME", ".local/state"))
+CLEAN_ENV_SCRIPT = r"""
+import os, sys
+runner, home, argv = sys.argv[1].rstrip("/") + "/", sys.argv[2], sys.argv[3:]
+env = {k: v for k, v in os.environ.items() if runner not in v + "/"}
+env["HOME"] = home
+for name, sub in %r:
+    env[name] = os.path.join(home, sub)
+os.execvpe(argv[0], argv, env)
+""" % (XDG_DIRS,)
+
+
+def run_as_argv(account: str, env_names: Sequence[str], runner_home: str = "") -> List[str]:
+    """Prefix that runs as ``account`` keeping ``env_names`` (values never on a command line), then cleans the
+    environment sudo's session added before anything else starts (``CLEAN_ENV_SCRIPT``)."""
     if not _ACCOUNT.fullmatch(account):
         raise BlastError(f"{account!r} is not a usable account name")
     names = sorted(n for n in env_names if n != "PATH")  # sudo's secure_path sets PATH
     if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) for n in names):
         raise BlastError("an environment name cannot be passed through sudo")
-    return ["sudo", "-n", "-u", account, f"--preserve-env={','.join(names)}", "--"]
+    if not runner_home.startswith("/") or runner_home.rstrip("/") == "":
+        raise BlastError(f"the runner's home {runner_home!r} is not an absolute path below /")
+    return ["sudo", "-n", "-u", account, f"--preserve-env={','.join(names)}", "--",
+            "python3", "-I", "-c", CLEAN_ENV_SCRIPT, runner_home, str(agent_home(account))]
 
 
 def account_env(env: Mapping[str, str], account: str, runner_home: str) -> Dict[str, str]:
@@ -263,6 +285,7 @@ def account_env(env: Mapping[str, str], account: str, runner_home: str) -> Dict[
     home = str(agent_home(account))
     kept = {k: v for k, v in env.items() if not (runner_home and runner_home.rstrip("/") + "/" in v + "/")}
     kept["HOME"] = home
+    kept.update({name: f"{home}/{sub}" for name, sub in XDG_DIRS})
     return kept
 
 

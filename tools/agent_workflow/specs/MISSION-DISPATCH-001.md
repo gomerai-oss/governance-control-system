@@ -202,7 +202,12 @@ are kept with the run's artifacts in both modes. **Switched on:** this repositor
    gateway runs from (`/opt/mission-tooling`) are installed root-owned and read-only, and the job root is
    `/srv/mission-job/mission`. For the run that account gets only the checkout, its git directory and the
    gateway's evidence folder; the canary, the binding record and the rest of the job root stay the runner's. The
-   model login reaches the runtime by environment only (`sudo --preserve-env`), never on a command line. Every
+   model login reaches the runtime by environment only (`sudo --preserve-env`), never on a command line. sudo's
+   session adds the machine's `/etc/environment`, which on GitHub's runners points `XDG_CONFIG_HOME` and `NVM_DIR`
+   into the runner's home over the values it was asked to keep (the first enforced review failed on it,
+   M-METHOD-003). So a short step running as the agent account cleans the environment again before the runtime
+   starts: anything pointing into the runner's home is dropped, and `HOME` and the four `XDG_*` folders are the
+   account's own (`CLEAN_ENV_SCRIPT` in `blast.py`). Every
    process of the account is killed after the run and the job root is taken back; if any process survives, the
    job fails. The MCP gateway runs as that account too, as the runtime's child, and needs no network. Under
    `"observe"` the agent runs as before, as the runner account, pointed at the proxy (item 3).

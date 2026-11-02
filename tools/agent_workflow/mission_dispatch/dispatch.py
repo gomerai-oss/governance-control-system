@@ -707,7 +707,7 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
             env = blast.account_env(env, run_as, environ.get("HOME", ""))
             mine = (checkout.tree, checkout.git_dir, binding.binding_dir(root) / binding.EVIDENCE_DIR)
             blast.hand_over(root, run_as, [p for p in mine if p.exists()], egress.run)
-            argv = [*blast.run_as_argv(run_as, list(env)), *argv]
+            argv = [*blast.run_as_argv(run_as, list(env), environ.get("HOME", "")), *argv]
     except blast.BlastError as exc:
         if egress is not None:
             egress.stop()

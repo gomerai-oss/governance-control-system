@@ -1307,13 +1307,33 @@ class AgentEgressTests(unittest.TestCase):
 
     def test_the_model_login_never_appears_on_a_command_line(self):
         """Attack: read the login from another process's command line (/proc/<pid>/cmdline is world-readable)."""
-        argv = blast.run_as_argv("mission-agent", ["ANTHROPIC_API_KEY", "HOME", "PATH"])
-        self.assertEqual(argv, ["sudo", "-n", "-u", "mission-agent", "--preserve-env=ANTHROPIC_API_KEY,HOME", "--"])
-        with self.assertRaises(blast.BlastError):
-            blast.run_as_argv("mission-agent", ["A=B"])
+        argv = blast.run_as_argv("mission-agent", ["ANTHROPIC_API_KEY", "HOME", "PATH"], "/home/runner")
+        self.assertEqual(argv[:6], ["sudo", "-n", "-u", "mission-agent", "--preserve-env=ANTHROPIC_API_KEY,HOME", "--"])
+        self.assertEqual(argv[6:9], ["python3", "-I", "-c"])
+        self.assertEqual(argv[10:], ["/home/runner", "/home/mission-agent"], "only the two homes on the command line")
+        for bad in ((["A=B"], "/home/runner"), (["HOME"], ""), (["HOME"], "/"), (["HOME"], "relative")):
+            with self.assertRaises(blast.BlastError):
+                blast.run_as_argv("mission-agent", *bad)
         env = blast.account_env({"HOME": "/home/runner", "XDG_CONFIG_HOME": "/home/runner/.config",
                                  "RUNNER_TEMP": "/home/runner/work/_temp", "LANG": "C"}, "mission-agent", "/home/runner")
-        self.assertEqual(env, {"HOME": "/home/mission-agent", "LANG": "C"})
+        self.assertEqual(env, {"HOME": "/home/mission-agent", "LANG": "C",
+                               **{n: f"/home/mission-agent/{s}" for n, s in blast.XDG_DIRS}})
+
+    def test_what_sudo_adds_is_cleaned_before_the_runtime_starts(self):
+        """Attack (found live, M-METHOD-003): sudo's session adds /etc/environment, which points XDG_CONFIG_HOME and
+        NVM_DIR into the runner's home, over the values it was asked to keep; the runtime must never see them."""
+        added = {"XDG_CONFIG_HOME": "/home/runner/.config", "NVM_DIR": "/home/runner/.nvm", "HOME": "/home/runner",
+                 "PATH": os.environ["PATH"], "KEEP": "yes", "ANTHROPIC_API_KEY": self.KEY}
+        argv = blast.run_as_argv("mission-agent", list(added), "/home/runner")[6:]  # what runs after sudo
+        argv[0] = sys.executable
+        done = subprocess.run([*argv, sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+                              env=added, capture_output=True, text=True, timeout=30)
+        seen = json.loads(done.stdout)
+        self.assertFalse([k for k, v in seen.items() if "/home/runner" in v], "nothing points into the runner's home")
+        self.assertEqual(seen["HOME"], "/home/mission-agent")
+        self.assertEqual(seen["XDG_CONFIG_HOME"], "/home/mission-agent/.config")
+        self.assertEqual((seen["KEEP"], seen["ANTHROPIC_API_KEY"]), ("yes", self.KEY), "everything else is kept")
+        self.assertNotIn(self.KEY, " ".join(argv))
 
     def test_running_as_the_agent_account_hands_over_only_its_work_and_takes_it_back(self):
         egress = FakeEgress()
@@ -1331,7 +1351,7 @@ class AgentEgressTests(unittest.TestCase):
         self.assertNotIn(self.KEY, " ".join(argv))
         self.assertEqual(env["ANTHROPIC_API_KEY"], self.KEY, "the login reaches the runtime by environment only")
         self.assertEqual(env["HOME"], "/home/mission-agent")
-        self.assertNotIn("XDG_CONFIG_HOME", env)
+        self.assertEqual(env["XDG_CONFIG_HOME"], "/home/mission-agent/.config", "the agent's own, never the runner's")
         self.assertNotIn("NO_PROXY", env, "the runner's NO_PROXY never reaches the runtime")
         self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:9")
         handed = [c[-1] for c in egress.calls if c[:4] == ["sudo", "-n", "chown", "-R"] and "mission-agent:" in c[-2]]
