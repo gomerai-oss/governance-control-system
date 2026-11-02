@@ -209,7 +209,8 @@ are kept with the run's artifacts in both modes. **Switched on:** this repositor
    starts: anything pointing into the runner's home is dropped, and `HOME` and the four `XDG_*` folders are the
    account's own (`CLEAN_ENV_SCRIPT` in `blast.py`). Every
    process of the account is killed after the run and the job root is taken back; if any process survives, the
-   job fails. The MCP gateway runs as that account too, as the runtime's child, and needs no network. Under
+   job fails. A process killed a moment ago can still be listed until it is reaped, so the kill is repeated and the
+   account looked at again for up to 10 seconds before a process counts as a survivor (M-METHOD-003, A3 round 2). The MCP gateway runs as that account too, as the runtime's child, and needs no network. Under
    `"observe"` the agent runs as before, as the runner account, pointed at the proxy (item 3).
 3. **The agent's only way out is the egress proxy.** Firewall rules reject every outbound packet of
    `mission-agent`, DNS included, except to the egress proxy on loopback (`tools/agent_workflow/egress/`). The

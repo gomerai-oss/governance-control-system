@@ -376,12 +376,28 @@ def hand_over(root: Path, account: str, paths: Sequence[Path], run: Runner = _ru
             raise BlastError(f"cannot hand {path.name} to {account}: {(done.stderr or '').strip()[:200]}")
 
 
-def take_back(root: Path, account: str, run: Runner = _run) -> List[str]:
-    """Kill everything ``account`` runs, then give ``root`` back to the runner. Returns the problems found."""
+KILL_WAIT_SECONDS = 10.0
+KILL_POLL_SECONDS = 0.25
+
+
+def take_back(root: Path, account: str, run: Runner = _run, sleep: Callable[[float], None] = time.sleep) -> List[str]:
+    """Kill everything ``account`` runs, then give ``root`` back to the runner. Returns the problems found.
+
+    A process killed a moment ago can still be listed until the kernel has reaped it, and a runtime that starts many
+    processes (the Cursor CLI, M-METHOD-003 A3 round 2) showed that window. So the kill is repeated and the account is
+    looked at again for up to ``KILL_WAIT_SECONDS``; only a process still there then is a survivor.
+    """
     problems = []
-    run(["sudo", "-n", "pkill", "-KILL", "-u", account])
-    if run(["pgrep", "-u", account]).returncode == 0:
-        problems.append(f"processes of {account} survived the run")
+    waited = 0.0
+    while True:
+        run(["sudo", "-n", "pkill", "-KILL", "-u", account])
+        if run(["pgrep", "-u", account]).returncode != 0:
+            break
+        if waited >= KILL_WAIT_SECONDS:
+            problems.append(f"processes of {account} survived the run")
+            break
+        sleep(KILL_POLL_SECONDS)
+        waited += KILL_POLL_SECONDS
     done = run(["sudo", "-n", "chown", "-R", "--no-dereference", f"{os.getuid()}:{os.getgid()}", str(root)])
     if done.returncode != 0:
         problems.append(f"cannot take {root} back from {account}")
