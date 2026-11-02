@@ -1015,7 +1015,11 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(argv[5:5 + len(blast.limits_argv())], blast.limits_argv(), "capped as that account (§3h)")
         self.assertEqual(argv[5 + len(blast.limits_argv()):][:2], ["env", "-i"])
         self.assertEqual(argv[-3:], ["bash", "-c", "make test"])
-        self.assertEqual(check_argv("make test", None, "/bin"), [*blast.limits_argv(), "bash", "-c", "make test"])
+        self.assertEqual(check_argv("make test", None, "/bin"),
+                         [*blast.limits_argv(own_account=False), "bash", "-c", "make test"])
+        self.assertIn(f"--nproc={blast.MAX_PROCESSES}", argv, "the process cap applies to an account of its own")
+        self.assertNotIn(f"--nproc={blast.MAX_PROCESSES}", check_argv("make test", None, "/bin"),
+                         "never on a shared account, where it would count the runner's own processes")
         for bad in ("root; id", "../x", "Mission"):
             with self.assertRaises(DispatchError):
                 check_argv("x", bad, "/bin")
@@ -1080,10 +1084,11 @@ class BlastRadiusTests(unittest.TestCase):
     def test_a_check_runs_under_the_caps(self):
         """Attack: a check forks without bound, opens files without bound, or writes a file to fill the disk."""
         job = Job(MID, "A3", 1, "a3", A3B, "cursor-cli", "0" * 40, ("tools/demo/**",), "t",
-                  ("ulimit -u; ulimit -n; ulimit -f",))
+                  ("ulimit -n; ulimit -f",))
         (result,) = run_checks(job, self.root, self.root / "checks", self.env, timeout=30)
-        self.assertEqual(result["output_tail"].split(),
-                         [str(blast.MAX_PROCESSES), str(blast.MAX_OPEN_FILES), str(blast.MAX_FILE_BYTES // 1024)])
+        self.assertEqual(result["output_tail"].split(), [str(blast.MAX_OPEN_FILES), str(blast.MAX_FILE_BYTES // 1024)])
+        argv = blast.limits_argv() + ["bash", "-c", "ulimit -u"]  # as an account of its own, processes too
+        self.assertEqual(subprocess.run(argv, capture_output=True, text=True).stdout.strip(), str(blast.MAX_PROCESSES))
 
     def test_the_agent_runs_under_the_caps(self):
         work = self.root / "work"
@@ -1093,10 +1098,9 @@ class BlastRadiusTests(unittest.TestCase):
             checkout.return_value = SimpleNamespace(tree=work / "checkout", git_dir=work / "git", empty=work / "e")
             log = run_agent(job, work, self.env, self.root, timeout=60, binaries=fake_runtime(self.root, """
                 import resource
-                print("LIMITS", resource.getrlimit(resource.RLIMIT_NPROC)[0], resource.getrlimit(resource.RLIMIT_NOFILE)[0],
-                      resource.getrlimit(resource.RLIMIT_FSIZE)[0])
+                print("LIMITS", resource.getrlimit(resource.RLIMIT_NOFILE)[0], resource.getrlimit(resource.RLIMIT_FSIZE)[0])
             """))
-        self.assertIn(f"LIMITS {blast.MAX_PROCESSES} {blast.MAX_OPEN_FILES} {blast.MAX_FILE_BYTES}", log.read_text())
+        self.assertIn(f"LIMITS {blast.MAX_OPEN_FILES} {blast.MAX_FILE_BYTES}", log.read_text())
 
     def test_claude_code_is_capped_in_turns(self):
         argv = argv_for(CLAUDE_CODE, self.root / "checkout", "p", self.root)
@@ -1180,6 +1184,145 @@ class BlastRadiusTests(unittest.TestCase):
         probe = json.loads(done.stdout.strip().splitlines()[-1])
         self.assertEqual((probe["tcp"], probe["dns"]), ("closed", "closed"))
         self.assertIn(probe["resolver"], ("open", "closed"))
+
+
+class FakeEgress:
+    """Stands in for blast.AgentEgress: a proxy address, and a recorded runner for sudo commands."""
+
+    def __init__(self, survivors=False):
+        self.calls, self.stopped, self.survivors = [], False, survivors
+
+    def start(self):
+        return {name: "http://127.0.0.1:9" for name in blast.PROXY_ENV}
+
+    def stop(self):
+        self.stopped = True
+
+    def run(self, argv):
+        self.calls.append(list(argv))
+        return completed(argv, 0 if (argv[0] != "pgrep" or self.survivors) else 1)
+
+
+class AgentEgressTests(unittest.TestCase):
+    """Ring 5 (MISSION-DISPATCH-001 §3h items 2 and 3): the agent's own account and its only way out."""
+
+    KEY = "sk-ant-api03-" + "A" * 40
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.work = self.root / "work"
+        for sub in ("checkout", "git", "empty"):
+            (self.work / sub).mkdir(parents=True)
+        self.env = {"PATH": os.environ["PATH"], "HOME": "/home/runner", "XDG_CONFIG_HOME": "/home/runner/.config",
+                    "NO_PROXY": "*", "ANTHROPIC_API_KEY": self.KEY}
+        self.job = Job(MID, "A2", 1, "a2", A2B, "claude-code", "0" * 40, ("tools/demo/**",), "t")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_agent(self, **kw):
+        with mock.patch("mission_dispatch.dispatch.Checkout") as checkout:
+            checkout.return_value = SimpleNamespace(tree=self.work / "checkout", git_dir=self.work / "git",
+                                                    empty=self.work / "empty")
+            return run_agent(self.job, self.work, self.env, kw.pop("home", self.root), timeout=60, **kw)
+
+    def test_observing_points_the_runtime_at_a_real_proxy_and_keeps_its_log(self):
+        """The fake runtime finds the proxy from HTTPS_PROXY and asks it for a plain request, which is refused."""
+        log = self.run_agent(binaries=fake_runtime(self.root, """
+            import socket, urllib.parse
+            print("NO_PROXY" in os.environ, os.environ["HTTPS_PROXY"] == os.environ["HTTP_PROXY"])
+            url = urllib.parse.urlparse(os.environ["HTTPS_PROXY"])
+            with socket.create_connection((url.hostname, url.port), timeout=10) as s:
+                s.sendall(b"GET http://example.invalid/ HTTP/1.1\\r\\n\\r\\n")
+                print("PROXY SAID", s.recv(200).split(b"\\r\\n")[0].decode())
+        """))
+        text = log.read_text()
+        self.assertIn("False True", text, "NO_PROXY is dropped, every proxy variable is set")
+        self.assertIn("PROXY SAID HTTP/1.1 405 Refused", text)
+        out = self.root / "out"
+        out.mkdir()
+        summary = blast.keep_egress(self.work, out)
+        self.assertEqual((summary["lines"], summary["refused"]), (1, 1))
+        self.assertTrue((out / blast.EGRESS_LOG).is_file())
+
+    def test_enforcing_without_an_account_of_its_own_fails_before_the_agent_starts(self):
+        with self.assertRaisesRegex(DispatchError, "no account of its own"):
+            self.run_agent(blast_mode=blast.ENFORCE, binaries=fake_runtime(self.root, "print('RAN')"))
+        self.assertFalse((self.work / "agent.log").exists())
+
+    def test_the_agent_account_may_reach_only_the_proxy(self):
+        """Attack: the agent connects out directly, looks a name up, or uses IPv6, instead of the proxy."""
+        commands = [" ".join(argv) for argv in blast.agent_firewall_argv("mission-agent", 41234)]
+        v4 = [c for c in commands if " iptables " in c]
+        v6 = [c for c in commands if " ip6tables " in c]
+        self.assertEqual([c for c in commands if "ACCEPT" in c],
+                         [f"sudo -n iptables -w -A {blast.AGENT_CHAIN} -o lo -p tcp -d 127.0.0.1 --dport 41234 -j ACCEPT"])
+        self.assertTrue(v4[2].endswith("-j REJECT") and v6[1].endswith("-j REJECT"))
+        self.assertTrue(v4[-1].endswith(f"--uid-owner mission-agent -j {blast.AGENT_CHAIN}"))
+        for bad in ((" root", 1), ("mission-agent", 0), ("mission-agent", 70000), ("mission-agent", "1")):
+            with self.assertRaises(blast.BlastError):
+                blast.agent_firewall_argv(*bad)
+
+    def test_enforcing_fails_when_the_account_can_get_past_the_proxy(self):
+        for leak in ("tcp", "dns", "resolver"):
+            fake = FakeFirewall({**CLOSED, leak: "open"})
+            egress = blast.AgentEgress("claude-code", blast.ENFORCE, self.work, "mission-agent", run=fake,
+                                       probe_host=lambda: "140.82.112.3")
+            with self.assertRaisesRegex(blast.BlastError, leak):
+                egress.start()
+            self.assertIsNone(egress.proc, "the proxy is stopped again")
+        fake = FakeFirewall(CLOSED)
+        egress = blast.AgentEgress("claude-code", blast.ENFORCE, self.work, "mission-agent", run=fake,
+                                   probe_host=lambda: "140.82.112.3")
+        env = egress.start()
+        try:
+            self.assertTrue(env["HTTPS_PROXY"].startswith("http://127.0.0.1:"))
+            self.assertIn(f"--dport {egress.port}", " ".join(" ".join(c) for c in fake.calls))
+        finally:
+            egress.stop()
+
+    def test_the_model_login_never_appears_on_a_command_line(self):
+        """Attack: read the login from another process's command line (/proc/<pid>/cmdline is world-readable)."""
+        argv = blast.run_as_argv("mission-agent", ["ANTHROPIC_API_KEY", "HOME", "PATH"])
+        self.assertEqual(argv, ["sudo", "-n", "-u", "mission-agent", "--preserve-env=ANTHROPIC_API_KEY,HOME", "--"])
+        with self.assertRaises(blast.BlastError):
+            blast.run_as_argv("mission-agent", ["A=B"])
+        env = blast.account_env({"HOME": "/home/runner", "XDG_CONFIG_HOME": "/home/runner/.config",
+                                 "RUNNER_TEMP": "/home/runner/work/_temp", "LANG": "C"}, "mission-agent", "/home/runner")
+        self.assertEqual(env, {"HOME": "/home/mission-agent", "LANG": "C"})
+
+    def test_running_as_the_agent_account_hands_over_only_its_work_and_takes_it_back(self):
+        egress = FakeEgress()
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["argv"], seen["env"] = argv, kw["env"]
+            return completed(argv)
+
+        with mock.patch("mission_dispatch.dispatch.subprocess.run", fake_run):
+            self.run_agent(blast_mode=blast.ENFORCE, run_as="mission-agent", egress=egress,
+                           home=blast.agent_home("mission-agent"))
+        argv, env = seen["argv"], seen["env"]
+        self.assertEqual(argv[:4], ["sudo", "-n", "-u", "mission-agent"])
+        self.assertNotIn(self.KEY, " ".join(argv))
+        self.assertEqual(env["ANTHROPIC_API_KEY"], self.KEY, "the login reaches the runtime by environment only")
+        self.assertEqual(env["HOME"], "/home/mission-agent")
+        self.assertNotIn("XDG_CONFIG_HOME", env)
+        self.assertNotIn("NO_PROXY", env)
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:9")
+        handed = [c[-1] for c in egress.calls if c[:4] == ["sudo", "-n", "chown", "-R"] and "mission-agent:" in c[-2]]
+        self.assertEqual(sorted(handed), sorted(str(self.work / s) for s in ("checkout", "git")),
+                         "the canary, the binding record and the job root stay the runner's")
+        self.assertIn(["sudo", "-n", "pkill", "-KILL", "-u", "mission-agent"], egress.calls)
+        self.assertEqual(egress.calls[-1][-1], str(self.work), "the job root is taken back")
+        self.assertTrue(egress.stopped)
+
+    def test_a_process_that_survives_the_run_fails_the_job(self):
+        with mock.patch("mission_dispatch.dispatch.subprocess.run", lambda argv, **kw: completed(argv)):
+            with self.assertRaisesRegex(DispatchError, "survived"):
+                self.run_agent(blast_mode=blast.ENFORCE, run_as="mission-agent", egress=FakeEgress(survivors=True),
+                               home=blast.agent_home("mission-agent"))
 
 
 class LandTests(unittest.TestCase):

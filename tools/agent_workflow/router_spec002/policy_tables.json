@@ -24,6 +24,7 @@
       {"prefix": "tools/agent_workflow/retrieval/"},
       {"prefix": "tools/agent_workflow/secrets_boundary/"},
       {"prefix": "tools/agent_workflow/evidence_graph/"},
+      {"prefix": "tools/agent_workflow/egress/"},
       {"exact": "tools/agent_workflow/epap/ed25519.py"},
       {"exact": "tools/agent_workflow/epap/links.py"},
       {"exact": "tools/agent_workflow/epap/signing.py"},
