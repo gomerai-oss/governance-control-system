@@ -3,6 +3,7 @@
   "bot_login": "github-actions[bot]",
   "default_branch": "main",
   "runtime_binding": "enforce",
+  "blast_radius": "enforce",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "agents": {
     "a2": "yourorg-agent-a2[bot]",

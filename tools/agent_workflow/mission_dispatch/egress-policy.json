@@ -1,7 +1,11 @@
 {
   "schema": "egress-policy-v1",
   "runtimes": {
-    "claude-code": [],
-    "cursor-cli": []
+    "claude-code": [
+      "api.anthropic.com"
+    ],
+    "cursor-cli": [
+      "*.cursor.sh"
+    ]
   }
 }

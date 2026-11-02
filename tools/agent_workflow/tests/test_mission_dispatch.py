@@ -1089,6 +1089,11 @@ class BlastRadiusTests(unittest.TestCase):
     def network(self, mode, fake):
         return blast.CheckNetwork("mission-checks", mode, run=fake, probe_host=lambda: "140.82.112.3")
 
+    def test_this_repository_is_switched_on(self):
+        """HITL's switch-on (ring 5, part 4): this repository enforces blast radius."""
+        from mission_router.router import load_config
+        self.assertEqual(blast.mode(load_config()), blast.ENFORCE)
+
     def test_mode_defaults_to_observe_and_refuses_anything_else(self):
         self.assertEqual(blast.mode({}), blast.OBSERVE)
         self.assertEqual(blast.mode({"blast_radius": "enforce"}), blast.ENFORCE)
@@ -1246,14 +1251,17 @@ class AgentEgressTests(unittest.TestCase):
         """The fake runtime finds the proxy from HTTPS_PROXY and asks it for a plain request, which is refused."""
         log = self.run_agent(binaries=fake_runtime(self.root, """
             import socket, urllib.parse
-            print("NO_PROXY" in os.environ, os.environ["HTTPS_PROXY"] == os.environ["HTTP_PROXY"])
+            print("NO_PROXY", os.environ.get("NO_PROXY"), os.environ["HTTPS_PROXY"] == os.environ["HTTP_PROXY"])
+            print("NONESSENTIAL", os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             url = urllib.parse.urlparse(os.environ["HTTPS_PROXY"])
             with socket.create_connection((url.hostname, url.port), timeout=10) as s:
                 s.sendall(b"GET http://example.invalid/ HTTP/1.1\\r\\n\\r\\n")
                 print("PROXY SAID", s.recv(200).split(b"\\r\\n")[0].decode())
         """))
         text = log.read_text()
-        self.assertIn("False True", text, "NO_PROXY is dropped, every proxy variable is set")
+        self.assertIn(f"NO_PROXY {blast.LOOPBACK_NO_PROXY} True", text,
+                      "the runner's NO_PROXY is replaced by loopback only; every proxy variable is set")
+        self.assertIn("NONESSENTIAL 1", text, "Claude Code sends no telemetry (AST-5.4)")
         self.assertIn("PROXY SAID HTTP/1.1 405 Refused", text)
         out = self.root / "out"
         out.mkdir()
@@ -1324,7 +1332,7 @@ class AgentEgressTests(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_API_KEY"], self.KEY, "the login reaches the runtime by environment only")
         self.assertEqual(env["HOME"], "/home/mission-agent")
         self.assertNotIn("XDG_CONFIG_HOME", env)
-        self.assertNotIn("NO_PROXY", env)
+        self.assertNotIn("NO_PROXY", env, "the runner's NO_PROXY never reaches the runtime")
         self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:9")
         handed = [c[-1] for c in egress.calls if c[:4] == ["sudo", "-n", "chown", "-R"] and "mission-agent:" in c[-2]]
         self.assertEqual(sorted(handed), sorted(str(self.work / s) for s in ("checkout", "git")),

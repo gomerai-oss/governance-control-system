@@ -220,6 +220,9 @@ EGRESS_START_TIMEOUT = 15.0
 EGRESS_MAX_BYTES = 4 * 1024 * 1024  # of egress.jsonl kept with the run's artifact
 PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
 NO_PROXY_ENV = ("NO_PROXY", "no_proxy")
+# A runtime's own loopback calls stay off the proxy (AST-5.4: Cursor sent its local calls there); the firewall still
+# decides them. Any other NO_PROXY the runner had is dropped, so nothing else bypasses the proxy.
+LOOPBACK_NO_PROXY = "localhost,127.0.0.1,::1"
 
 
 def agent_home(account: str) -> Path:
@@ -293,7 +296,7 @@ class AgentEgress:
             self.stop()
             return {}
         url = f"http://127.0.0.1:{self.port}"
-        return {name: url for name in PROXY_ENV}
+        return {**{name: url for name in PROXY_ENV}, **{name: LOOPBACK_NO_PROXY for name in NO_PROXY_ENV}}
 
     def _start_proxy(self) -> None:
         ready = self.root / EGRESS_READY

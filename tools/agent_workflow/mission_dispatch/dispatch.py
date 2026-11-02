@@ -80,6 +80,7 @@ from .runtimes import (
     INBOX_DIR,
     KEEP_ENV,
     MESSAGE_FILE,
+    RUNTIME_ENV,
     TASK_FILE,
     SandboxError,
     agent_env,
@@ -693,6 +694,7 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
     except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
     env = agent_env(environ, checkout.tree, checkout.git_dir, checkout.empty)
+    env.update(RUNTIME_ENV.get(job.runtime, {}))
     canary = run_canary(root)
     if canary:
         env[CANARY_ENV] = canary
