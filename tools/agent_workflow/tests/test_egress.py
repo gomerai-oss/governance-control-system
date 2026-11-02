@@ -191,12 +191,28 @@ class ProxyTests(unittest.TestCase):
                          ("allowed", True, 5, 10))
 
     def test_the_byte_cap_refuses_new_tunnels(self):
-        server = self.start(ENFORCE, max_total=8)
+        """Found by A3 (M-METHOD-003): bytes were forwarded before they were counted, so a second tunnel could be
+        admitted on an out-of-date total. Counted first, the cap is exact and the second tunnel is always refused."""
+        for _ in range(20):  # the race showed up only now and then
+            if self.log.exists():
+                self.log.unlink()
+            server = self.start(ENFORCE, max_total=8)
+            with mock.patch.object(proxy, "address_problem", lambda addresses: None):
+                first = self.tunnel(server)
+                reply = self.tunnel(server)
+            self.assertNotIn(b"ECHO", first, "the echo (10 bytes) would pass the 8-byte cap, so it is not forwarded")
+            self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+            self.assertTrue(any("used its 8 bytes" in l["reason"] for l in self.lines(2)))
+
+    def test_the_cap_is_never_passed(self):
+        """Every byte forwarded either way is counted first, so what the tunnels carried never exceeds the cap."""
+        server = self.start(ENFORCE, max_total=12)
         with mock.patch.object(proxy, "address_problem", lambda addresses: None):
-            self.tunnel(server)
             reply = self.tunnel(server)
-        self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
-        self.assertTrue(any("used its 8 bytes" in l["reason"] for l in self.lines(2)), "logged in either order")
+        self.assertNotIn(b"ECHO", reply, "5 bytes up fit; 10 more down would make 15")
+        (line,) = self.lines()
+        self.assertLessEqual(line["bytes_up"] + line["bytes_down"], 12)
+        self.assertEqual((line["bytes_up"], line["bytes_down"]), (5, 0))
 
     def test_observing_tunnels_to_an_unlisted_host_and_records_it(self):
         reply = self.tunnel(self.start(OBSERVE), host="evil.example.org")

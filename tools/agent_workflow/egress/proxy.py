@@ -6,7 +6,8 @@ It listens on loopback and accepts only ``CONNECT host:443``. Under ``enforce`` 
 - a host that is not a DNS name (an IP literal in any spelling, a bare number, a bracketed IPv6 address);
 - a host not listed for the job's runtime in the egress policy (exact names, or ``*.suffix`` for any subdomain);
 - a name that resolves to any address that is not global (private, loopback, link-local, shared, reserved);
-- anything once 256 MiB have passed in total, and it cuts the open tunnels at that point.
+- anything once 256 MiB have passed in total, and it cuts the open tunnels at that point. Every chunk is counted
+  before it is forwarded, and a chunk that would reach the cap is not forwarded, so the cap is never passed.
 
 It connects to the address it checked, never re-resolving, so a name cannot change between the check and the
 connection. Under ``observe`` it admits every CONNECT and records what enforcement would have refused. Each
@@ -210,10 +211,12 @@ class _Handler(socketserver.BaseRequestHandler):
         try:
             client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             rest = head.split(b"\r\n\r\n", 1)[1]
-            if rest:
+            if rest and egress.count(len(rest)):  # counted before it is forwarded, like every chunk
                 upstream.sendall(rest)
                 up += len(rest)
-            up, down = self._relay(client, upstream, up, down)
+                up, down = self._relay(client, upstream, up, down)
+            elif not rest:
+                up, down = self._relay(client, upstream, up, down)
         except OSError:
             pass
         finally:
@@ -240,14 +243,16 @@ class _Handler(socketserver.BaseRequestHandler):
                 data = sock.recv(CHUNK)
                 if not data:
                     return up, down
+                # Counted before it is forwarded: a chunk that would reach the cap is dropped and the tunnel cut,
+                # so the cap is never passed and no later tunnel is decided on an out-of-date total.
+                if not egress.count(len(data)):
+                    return up, down
                 other = upstream if sock is client else client
                 other.sendall(data)
                 if sock is client:
                     up += len(data)
                 else:
                     down += len(data)
-                if not egress.count(len(data)):
-                    return up, down
 
     def _refuse(self, status: int, reason: str) -> None:
         body = f"egress refused: {reason}\n".encode("utf-8", "replace")

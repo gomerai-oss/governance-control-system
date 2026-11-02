@@ -257,7 +257,9 @@ code and pass on the new code. Before the switch-on, HITL authorizes these live 
 `*.cursor.sh` (the CLI reached `api2.cursor.sh`, `agentn.global.api5.cursor.sh` and `repo42.cursor.sh`; the middle
 name looks generated per run). Not listed: `http-intake.logs.us5.datadoghq.com` (Claude Code telemetry, now switched
 off) and `downloads.cursor.com`, from which the Cursor CLI fetched 185 MB of another build of itself during a review,
-around the SHA-256 pin (§7).
+around the SHA-256 pin (§7). Under `"enforce"` (M-METHOD-003, A3) the CLI also tried `registry.npmjs.org`,
+which was refused, and the review completed. The proxy counts every chunk before it forwards it, so the 256 MiB cap
+is never passed (A3 found the first version counting after forwarding, M-METHOD-003).
 
 ### 3g. Blockers and landing a stack
 
