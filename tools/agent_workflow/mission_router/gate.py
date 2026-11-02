@@ -14,7 +14,7 @@ from typing import Mapping, Optional, Sequence, Set, Tuple
 
 from .model import (Manifest, MissionInputError, StageRef, Verdict, integration_branch, is_literal_glob, manifest_path,
                     mission_dir, verdict_path, in_scope)
-from .state import AWAIT_A1, CANCELLED, HALTED, MissionState
+from .state import AWAIT_A1, CANCELLED, HALTED, PAUSED, MissionState
 
 MERGE = "MERGE"
 WAIT_APPROVAL = "WAIT_APPROVAL"
@@ -105,6 +105,8 @@ def evaluate(
         return Decision(REJECT, (f"the mission is halted for HITL: {state.reason}",))
     if state.stage == CANCELLED:
         return Decision(REJECT, (f"the mission was cancelled: {state.reason}",))
+    if state.stage == PAUSED:  # held, never refused: a refusal would count toward blocking the stage
+        return Decision(WAIT, (f"{state.reason}; comment `/mission resume` on its tracking issue to continue",))
 
     c = _Checks()
     c.require(pr.same_repo, "the PR must come from a branch in this repository, not a fork")

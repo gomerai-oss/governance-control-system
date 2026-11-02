@@ -32,6 +32,7 @@ from .model import (
     MissionInputError,
     StageRef,
     failures_since_retry,
+    hitl_halt,
     hitl_retries,
     integration_branch,
     manifest_path,
@@ -48,7 +49,7 @@ from .model import (
     stage_branch,
     verdict_path,
 )
-from .state import (AWAIT_A1, AWAIT_A2, AWAIT_A3, BLOCKED, CANCELLED, DONE, HALTED, MergedStage, MissionState,
+from .state import (AWAIT_A1, AWAIT_A2, AWAIT_A3, BLOCKED, CANCELLED, DONE, HALTED, PAUSED, MergedStage, MissionState,
                     derive_state, history_order)
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
@@ -72,6 +73,7 @@ LABELS = {
     "mission:stage-a2": ("0e8a16", "Mission is waiting for its A2 builder"),
     "mission:stage-a3": ("1d76db", "Mission is waiting for its A3 reviewer"),
     "mission:halted": ("b60205", "Mission router halted this mission for HITL"),
+    "mission:paused": ("fbca04", "HITL halted this mission with /mission halt; /mission resume continues it"),
     "mission:done": ("cccccc", "Mission passed A3 review and was merged"),
     "mission:cancelled": ("cccccc", "HITL cancelled this mission; nothing from it reached the default branch"),
     "mission:blocked": ("d93f0b", "A blocker kept this mission (or stack) from completing; recorded for HITL review"),
@@ -88,6 +90,7 @@ STAGE_LABELS = {
     AWAIT_A2: ["mission", "mission:stage-a2"],
     AWAIT_A3: ["mission", "mission:stage-a3"],
     HALTED: ["mission", "mission:halted", "agent:needs-hitl"],
+    PAUSED: ["mission", "mission:paused", "agent:needs-hitl"],
     DONE: ["mission", "mission:done"],
     CANCELLED: ["mission", "mission:cancelled"],
     BLOCKED: ["mission", "mission:blocked", "agent:needs-hitl"],
@@ -98,12 +101,14 @@ CLOSED_STAGES = {DONE: "mission:done", CANCELLED: "mission:cancelled"}
 FINAL_LABELS = ("mission:done", "mission:cancelled", "mission:blocked")
 # Stack statuses
 STACK_ACTIVE, STACK_READY, STACK_LANDED, STACK_BLOCKED, STACK_HALTED = "ACTIVE", "READY", "LANDED", "BLOCKED", "HALTED"
+STACK_PAUSED = "PAUSED"  # a mission of it is halted by HITL (Amendment 010): nothing lands until it resumes
 STACK_LABELS = {
     STACK_ACTIVE: ["mission", "mission:stack", "mission:stack-active"],
     STACK_READY: ["mission", "mission:stack", "mission:stack-active"],
     STACK_LANDED: ["mission", "mission:stack", "mission:done"],
     STACK_BLOCKED: ["mission", "mission:stack", "mission:blocked", "agent:needs-hitl"],
     STACK_HALTED: ["mission", "mission:stack", "mission:halted", "agent:needs-hitl"],
+    STACK_PAUSED: ["mission", "mission:stack", "mission:paused", "agent:needs-hitl"],
 }
 _STACK_ISSUE_RE = re.compile(r"<!-- mission-router:stack-issue:([1-9][0-9]*) -->")
 _CAPTURE_PREFIX_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,30}/")
@@ -361,6 +366,7 @@ class MissionRouter:
                 state = MissionState(mission_id, CANCELLED, state.round, state.integration_head,
                                      reason=f"HITL {cancelled_by} cancelled it", last_pr=state.last_pr, plan_sha=state.plan_sha)
         state = self._agent_failures(state)
+        state = self._hitl_halt(state, manifest)
         ctx = _Context(state, manifest, integration_actual, landing)
         self._contexts[mission_id] = ctx
         # CHAINED: the first blocker blocks everything. Memoized above first, so the other
@@ -421,6 +427,28 @@ class MissionRouter:
                             reason=f"the {role} agent run failed {len(failures)} times in a row",
                             last_pr=state.last_pr, plan_sha=state.plan_sha, when=str(last.get("created_at") or ""),
                             details=(f"{what} ({where})",))
+
+    def _hitl_halt(self, state: MissionState, manifest: Optional[Manifest]) -> MissionState:
+        """``state`` as PAUSED while HITL's ``/mission halt`` is in force (Amendment 010), else unchanged.
+
+        Read from the mission's tracking issue and, for a stack's mission, the stack's issue. A mission that has
+        already landed, or was cancelled, or whose plan has not merged, has nothing to halt.
+        """
+        if state.stage in (AWAIT_A1, CANCELLED) or (state.stage == DONE and not self._in_stack(manifest)):
+            return state
+        issues = [self._tracking.get(state.mission_id)]
+        if self._in_stack(manifest) or (manifest is not None and manifest.stack_id):
+            issues.append(self._stack_issues.get(manifest.stack_id))
+        for issue, where in zip(issues, ("its tracking issue", "its stack's issue")):
+            if issue is None:
+                continue
+            login = hitl_halt(self._pr_comments(issue["number"]), self.hitl)
+            if login:
+                return MissionState(state.mission_id, PAUSED, state.round, state.integration_head, state.review_sha,
+                                    reason=f"HITL {login} halted it with /mission halt on {where} (#{issue['number']})",
+                                    last_pr=state.last_pr, plan_sha=state.plan_sha, landed_sha=state.landed_sha,
+                                    build_sha=state.build_sha, paused_from=state.stage)
+        return state
 
     def _cancelled_by(self, mission_id: str) -> Optional[str]:
         """The HITL login that commented ``/mission cancel`` on the mission's tracking issue, if any.
@@ -665,6 +693,8 @@ class MissionRouter:
             status, reason = STACK_HALTED, "its missions name different branches: " + ", ".join(sorted(targets))
         elif any(st == HALTED for st in stages.values()):
             status, reason = STACK_HALTED, "a mission is halted for HITL: " + ", ".join(m for m, st in stages.items() if st == HALTED)
+        elif any(st == PAUSED for st in stages.values()):
+            status, reason = STACK_PAUSED, "HITL halted " + ", ".join(m for m, st in stages.items() if st == PAUSED)
         elif blocked and (kind == "CHAINED" or finished):
             status, reason = STACK_BLOCKED, "blocked by " + ", ".join(blocked)
         elif members and all(st == DONE for st in stages.values()):
@@ -773,7 +803,7 @@ class MissionRouter:
 
     def _holds_scope(self, mission_id: str, ctx: "_Context") -> bool:
         """Whether this mission's files are taken: running, halted, or passed onto a stack branch that has not landed."""
-        if ctx.state.stage in (AWAIT_A2, AWAIT_A3, HALTED):
+        if ctx.state.stage in (AWAIT_A2, AWAIT_A3, HALTED, PAUSED):
             return True
         if self._in_stack(ctx.manifest) and ctx.state.stage in (DONE, BLOCKED):
             return not self.stack_status(ctx.manifest.stack_id).closed
@@ -1315,6 +1345,9 @@ def render_issue_body(state: MissionState, manifest: Optional[Manifest], repo: s
     role = _target(state)
     if state.stage == HALTED:
         lines += [f"**Halted for HITL.** {state.reason}", ""]
+    elif state.stage == PAUSED:
+        lines += [f"**Halted by HITL.** {state.reason}. Nothing of it merges and no agent starts for it. "
+                  "Comment `/mission resume` here to continue from where it stopped.", ""]
     elif state.stage == DONE and landing != main:
         lines += [f"**Passed.** A3 passed round {state.round}; the mission is on `{landing}` and lands on `{main}` "
                   "with the rest of its stack.", ""]
@@ -1333,7 +1366,7 @@ def render_issue_body(state: MissionState, manifest: Optional[Manifest], repo: s
         "handoff_block_id": "MISSION_ROUTER_HANDOFF",
         "mission_id": mid,
         "stage": state.stage,
-        "target_actor": role or ("HITL" if state.stage in (HALTED, BLOCKED) else "NONE"),
+        "target_actor": role or ("HITL" if state.stage in (HALTED, BLOCKED, PAUSED) else "NONE"),
         "round": state.round,
         "stack_id": manifest.stack_id if manifest else None,
         "stack_kind": manifest.stack_kind if manifest else None,
@@ -1358,6 +1391,9 @@ def render_issue_body(state: MissionState, manifest: Optional[Manifest], repo: s
         block["pr_base_if_fail"] = integration_branch(mid)
     if state.stage == HALTED:
         block["halt_reason"] = state.reason
+    if state.stage == PAUSED:
+        block["paused_reason"] = state.reason
+        block["paused_from"] = state.paused_from
     if state.stage == CANCELLED:
         block["cancel_reason"] = state.reason
     if state.stage == BLOCKED:
@@ -1406,6 +1442,10 @@ def render_stage_comment(state: MissionState, manifest: Optional[Manifest], iden
     if state.stage == CANCELLED:
         return (f"**Mission cancelled.** {state.reason}. The router will merge nothing more for it and rejects any "
                 "open stage PR. Its build_scope no longer blocks other missions.")
+    if state.stage == PAUSED:
+        return (f"**Mission halted by HITL.** {state.reason}. The router merges none of its PRs and leaves them "
+                "open; no agent starts for it, and a run already going publishes nothing. Comment `/mission resume` "
+                "here to continue from where it stopped.")
     return f"**Halted for HITL.** {state.reason}"
 
 
@@ -1424,6 +1464,7 @@ _STACK_SUMMARY = {
     STACK_LANDED: "**Landed.** The whole stack is merged into `{main}`.",
     STACK_BLOCKED: "**Blocked.** Nothing from this stack reached `{main}`. The matrix and blockers below are for HITL review.",
     STACK_HALTED: "**Halted for HITL.** {reason}",
+    STACK_PAUSED: "**Halted by HITL.** {reason}. Nothing from this stack lands until `/mission resume`.",
 }
 
 
@@ -1447,7 +1488,7 @@ def _result(ctx: _Context) -> str:
         return f"held: blocked by {ctx.held_by}"
     return {AWAIT_A1: "not started", AWAIT_A2: f"A2 building (round {st.round})", AWAIT_A3: f"A3 reviewing (round {st.round})",
             DONE: "PASS", BLOCKED: f"BLOCKED: {st.reason}", CANCELLED: f"cancelled: {st.reason}",
-            HALTED: f"halted: {st.reason}"}.get(st.stage, st.stage)
+            HALTED: f"halted: {st.reason}", PAUSED: "halted by HITL"}.get(st.stage, st.stage)
 
 
 def render_stack_body(status: StackStatus, ctxs: Dict[str, _Context], manifests: Dict[str, Optional[Manifest]],

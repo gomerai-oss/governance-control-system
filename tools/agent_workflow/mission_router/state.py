@@ -35,6 +35,7 @@ AWAIT_A2 = "AWAIT_A2"
 AWAIT_A3 = "AWAIT_A3"
 DONE = "DONE"
 HALTED = "HALTED"
+PAUSED = "PAUSED"  # HITL commented /mission halt (Amendment 010); /mission resume lifts it
 CANCELLED = "CANCELLED"
 BLOCKED = "BLOCKED"
 
@@ -70,6 +71,7 @@ class MissionState:
     details: Tuple[str, ...] = ()  # BLOCKED: each blocker
     build_sha: Optional[str] = None  # AWAIT_A3 / BLOCKED: the A2 merge commit that brought in the build under review
     resume: Optional[str] = None  # BLOCKED: the role a HITL /mission retry restarts ("A2" or "A3"); None: not reopenable
+    paused_from: Optional[str] = None  # PAUSED: the stage the mission is in underneath the halt
 
     def expects(self, ref: StageRef) -> bool:
         if self.stage == AWAIT_A1:

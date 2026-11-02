@@ -27,6 +27,8 @@ runtime with that model (MISSION-DISPATCH-001). Without it the runtime uses its 
 **Amendment 010 (2026-11-01, HITL direction: ring 5, with MISSION-DISPATCH-001 Amendment 012):** the kill switch.
 HITL's `/mission halt` on a mission's tracking issue halts that mission, and on a stack's issue every mission of the
 stack; `/mission resume` posted after it lifts the halt. A halted mission merges nothing and starts no agent (§6).
+Its stage is `PAUSED`, an overlay on the stage it was in (recorded as `paused_from`): its PRs are held, never refused,
+so a halt never counts toward the 3 refusals that block a stage.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -474,6 +476,11 @@ The router enforces everything it can see. These settings live in GitHub and onl
 6. **From a landing branch to `main` (Amendment 008).** A PR from a landing branch into `main` is not a mission:
    it gets the "Not a mission" `failure` and only the repository admin can merge it. Teams that stage on a branch for
    their own review merge it to `main` by their own rules.
+7. **A halt on a stack's issue is read through the router's issue listing (Amendment 010).** If GitHub's listing
+   leaves the stack's issue out of a sweep, that sweep does not see the halt. A halt on the mission's own tracking
+   issue is read by its recorded number and does not depend on the listing.
+8. **A resume does not start the agent at once.** The router posts each stage's handoff once, so after a resume the
+   Mission Agent's schedule (every 10 minutes) starts the waiting agent.
 
 ## 10. Predicted vectors (A3 verifies)
 
@@ -570,3 +577,9 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 89 | An CHAINED mission whose dependency landed on another branch | Refused |
 | 90 | A PR into a landing branch from any other branch | "Not a mission" `failure`, as on `main` |
 | 91 | `branch` empty, under `mission/` or `stack/`, with `..`, `HEAD`, a leading `-` or `.` in a part, ending in `.lock` or `.`, a space, or over 200 characters; `landing_branches` not a list, with duplicates, or naming such a branch or one under the capture prefix | The manifest, or `config.json`, is invalid |
+| 92 | HITL comments `/mission halt` on a running mission's tracking issue | `PAUSED` (label `mission:paused`): its stage PRs stay open and unmerged, with no refusal and no failure record; no agent starts |
+| 93 | `/mission halt` or `/mission resume` from a bot, a non-HITL user, or not on its own line | Nothing changes |
+| 94 | HITL comments `/mission resume` after the halt | The mission continues from the stage it was in; the held PR merges on the next sweep |
+| 95 | One comment carries both `/mission halt` and `/mission resume` | Halted: stopping wins |
+| 96 | `/mission halt` on a stack's issue after every mission passed | Every mission of the stack is `PAUSED` and the landing PR is held until `/mission resume` |
+| 97 | `/mission cancel` on a halted mission | `CANCELLED`, as for any mission |

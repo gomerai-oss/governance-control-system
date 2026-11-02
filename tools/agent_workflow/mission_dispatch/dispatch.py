@@ -70,7 +70,7 @@ from mission_router.model import (
     verdict_path,
 )
 from mission_router.github import GitHubError
-from mission_router.state import AWAIT_A2, AWAIT_A3, MissionState
+from mission_router.state import AWAIT_A2, AWAIT_A3, PAUSED, MissionState
 
 from . import binding, blast
 from .runtimes import (
@@ -336,6 +336,8 @@ def still_wanted(job: Job, survey: Survey) -> Optional[str]:
     ctx = survey.contexts.get(job.mission_id)
     if ctx is None:
         return "the mission is finished or cancelled"
+    if ctx.state.stage == PAUSED:  # Amendment 010: a run already going publishes nothing
+        return f"HITL halted the mission ({ctx.state.reason})"
     if _wanted(ctx) != (job.role, job.base_sha) or ctx.state.round != job.round:
         return f"the mission moved on while the agent ran (now {ctx.state.stage}, round {ctx.state.round})"
     if ctx.integration_actual != ctx.state.integration_head:
