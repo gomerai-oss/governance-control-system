@@ -30,6 +30,10 @@ said to delete (M-CCSYNC-AUDIT-003, A3 BLOCKED, governance #1116). The runtimes'
 surface (`tool_selection.runtime_binding`) and gets one MCP server, the governed retrieval gateway (`mcp_gateway`),
 whose every call the MCP authorization fabric decides (§3b). The default is `"off"`, under which every runtime argument
 is as before. Binding never widens the dispatcher's own ceiling.
+**Amendment 012 (2026-11-01, HITL direction: ring 5 of the six-ring security system, with MISSION-ROUTER-001
+Amendment 010):** blast radius. Checks run with no network; the agent runs as its own account whose only way out is a
+proxy that admits listed hosts; every run is capped in processes, file size, change size and turns; and HITL can halt
+one mission, which stops any change of it reaching a PR (§3h). The mode is set by `"blast_radius"` in `config.json`.
 
 ## 1. Purpose
 
@@ -177,6 +181,58 @@ A plan may list up to 10 `checks`: shell commands, each up to 500 characters, ap
 
 The results are evidence only: the dispatcher never turns them into a verdict.
 
+### 3h. Blast radius (Amendment 012)
+
+**Mode.** `"blast_radius"` in `config.json`: `"observe"` (the default when the key is absent) applies every cap and
+records what enforcement would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job.
+HITL switches to `"enforce"` after the live attack tests (AST) below pass and the egress list is approved. Records
+are kept with the run's artifacts in both modes.
+
+1. **Checks have no network.** Before the first check, the `checks` job adds firewall rules (`iptables` and
+   `ip6tables`, matched on the `mission-checks` account's user id) that reject every outbound packet of that account
+   except on loopback, and DNS on loopback too, since the runner's local resolver forwards queries to the internet.
+   It then proves them: as that account it tries a TCP connection to `api.github.com:443`, a DNS query to
+   `1.1.1.1:53`, and a lookup through the local resolver. In `"enforce"` any of them succeeding, or rules that cannot
+   be installed, or a probe that gives no result, fails the job before any check runs; in `"observe"`
+   the rules count instead of reject, and the result is recorded in `CHECKS.md` as `network: open` or `closed`.
+2. **The agent runs as its own account.** The agent runs as a fresh unprivileged account, `mission-agent`, with the
+   environment §3b already allows, its own home, and the runtimes installed root-owned and read-only outside the
+   runner's home (`/opt/mission-runtime`). The checkout and job root are handed to that account for the run and
+   back to the runner before `collect`. Every process of the account is killed after the run; if any survives, the
+   job fails. The MCP gateway runs as that account too, as the runtime's child, and needs no network.
+3. **The agent's only way out is the egress proxy.** Firewall rules reject every outbound packet of
+   `mission-agent`, DNS included, except to the egress proxy on loopback (`tools/agent_workflow/egress/`). The
+   proxy runs as the runner account and accepts only HTTPS `CONNECT host:443`. It refuses an IP-literal host, any
+   other port, and any host not listed for the job's runtime in `mission_dispatch/egress-policy.json` (a SPEC-002
+   `AUTHORITY` file, so the list changes only by a hand-merged PR). It resolves the name itself and refuses a name
+   that resolves to a private, loopback or link-local address. It stops admitting after 256 MiB in total. Every
+   decision is one line of `egress.jsonl` (time, host, port, allowed or refused, reason, bytes). The runtime is
+   pointed at the proxy with `HTTPS_PROXY`; a runtime that ignores it reaches nothing. In `"observe"` the proxy admits
+   any host on port 443 and records the ones off the list, and the firewall counts direct connections.
+4. **Caps.** Each check and the agent run under `prlimit`: at most 512 processes, 1 GiB per written file and 4096
+   open files. A change is at most 5 MiB (§3c) and at most 300 files. The agent log is cut to its last 8 MiB. Time
+   caps are unchanged: 15 minutes per check, 60 minutes per agent run. Claude Code runs with `--max-turns 200`. The
+   pinned Cursor CLI has no turn cap, so it is bounded by time alone (§7).
+5. **HITL can halt a mission.** A job for a mission HITL halted (MISSION-ROUTER-001 Amendment 010) is not due: `plan`
+   lists it in no matrix, `due` stops it before the agent starts, and `publish` re-derives the mission's state and
+   pushes nothing for it. A run already in progress when HITL halts therefore ends without a PR. HITL can also cancel
+   the workflow run in GitHub, and disabling the two mission workflows stops every mission at once (§6).
+
+**The attack tests.** Each part ships permanent attack tests in `tools/agent_workflow/tests/` that fail on today's
+code and pass on the new code. Before the switch-on, HITL authorizes these live tests:
+
+- **AST-5.1**, on a throwaway repository HITL creates for it: the repeat of live test L2 through the new
+  `checks` steps; every outbound attempt of `mission-checks` fails.
+- **AST-5.2**, on the same repository: as `mission-agent`, a direct connection, a DNS query, a `CONNECT` to an unlisted
+  host, to an IP literal, to port 22, and to a listed name made to resolve to a private address are all refused, and
+  a `CONNECT` to a listed host succeeds.
+- **AST-5.3**: live test L1 again, on the pinned Cursor CLI version (L1 ran on 2026.10.16; the workflow pins
+  2026.10.19-6bbf2c4).
+- **AST-5.4**: one real mission run in `"observe"`, whose `egress.jsonl` names the hosts each runtime needs. Those
+  hosts, and only those, go into `egress-policy.json` in the switch-on PR.
+- **AST-5.5**: HITL halts a mission while its agent runs; no PR opens, and `/mission resume` lets the next run open
+  it.
+
 ### 3g. Blockers and landing a stack
 
 - **A2 records blockers instead of stopping.** Its task says: if something outside its control keeps it from
@@ -291,10 +347,14 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
    and a change containing it is refused. A leak would need a runtime bug. Use a dedicated, spend-limited key.
 2. **A2 builds without running the checks.** A3 sees the results on the commit it reviews, and a FAIL sends the
    findings back to A2 for the next round.
-3. **The checks job runs the code under review on a GitHub VM with network access.** It holds no credential.
+3. **The checks job runs the code under review on a GitHub VM with network access** until `"blast_radius"` is
+   `"enforce"` (§3h). It holds no credential. Under `"enforce"` the account running the checks has no network.
 4. **The agent log is a workflow artifact**, kept 7 days and readable by anyone who can read the repository's Actions.
    It is scrubbed of the model login.
 5. **The Cursor CLI sandbox rules were verified live on 2026.10.16.** The pinned version is 2026.10.19-6bbf2c4.
+7. **The Cursor CLI has no turn cap** (§3h): a Cursor run is bounded by its 60-minute limit alone.
+8. **The egress list admits whole hosts.** An agent can still send data to a listed host, such as its own model
+   provider's API, inside its normal traffic. The list keeps that to the hosts the runtime needs.
 6. **Runtime binding is verified against a stand-in library (Amendment 011).** Until `tool_selection.runtime_binding`
    and `mcp_gateway` land (stack EPAP-CHAINED-002), `"enforce"` fails every job, by design; leave it `"off"` until both
    are on the default branch. `Mcp(server:tool)` rules and `--approve-mcps` follow the Cursor CLI's documented

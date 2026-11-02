@@ -72,7 +72,7 @@ from mission_router.model import (
 from mission_router.github import GitHubError
 from mission_router.state import AWAIT_A2, AWAIT_A3, MissionState
 
-from . import binding
+from . import binding, blast
 from .runtimes import (
     BINARIES,
     CURSOR_CLI,
@@ -528,6 +528,8 @@ def check_changes(job: Job, tree: Path, changes: Sequence[Change],
         if job.role == "A2" and has_blockers(message):
             return [], None
         return ["the agent changed nothing" + (" and recorded no blockers" if job.role == "A2" else "")], None
+    if len(changes) > blast.MAX_CHANGED_FILES:  # §3h: also bounds the work of every check below
+        return [f"the change touches {len(changes)} files, more than {blast.MAX_CHANGED_FILES}"], None
     odd = [c.path for c in changes if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in c.path)]
     if odd:  # such names would also break log lines
         return [f"{len(odd)} path(s) contain control characters: " + ", ".join(repr(p)[:80] for p in odd)], None
@@ -678,7 +680,8 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
         bound = None
         if binding_mode == binding.ENFORCE:
             bound = binding.load(root)
-        argv = argv_for(job.runtime, checkout.tree, prompt_text(job), home, binaries, job.model, bound)
+        argv = [*blast.limits_argv(),
+                *argv_for(job.runtime, checkout.tree, prompt_text(job), home, binaries, job.model, bound)]
     except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
     env = agent_env(environ, checkout.tree, checkout.git_dir, checkout.empty)
@@ -697,6 +700,7 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
         if job.runtime == CURSOR_CLI:
             remove_cursor_config(checkout.tree)
             binding.remove_cursor_mcp(checkout.tree)
+        blast.keep_tail(log_path)
         scrub(log_path, known_secrets(root, environ))
     if done.returncode != 0:
         raise DispatchError(f"{job.runtime} exited {done.returncode}")
@@ -797,17 +801,19 @@ def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str
 
 
 def check_argv(command: str, run_as: Optional[str], path: str) -> List[str]:
-    """argv for one check. With ``run_as`` it runs as that unprivileged user, with an empty environment."""
+    """argv for one check, capped (§3h). With ``run_as`` it runs as that unprivileged user, with an empty environment."""
     if not run_as:
-        return ["bash", "-c", command]
+        return [*blast.limits_argv(), "bash", "-c", command]
     if not AGENT_RE.fullmatch(run_as):
         raise DispatchError(f"{run_as!r} is not a usable account name")
-    return ["sudo", "-n", "-u", run_as, "--", "env", "-i", f"PATH={path}", f"HOME=/home/{run_as}", "LANG=C.UTF-8",
-            *(f"{k}={v}" for k, v in CHECK_GIT_ENV.items()), "bash", "-c", command]
+    return ["sudo", "-n", "-u", run_as, "--", *blast.limits_argv(), "env", "-i", f"PATH={path}",
+            f"HOME=/home/{run_as}", "LANG=C.UTF-8", *(f"{k}={v}" for k, v in CHECK_GIT_ENV.items()),
+            "bash", "-c", command]
 
 
 def run_checks(job: Job, tree: Path, out_dir: Path, environ: Mapping[str, str],
-               timeout: float = CHECK_TIMEOUT, run_as: Optional[str] = None) -> List[dict]:
+               timeout: float = CHECK_TIMEOUT, run_as: Optional[str] = None,
+               network: Optional[Callable[[], dict]] = None) -> List[dict]:
     """Run the plan's checks in ``tree`` (a checkout of ``job.base_sha``) and write the results.
 
     The code under test is whatever A2 built, so it runs on its own machine with no
@@ -834,11 +840,16 @@ def run_checks(job: Job, tree: Path, out_dir: Path, environ: Mapping[str, str],
                 subprocess.run(["sudo", "-n", "pkill", "-KILL", "-u", run_as], capture_output=True)
         results.append({"index": index, "command": command, "exit_code": code,
                         "passed": code == 0, "output_tail": output[-CHECK_OUTPUT_CHARS:]})
+    net = network() if network is not None else None
     _results_dir(out_dir)
-    _write_result(out_dir / CHECKS_JSON, json.dumps({"job": job.key, "commit": job.base_sha, "results": results},
-                                                    indent=2) + "\n")
+    record = {"job": job.key, "commit": job.base_sha, "results": results}
+    if net is not None:
+        record["network"] = net
+    _write_result(out_dir / CHECKS_JSON, json.dumps(record, indent=2) + "\n")
     lines = [f"# Checks on `{job.base_sha}`", "",
              f"{sum(r['passed'] for r in results)} of {len(results)} passed.", ""]
+    if net is not None:
+        lines += [f"network: {net.get('network', 'unknown')} (blast radius `{net.get('mode')}`)", ""]
     for r in results:
         status = "PASS" if r["passed"] else ("FAIL" if r["exit_code"] is not None else "NOT RUN")
         lines += [f"## {r['index']}. {status} (exit {r['exit_code']})", "", "```", r["command"], "```", "",

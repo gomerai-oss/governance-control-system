@@ -34,6 +34,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 from secrets_boundary import paths as secret_paths
 
 from .binding import GATEWAY_SERVER as GATEWAY, Bound
+from .blast import CLAUDE_MAX_TURNS
 
 CLAUDE_CODE = "claude-code"
 CURSOR_CLI = "cursor-cli"
@@ -146,6 +147,7 @@ def claude_argv(checkout: Path, prompt: str, home: Path, binary: str = "claude",
         "--output-format", "text",
         "--permission-mode", "dontAsk",
         "--permission-prompts", "none",
+        "--max-turns", str(CLAUDE_MAX_TURNS),
         "--setting-sources", "user",
         "--strict-mcp-config",
         *(("--mcp-config", bound.mcp_config) if bound is not None and bound.mcp_config else ()),

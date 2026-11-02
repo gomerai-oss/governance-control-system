@@ -24,6 +24,9 @@ filing captures into the matrices stays mission work. A capture is not a pipelin
 **Amendment 006 (2026-10-24, HITL direction, HITL-approved pipeline patch):** a plan may name the `model` for A2 and A3
 next to the `runtime` (§3). HITL's approval binds it like the rest of the plan; the Mission Agent workflow starts the
 runtime with that model (MISSION-DISPATCH-001). Without it the runtime uses its own default, as before.
+**Amendment 010 (2026-11-01, HITL direction: ring 5, with MISSION-DISPATCH-001 Amendment 012):** the kill switch.
+HITL's `/mission halt` on a mission's tracking issue halts that mission, and on a stack's issue every mission of the
+stack; `/mission resume` posted after it lifts the halt. A halted mission merges nothing and starts no agent (§6).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -397,6 +400,8 @@ router-opened issue only, from a `hitl_logins` user account only):
 | Command | Effect |
 |---|---|
 | `/mission cancel` | The mission becomes `CANCELLED` and its issue closes. Every open stage PR is rejected, nothing more is merged, nothing reaches `main`, and its `build_scope` no longer blocks other missions. Final: a restart takes a new mission id. A mission already `DONE` is not affected |
+| `/mission halt` | The mission is halted by HITL (Amendment 010). The router merges none of its stage PRs and leaves them open; no agent starts for it, and a run already in progress publishes nothing (MISSION-DISPATCH-001 §3h). Its `build_scope` stays reserved. On a stack's issue it halts every mission of the stack. Nothing is deleted or rejected |
+| `/mission resume` | Posted after the latest `/mission halt` on the same issue, it lifts the halt: the mission continues from the stage it was in, as if no time had passed. A resume before any halt does nothing |
 | `/mission retry` | Gives a stage recorded as failed 3 times in a row new attempts: failed agent runs (MISSION-DISPATCH-001 §4) and refused stage PRs (§5). On a mission blocked by A3, it reopens that mission alone (§4, Amendment 004): A3 reviews the same build again after `BLOCKED`, or A2 gets one more round after a last-round FAIL. Nothing else in the stack reruns |
 
 Closing a blocked stack's issue ends its review: the router closes its missions' issues and the stack id cannot start

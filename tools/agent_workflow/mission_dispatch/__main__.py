@@ -35,7 +35,7 @@ from mission_router.gate import classify_or_raise
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding
+from . import binding, blast
 from .dispatch import (
     DispatchError,
     busy_lanes,
@@ -163,7 +163,15 @@ def cmd_due(args) -> int:
 
 def cmd_checks(args) -> int:
     job = _job()
-    results = run_checks(job, Path(args.root), Path(args.out), os.environ, timeout=args.timeout, run_as=args.run_as)
+    network = None
+    if args.run_as:  # §3h: the checks account's network is closed (or counted) before the first check
+        try:
+            network = blast.CheckNetwork(args.run_as, blast.mode(load_config()))
+            _log(f"{job.key}: checks network {network.close()['network']} (blast radius {network.mode})")
+        except blast.BlastError as exc:
+            raise DispatchError(str(exc)) from None
+    results = run_checks(job, Path(args.root), Path(args.out), os.environ, timeout=args.timeout, run_as=args.run_as,
+                         network=network.report if network else None)
     _log(f"{job.key}: {sum(r['passed'] for r in results)} of {len(results)} checks passed")
     return 0
 
