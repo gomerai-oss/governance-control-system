@@ -186,7 +186,8 @@ The results are evidence only: the dispatcher never turns them into a verdict.
 **Mode.** `"blast_radius"` in `config.json`: `"observe"` (the default when the key is absent) applies every cap and
 records what enforcement would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job.
 HITL switches to `"enforce"` after the live attack tests (AST) below pass and the egress list is approved. Records
-are kept with the run's artifacts in both modes.
+are kept with the run's artifacts in both modes. **Switched on:** this repository's `config.json` sets `"enforce"`
+(ring 5, part 4, after AST-5.1 to 5.5 passed on 2026-11-02).
 
 1. **Checks have no network.** Before the first check, the `checks` job adds firewall rules (`iptables` and
    `ip6tables`, matched on the `mission-checks` account's user id) that reject every outbound packet of that account
@@ -212,8 +213,10 @@ are kept with the run's artifacts in both modes.
    `AUTHORITY` file, so the list changes only by a hand-merged PR). It resolves the name itself and refuses a name
    that resolves to a private, loopback or link-local address. It stops admitting after 256 MiB in total. Every
    decision is one line of `egress.jsonl` (time, host, port, allowed or refused, reason, bytes). The runtime is
-   pointed at the proxy with `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`, and `NO_PROXY` is dropped; a runtime that
-   ignores them reaches nothing. Before the agent starts, a probe as that account must find a direct connection,
+   pointed at the proxy with `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`, and `NO_PROXY` is set to the loopback
+   names only (`localhost,127.0.0.1,::1`), replacing any the runner had, so a runtime's own loopback calls stay off
+   the proxy while the firewall still decides them; a runtime that ignores the proxy reaches nothing. Claude Code
+   runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`: no telemetry, error reports or update checks. Before the agent starts, a probe as that account must find a direct connection,
    a DNS query and a lookup through the local resolver all refused, or the job fails. In `"observe"` the proxy
    admits every tunnel and records what it would refuse; a request that is not a tunnel is still refused. The
    proxy failing to start fails the job under `"enforce"` and is a warning under `"observe"`. `collect` keeps the
@@ -244,6 +247,12 @@ code and pass on the new code. Before the switch-on, HITL authorizes these live 
   hosts, and only those, go into `egress-policy.json` in the switch-on PR.
 - **AST-5.5**: HITL halts a mission while its agent runs; no PR opens, and `/mission resume` lets the next run open
   it.
+
+**The list (AST-5.4, M-AST-HALT-001's observe-mode logs).** `claude-code`: `api.anthropic.com`. `cursor-cli`:
+`*.cursor.sh` (the CLI reached `api2.cursor.sh`, `agentn.global.api5.cursor.sh` and `repo42.cursor.sh`; the middle
+name looks generated per run). Not listed: `http-intake.logs.us5.datadoghq.com` (Claude Code telemetry, now switched
+off) and `downloads.cursor.com`, from which the Cursor CLI fetched 185 MB of another build of itself during a review,
+around the SHA-256 pin (§7).
 
 ### 3g. Blockers and landing a stack
 
@@ -359,18 +368,24 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
    and a change containing it is refused. A leak would need a runtime bug. Use a dedicated, spend-limited key.
 2. **A2 builds without running the checks.** A3 sees the results on the commit it reviews, and a FAIL sends the
    findings back to A2 for the next round.
-3. **The checks job runs the code under review on a GitHub VM with network access** until `"blast_radius"` is
-   `"enforce"` (§3h). It holds no credential. Under `"enforce"` the account running the checks has no network.
+3. **The checks job's network.** Under `"enforce"` (this repository, §3h) the account running the checks has no
+   network. A repository left on `"observe"` runs the code under review on a GitHub VM with network access, though
+   with no credential.
 4. **The agent log is a workflow artifact**, kept 7 days and readable by anyone who can read the repository's Actions.
    It is scrubbed of the model login.
-5. **The Cursor CLI sandbox rules were verified live on 2026.10.16.** The pinned version is 2026.10.19-6bbf2c4.
-7. **The Cursor CLI has no turn cap** (§3h): a Cursor run is bounded by its 60-minute limit alone.
-8. **The egress list admits whole hosts.** An agent can still send data to a listed host, such as its own model
-   provider's API, inside its normal traffic. The list keeps that to the hosts the runtime needs.
+5. **The Cursor CLI sandbox rules were verified live on the pinned 2026.10.19-6bbf2c4** (AST-5.3, 2026-11-02): it
+   ran plain `git status` and rejected `&&`, `;`, a pipe, `$(...)` and a second line, and a planted file outside the
+   workspace never reached its output. Re-check when the pin changes.
 6. **Runtime binding is verified against a stand-in library (Amendment 011).** Until `tool_selection.runtime_binding`
    and `mcp_gateway` land (stack EPAP-CHAINED-002), `"enforce"` fails every job, by design; leave it `"off"` until both
    are on the default branch. `Mcp(server:tool)` rules and `--approve-mcps` follow the Cursor CLI's documented
    options and have not yet been exercised live on the pinned version.
+7. **The Cursor CLI has no turn cap** (§3h): a Cursor run is bounded by its 60-minute limit alone.
+8. **The egress list admits whole hosts.** An agent can still send data to a listed host, such as its own model
+   provider's API, inside its normal traffic. The list keeps that to the hosts the runtime needs.
+9. **The Cursor CLI updates itself.** In a run with open network (`"observe"`), it downloaded another build of itself
+   mid-run, so the SHA-256 pin held only for the install. Under `"enforce"` the download host is not listed and the
+   install is root-owned and read-only.
 
 ## 8. Predicted vectors (A3 verifies)
 

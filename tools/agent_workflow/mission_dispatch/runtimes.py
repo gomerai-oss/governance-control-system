@@ -91,6 +91,9 @@ CURSOR_DEFAULT_WRITABLE_ROOTS: Tuple[str, ...] = ("/tmp", "/var/tmp", "/var/fold
 # Vendor logins the runtime needs to start (unset ones are dropped, so an empty secret
 # never shadows a real login). Every other credential-looking variable is dropped.
 KEEP_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_API_KEY"})
+# Set for each runtime's process (MISSION-DISPATCH-001 §3h). Claude Code sends no telemetry, error reports or
+# update checks: AST-5.4 saw it reach a telemetry host, which the egress list does not admit.
+RUNTIME_ENV: Dict[str, Dict[str, str]] = {"claude-code": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}
 _SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|_PAT$|_KEY$|^SSH_AUTH_SOCK$|^GPG_", re.I)
 
 
