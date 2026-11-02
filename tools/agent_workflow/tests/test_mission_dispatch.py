@@ -1361,8 +1361,27 @@ class AgentEgressTests(unittest.TestCase):
         self.assertEqual(egress.calls[-1][-1], str(self.work), "the job root is taken back")
         self.assertTrue(egress.stopped)
 
+    def test_a_process_still_being_reaped_is_not_a_survivor(self):
+        """Found live (M-METHOD-003, A3 round 2): right after the kill, processes of a busy runtime were still listed
+        for a moment. The account is looked at again, killing again each time, before anything counts as a survivor."""
+        listed = iter([0, 0, 0, 1])  # pgrep finds the account's processes three times, then none
+        calls = []
+
+        def run(argv):
+            calls.append(argv[:3] if argv[0] == "pgrep" else argv[2:4])
+            return completed(argv, next(listed) if argv[0] == "pgrep" else 0)
+
+        self.assertEqual(blast.take_back(self.work, "mission-agent", run, sleep=lambda s: None), [])
+        self.assertEqual(sum(1 for c in calls if c == ["pkill", "-KILL"]), 4, "killed again each time")
+        never = lambda argv: completed(argv, 0)
+        slept = []
+        problems = blast.take_back(self.work, "mission-agent", never, sleep=slept.append)
+        self.assertEqual(problems, ["processes of mission-agent survived the run"])
+        self.assertAlmostEqual(sum(slept), blast.KILL_WAIT_SECONDS)
+
     def test_a_process_that_survives_the_run_fails_the_job(self):
-        with mock.patch("mission_dispatch.dispatch.subprocess.run", lambda argv, **kw: completed(argv)):
+        with mock.patch("mission_dispatch.dispatch.subprocess.run", lambda argv, **kw: completed(argv)), \
+                mock.patch.object(blast, "KILL_WAIT_SECONDS", 0.5):
             with self.assertRaisesRegex(DispatchError, "survived"):
                 self.run_agent(blast_mode=blast.ENFORCE, run_as="mission-agent", egress=FakeEgress(survivors=True),
                                home=blast.agent_home("mission-agent"))
