@@ -537,10 +537,22 @@ class MissionRouter:
         return self._ids
 
     def _push_evidence(self, branch: str, head_sha: str) -> Tuple[Tuple[str, ...], bool]:
-        """Every actor GitHub recorded updating ``branch``, and whether one of those updates produced ``head_sha``."""
-        events = self.gh.activity(branch, ACTIVITY_CAP)
+        """Every actor GitHub recorded updating ``branch`` as it now exists, and whether one of those updates produced
+        ``head_sha``.
+
+        GitHub keeps a deleted branch's events under its name. The branch as it now exists began after its latest
+        deletion, so only the events since then count (newest first, as GitHub lists them): otherwise the router's
+        own deletion of a refused stage branch would refuse every new attempt on it (Amendment 003). Whoever
+        recreates or pushes to the branch afterwards is still recorded.
+        """
+        listed = self.gh.activity(branch, ACTIVITY_CAP)
+        events = []
+        for event in listed:
+            if event.get("activity_type") == "branch_deletion":
+                break
+            events.append(event)
         actors = {str((e.get("actor") or {}).get("login") or "(unknown actor)") for e in events}
-        if len(events) >= ACTIVITY_CAP:
+        if len(listed) >= ACTIVITY_CAP and len(events) == len(listed):
             actors.add(f"(more than {ACTIVITY_CAP} recorded updates; cannot verify them all)")
         return tuple(sorted(actors)), any(e.get("after") == head_sha for e in events)
 

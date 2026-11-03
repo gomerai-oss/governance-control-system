@@ -337,7 +337,10 @@ check makes the merge fail, and the new commit is checked on the next sweep.
   branch must be by the assigned bot — for the A1 branch, by the assigned bot or a HITL login. A push by anyone else
   is rejected, including HITL on an A2 or A3 branch and other agents, so an agent must update its own branch. If
   GitHub has not yet recorded the push that produced the head SHA, the PR waits. A branch with more than 300
-  recorded updates is rejected, because they cannot all be verified.
+  recorded updates is rejected, because they cannot all be verified. GitHub keeps a deleted branch's updates under
+  its name, so only the updates since the branch's latest deletion count: the branch as it now exists began there.
+  Without this, the router's own deletion of a refused stage branch (§5, Amendment 003) would refuse every new
+  attempt on it (found by AST-1.1, 2026-11-03).
 - **Account IDs (Amendment 011).** A login is a name GitHub lets an account change, and a deleted App's name can be
   taken again by a new App with a new bot account. The account ID never changes and is never reused. So each identity
   is a login and an account ID together:
@@ -622,3 +625,4 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 102 | Observed identity; any of vectors 98–100 | Acted on the login alone, as before; each mismatch logged |
 | 103 | A plan whose `build_scope` covers the identity registry | Refused before approval: the registry is `AUTHORITY` |
 | 104 | `"identity"` set to an unknown value | No agent may act |
+| 105 | A stage PR refused and its branch deleted by the router; the agent pushes a new attempt on the same branch name | Judged on the pushes since the deletion: merged when only the agent pushed; refused when anyone else pushed after the deletion |

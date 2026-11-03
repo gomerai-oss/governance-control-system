@@ -836,6 +836,8 @@ class FakeGitHub:
 
     def delete_branch(self, branch):
         head = self.branches.pop(branch, None)
+        if head is not None:  # GitHub records the deletion under the branch's name, by whoever deleted it
+            self._record(branch, head, "0" * 40, BOT, "branch_deletion")
         for p in self.prs.values():  # GitHub closes every open PR from a deleted branch
             if p["head_ref"] == branch and p["state"] == "open":
                 p["state"], p["head_sha_at_close"] = "closed", head
@@ -1910,6 +1912,28 @@ class RouterLoopTests(unittest.TestCase):
         self.gh.comment_as(self.issue()["number"], HITL, "/mission retry")
         self.sweep()
         self.assertIn("mission:stage-a2", self.labels())
+
+    def test_a_new_attempt_after_a_refusal_is_judged_on_its_own_pushes(self):
+        """The router's deletion of a refused branch stays in GitHub's record under the branch's name; the agent's
+        next attempt on that name must not be refused for it, while a foreign push to the new branch still is."""
+        self.start_mission()
+        refused = self.a2_round(1, files={"tools/demo/app.py": "x", ".github/workflows/evil.yml": "on: push"})
+        self.assert_refused(refused)
+        self.sweep()
+        retry = self.a2_round(1)
+        self.assertEqual(self.gh.prs[retry]["merged_by"], BOT, "the retry on the same branch name merges")
+        self.assertIn("mission:stage-a3", self.labels())
+
+    def test_a_foreign_push_after_a_refusal_is_still_refused(self):
+        self.start_mission()
+        self.assert_refused(self.a2_round(1, files={".github/workflows/evil.yml": "on: push"}))
+        self.sweep()
+        branch = f"mission/{MID}/a2-r1"
+        self.gh.push(branch, {"tools/demo/app.py": "agent"}, base=INT)
+        self.gh.push(branch, {"tools/demo/app.py": "someone else"}, by=HITL)
+        n = self.gh.open_pr(branch, INT, A2B)
+        self.sweep()
+        self.assert_refused(n, r=1)
 
     def test_refusal_is_recorded_once_per_head(self):
         self.start_mission()
