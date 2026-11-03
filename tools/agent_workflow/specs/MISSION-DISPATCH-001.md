@@ -34,6 +34,11 @@ is as before. Binding never widens the dispatcher's own ceiling.
 Amendment 010):** blast radius. Checks run with no network; the agent runs as its own account whose only way out is a
 proxy that admits listed hosts; every run is capped in processes, file size, change size and turns; and HITL can halt
 one mission, which stops any change of it reaching a PR (§3h). The mode is set by `"blast_radius"` in `config.json`.
+**Amendment 013 (2026-11-02, HITL direction: ring 1 of the six-ring security system, with MISSION-ROUTER-001
+Amendment 011):** identity and credentials. A job that holds an App key proves the key is the registered App's before
+it pushes; every credential the pipeline uses is listed in a credentials register with who holds it, what it can do and
+how it is revoked; and Policy CI refuses a workflow that uses a credential the register does not list (§3i). The mode
+is set by `"identity"` in `config.json`.
 
 ## 1. Purpose
 
@@ -276,6 +281,61 @@ is never passed (A3 found the first version counting after forwarding, M-METHOD-
   minted token belongs to the planned agent. A second landing PR refused by GitHub is skipped. The router then checks
   and merges it (MISSION-ROUTER-001 §5c).
 
+### 3i. Identity and credentials (Amendment 013)
+
+**Mode.** `"identity"` in `config.json` (MISSION-ROUTER-001 §5a): `"observe"` (the default when the key is absent)
+records what enforcement would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job.
+HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass.
+
+1. **The key must be the registered App's.** Before `publish` or `land` pushes anything, it confirms the minted
+   token belongs to the agent the job names: the App ID the token was minted with (`APP_ID`) equals the agent's
+   registry `App ID`; the App's bot login (`<app-slug>[bot]`) equals the job's login, as today; and GitHub's account
+   record for that login has the registry's `Account ID` and type `Bot`. The registry is read from the default branch.
+   A mismatch means the environment holds another App's key or the registry is wrong: nothing is pushed and the run
+   fails with the reason. A key placed in the wrong environment is caught here, before GitHub sees a single push.
+2. **The credentials register.** `config.json` `credentials_register` names a file on the default branch that lists
+   every credential the pipeline uses or that can act on its repositories, one row each, and never a value:
+
+   `| Credential | Kind | Held in | Used by | Can do | Revoke | Rotated |`
+
+   - **Credential:** the name a workflow uses (`APP_PRIVATE_KEY`, `CURSOR_API_KEY`, `APP_ID`) or, for one no
+     workflow uses, a plain name;
+   - **Kind:** `secret` or `variable` for workflow references; `app-key`, `model-login`, `user-login` or `token`
+     otherwise;
+   - **Held in:** `environment:<name>` (a `*` stands for a name filled in at run time, as in `mission-agent-*`),
+     `repository`, `organization`, or `outside:<where>` for one held outside GitHub, such as `outside:HITL laptop`;
+   - **Used by:** each `<workflow file>:<job>` that references it, comma-separated, or `-`;
+   - **Can do:** what a holder can do with it, in plain words;
+   - **Revoke:** the exact steps that make it useless;
+   - **Rotated:** the date it was last replaced, or `-`.
+
+   The register is SPEC-002 `AUTHORITY`: no mission can change it.
+3. **Policy CI checks the register against the workflows** (`credentials_check`, stdlib). For every
+   `secrets.<NAME>` and `vars.<NAME>` in `.github/workflows/*`, there must be a row for that name whose `Used by`
+   names that workflow and job and whose `Held in` matches the job's `environment` (or `repository` or
+   `organization` for a job without one). `secrets.GITHUB_TOKEN` and `github.token` are exempt: they are minted per
+   run and scoped by each workflow's `permissions`. A row whose `Used by` names a workflow and job that no longer
+   reference it is stale. A workflow that passes every secret at once (`secrets: inherit`, `toJSON(secrets)`) or picks
+   a secret by a computed name (`secrets[...]`) is refused outright, since no row can describe it. A workflow the
+   check cannot read refuses. Under `"observe"` the findings are printed and the step passes; under `"enforce"` it
+   fails.
+4. **Revoking a credential.** In this order: `/mission halt` every mission that could be using it; for an agent App,
+   set its registry row to `SUSPENDED` (a HITL pipeline patch; the router stops the agent at the next sweep); follow
+   the row's `Revoke` steps; place the replacement as §6 says; record the date under `Rotated`; then
+   `/mission resume`.
+5. **Live attack tests (AST), each on a throwaway repository, each with HITL's OK.** Each passes only under
+   `"enforce"`, and the same attack under `"observe"` is recorded and not refused.
+   - **AST-1.1, account ID.** A registry row whose `Account ID` is wrong: the agent's job pushes nothing, and its PR,
+     if one is opened by hand from that bot, is refused.
+   - **AST-1.2, suspension.** An agent set to `SUSPENDED`: no job of it is due, and its open PR is refused; set back
+     to `ACTIVE`, it runs again.
+   - **AST-1.3, wrong key.** One agent's environment holding another agent's App key: `publish` refuses before any
+     push, and GitHub records no push to the stage branch.
+   - **AST-1.4, credentials register.** PRs that add an unlisted `secrets.<NAME>`, a `secrets: inherit` and a stale
+     row: Policy CI fails each, naming the line.
+   - **AST-1.5, registry protection.** A plan whose `build_scope` covers the identity registry or the credentials
+     register: refused before approval.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -338,6 +398,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
   already allow.
 - **Credentials are split by job.** The job that runs the agent never holds an App key or a write token. The job that
   holds an App key never runs agent code and holds the key of only the one agent the approved plan names.
+- **Keys are checked against the registry (Amendment 013).** A job proves the App key it holds is the registered
+  App's before it pushes (§3i), so a key in the wrong environment pushes nothing.
 - **HITL cannot be impersonated.** No job ever holds a HITL user credential. The router accepts `/mission approve`,
   `cancel` and `retry` only from `hitl_logins` user accounts, and approvals only for an exact SHA.
 - **Agents cannot change this machinery.** The `mission_dispatch` package, this spec and all workflows are
@@ -367,7 +429,10 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 2. **Environment `mission-runtime`:**
    - deployment branches: `main` only;
    - secrets: `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for `claude-code`, and `CURSOR_API_KEY` for `cursor-cli`.
-3. **Actions settings.** Allow the actions this workflow pins (`actions/checkout`, `upload-artifact`,
+3. **The credentials register (Amendment 013).** Every credential above, and every one held outside GitHub that can
+   act on the pipeline's repositories (App keys kept on HITL's machine, HITL's own GitHub login, the model accounts),
+   has a row (§3i). HITL fills in the `Held in` and `Rotated` facts no agent can see.
+4. **Actions settings.** Allow the actions this workflow pins (`actions/checkout`, `upload-artifact`,
    `download-artifact` and `create-github-app-token`). Fork PRs need no access.
 
 ## 7. Known limits
@@ -394,6 +459,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 9. **The Cursor CLI updates itself.** In a run with open network (`"observe"`), it downloaded another build of itself
    mid-run, so the SHA-256 pin held only for the install. Under `"enforce"` the download host is not listed and the
    install is root-owned and read-only.
+10. **The register is as true as HITL keeps it (Amendment 013).** Policy CI proves every credential a workflow uses is
+    listed; it cannot see a credential held outside GitHub. Rows of the `outside:` kind are HITL's own record.
+11. **Environment settings are not read by the pipeline (Amendment 013).** That each environment allows `main` only,
+    and which secrets it holds, are GitHub settings the workflow token cannot read. The register records them and
+    AST-1.3 shows a wrong key is caught; a periodic check of the settings needs an admin token and stays with HITL.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -449,3 +519,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 53 | Enforced, Cursor | `Mcp(governed-retrieval:*)` rules, `--approve-mcps`, `.cursor/mcp.json` naming only the gateway and removed after the run; refused when `~/.cursor/mcp.json` exists |
 | 54 | Enforced, the MCP config | One server; `python3 -m mcp_gateway`; `PYTHONPATH` the tooling tree; session and evidence read-only and outside the checkout |
 | 55 | Enforced, `collect` | The binding record and the gateway's evidence log are kept in `binding/` beside the patch; `publish` ignores them |
+| 56 | Enforced identity, `APP_ID` differs from the agent's registry `App ID` | Nothing pushed; the run fails with the reason |
+| 57 | Enforced identity, GitHub's account record for the token's bot has another ID than the registry | Nothing pushed; the run fails with the reason |
+| 58 | Observed identity, vector 56 or 57 | Published as before; the mismatch recorded in the run's log |
+| 59 | Enforced identity, a workflow references `secrets.<NAME>` with no register row for that workflow and job | Policy CI fails, naming the file and line |
+| 60 | Enforced identity, `secrets: inherit`, `toJSON(secrets)` or `secrets[...]` in a workflow | Policy CI fails |
+| 61 | Enforced identity, a register row whose `Used by` names a job that no longer references it | Policy CI fails: stale row |
+| 62 | Enforced identity, a job's `environment` does not match the row's `Held in` | Policy CI fails |
+| 63 | Observed identity, any of vectors 59–62 | Findings printed; the step passes |

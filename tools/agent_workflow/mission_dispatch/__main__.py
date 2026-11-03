@@ -14,7 +14,8 @@ Environment, per step (each step gets only what it needs):
                            GITHUB_TOKEN (the workflow's own token; plan also reads this workflow's runs,
                            report also posts on the tracking issue)
     checks                 nothing: it runs the code under review, so it gets no credential
-    publish                READ_TOKEN (the workflow's token), AGENT_TOKEN and AGENT_SLUG (the agent App)
+    publish, land          READ_TOKEN (the workflow's token), AGENT_TOKEN, AGENT_SLUG and APP_ID (the agent App;
+                           APP_ID must be the registry's, Amendment 013)
     collect                the runtime's model login, only to refuse a change that contains it
     all but plan           JOB: the job description plan() produced, as JSON
     publish, report        RUN_URL (optional): this workflow run, linked from the PR or the failure note
@@ -39,6 +40,7 @@ from . import binding, blast
 from .runtimes import BINARIES
 from .dispatch import (
     DispatchError,
+    key_problems,
     busy_lanes,
     not_due,
     run_checks,
@@ -234,11 +236,29 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def check_key(router: MissionRouter, agent: str, login: str) -> None:
+    """The App key this job holds must be the registered App's (Amendment 013, §3i item 1). Raises under
+    ``"enforce"``, so nothing is pushed; logs under ``"observe"``."""
+    registry = router.gh.file_at(router.registry_path, router.main)
+    try:
+        account = router.gh.account(login)
+    except GitHubError as exc:
+        account = {"error": str(exc)}
+    problems = key_problems(agent, login, os.environ.get("APP_ID", ""), registry, account)
+    if not problems:
+        return
+    reason = f"the App key is not {agent}'s registered App: " + "; ".join(problems)
+    if router.identity_mode == "enforce":
+        raise DispatchError(reason)
+    _log(f"identity (observe): {reason}")
+
+
 def cmd_publish(args) -> int:
     job = _job()
     read = GitHub(_env("READ_TOKEN"), args.repo)
     agent = GitHub(_env("AGENT_TOKEN"), args.repo)
-    survey, _ = live_survey(read, _log)
+    survey, router = live_survey(read, _log)
+    check_key(router, job.agent, f"{_env('AGENT_SLUG')}[bot]")
     result = publish(job, survey, Path(args.artifact), Path(args.root), CLONE_URL.format(repo=args.repo),
                      _env("READ_TOKEN"), _env("AGENT_TOKEN"), f"{_env('AGENT_SLUG')}[bot]", os.environ,
                      agent.create_pull, os.environ.get("RUN_URL", ""))
@@ -255,7 +275,8 @@ def cmd_land(args) -> int:
     except ValueError:
         raise DispatchError("LAND_JOB is not JSON") from None
     agent = GitHub(_env("AGENT_TOKEN"), args.repo)
-    survey, _ = live_survey(GitHub(_env("READ_TOKEN"), args.repo), _log)
+    survey, router = live_survey(GitHub(_env("READ_TOKEN"), args.repo), _log)
+    check_key(router, job.agent, f"{_env('AGENT_SLUG')}[bot]")
     result = land(job, survey, f"{_env('AGENT_SLUG')}[bot]", agent.create_pull, os.environ.get("RUN_URL", ""))
     if result["status"] == "skipped":
         _log(f"stack {job.stack_id}: not landing: {result['reason']}")

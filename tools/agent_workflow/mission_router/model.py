@@ -273,6 +273,34 @@ def parse_identity_registry(text: Any) -> Dict[str, str]:
     return statuses
 
 
+def parse_identity_column(text: Any, header: str) -> Dict[str, Optional[int]]:
+    """Identity name -> the number in the registry column titled ``header`` (``App ID``, ``Account ID``).
+
+    The column is found by its header. A row without a number there maps to None. Call after
+    ``parse_identity_registry``, which validates the rows.
+    """
+    _require(isinstance(text, str) and len(text) <= 262144, "identity registry: missing or too large")
+    column: Optional[int] = None
+    numbers: Dict[str, Optional[int]] = {}
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if column is None and cells and cells[0] == "Role" and header in cells:
+            column = cells.index(header)
+            continue
+        match = _REGISTRY_ROW_RE.match(line.strip())
+        if not match:
+            continue
+        value = cells[column] if column is not None and column < len(cells) else ""
+        numbers[match.group(1)] = int(value) if value.isdigit() and value[0] != "0" and len(value) <= 15 else None
+    return numbers
+
+
+def parse_identity_accounts(text: Any) -> Dict[str, Optional[int]]:
+    """Identity name -> its bot's GitHub account ID (Amendment 011). A row without one may not act; the rest of the
+    registry stays usable."""
+    return parse_identity_column(text, "Account ID")
+
+
 def mission_of_ref(ref: Any) -> Optional[str]:
     """Mission id named by any mission/<ID>/... branch, or None."""
     if not isinstance(ref, str):

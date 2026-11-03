@@ -84,6 +84,10 @@ class GitHub:
             page += 1
 
     # -- reads -----------------------------------------------------------
+    def account(self, login: str) -> dict:
+        """GitHub's account record for ``login`` (``id``, ``type``): the source of truth for account IDs."""
+        return self.get(f"{self._api}/users/{urllib.parse.quote(login, safe='')}")
+
     def file_at(self, path: str, ref: str) -> Optional[str]:
         try:
             return self.get(f"/contents/{q(path)}?ref={q(ref)}", raw=True)

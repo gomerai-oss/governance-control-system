@@ -40,7 +40,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from secrets_boundary import gate as boundary
 from secrets_boundary import records as boundary_records
@@ -61,6 +61,9 @@ from mission_router.model import (
     failures_since_retry,
     in_scope,
     integration_branch,
+    parse_identity_accounts,
+    parse_identity_column,
+    parse_identity_registry,
     parse_iso,
     parse_verdict,
     stack_branch,
@@ -942,6 +945,31 @@ def author(job: Job) -> Tuple[str, str]:
 
 def job_matrix(jobs: Sequence[Job]) -> Dict[str, list]:
     return {"job": [job.to_dict() for job in jobs]}
+
+
+def key_problems(agent: str, login: str, app_id: str, registry: Optional[str], account: Mapping[str, Any]) -> List[str]:
+    """Why the App key a job holds is not the registered App's for ``agent`` (Amendment 013, §3i item 1), or [].
+
+    ``app_id`` is the ``APP_ID`` the token was minted with, ``registry`` the identity registry on the default branch,
+    ``account`` GitHub's account record for ``login`` (the minted token's bot).
+    """
+    try:
+        parse_identity_registry(registry)
+        apps, accounts = parse_identity_column(registry, "App ID"), parse_identity_accounts(registry)
+    except MissionInputError as exc:
+        return [f"the identity registry is unusable: {exc}"]
+    problems = []
+    if agent not in apps:
+        return [f"{agent} has no row in the identity registry"]
+    if apps[agent] is None or str(apps[agent]) != app_id.strip():
+        problems.append(f"the key was minted for App ID {app_id or '(none)'}, but {agent}'s registered App ID is {apps[agent]}")
+    want = accounts.get(agent)
+    if want is None:
+        problems.append(f"{agent} has no Account ID in the identity registry")
+    elif account.get("id") != want or account.get("type") != "Bot":
+        problems.append(f"GitHub's account record for {login} has ID {account.get('id')} and type {account.get('type')}, "
+                        f"not {want} and Bot")
+    return problems
 
 
 # ------------------------------------------------------------- landing a stack

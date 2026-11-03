@@ -15,7 +15,11 @@ import os
 import sys
 from typing import List, Optional
 
+from pathlib import Path
+
+from mission_router.accounts import AccountGuard, GuardedGitHub, expected_accounts, identity_mode
 from mission_router.github import GitHub
+from mission_router.router import load_config
 
 from .github_record import verifier
 from .graph import Entry, build_graph, canonical, counts, document, sorted_findings, walk
@@ -86,8 +90,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("--github needs GITHUB_TOKEN", file=sys.stderr)
             return 2
         try:
-            verify = verifier(GitHub(token, args.github))
-        except ValueError as exc:
+            # Every login GitHub's record names is checked with its account ID (MISSION-ROUTER-001 Amendment 011).
+            config = load_config(Path(args.config)) if args.config else load_config()
+            registry = Path(args.root) / config["identity_registry"]
+            guard = AccountGuard(identity_mode(config), lambda message: print(_one_line(message), file=sys.stderr))
+            guard.expect(expected_accounts(config, registry.read_text(encoding="utf-8") if registry.is_file() else None))
+            verify = verifier(GuardedGitHub(GitHub(token, args.github), guard))
+        except (OSError, ValueError) as exc:
             print(_one_line(f"--github: {exc}"), file=sys.stderr)
             return 2
     try:

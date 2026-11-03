@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,13 +38,26 @@ MID = "M-DEMO-001"
 CLASSIFY = classify_or_raise(load_tables(), normalize_path)
 A1B, A2B, A3B = "agent-a1[bot]", "agent-a2[bot]", "agent-a3[bot]"
 IDS = {"a1": A1B, "a2": A2B, "a3": A3B}
+# GitHub account IDs (Amendment 011): what the fake GitHub records with each login.
+ACCOUNTS = {A1B: 5001, A2B: 5002, A3B: 5003, "agent-harness[bot]": 5004, "hitl-user": 6001, "github-actions[bot]": 7001}
+
+
+def who(login, type_=None):
+    """A GitHub account object, carrying the account ID GitHub records for that login."""
+    user = {"login": login, "id": ACCOUNTS.get(login, 9999)}
+    if type_ is not None:
+        user["type"] = type_
+    return user
 REGISTRY_PATH = "docs/IDENTITY-REGISTRY.md"
 
 
-def registry_doc(**statuses):
-    rows = [("a1", 1000001, "ACTIVE"), ("a2", 1000002, "ACTIVE"), ("a3", 1000003, "ACTIVE"), ("harness", 1000004, "ACTIVE")]
-    lines = ["| Role | App ID | Installation ID | Status | Permissions |", "|---|---|---|---|---|"]
-    lines += [f"| {name} | {app} | 1{app} | {statuses.get(name, status)} | contents write |" for name, app, status in rows]
+def registry_doc(accounts=None, **statuses):
+    accounts = accounts or {}
+    rows = [("a1", 1000001, "ACTIVE", 5001), ("a2", 1000002, "ACTIVE", 5002), ("a3", 1000003, "ACTIVE", 5003),
+            ("harness", 1000004, "ACTIVE", 5004)]
+    lines = ["| Role | App ID | Installation ID | Status | Permissions | Account ID |", "|---|---|---|---|---|---|"]
+    lines += [f"| {name} | {app} | 1{app} | {statuses.get(name, status)} | contents write | {accounts.get(name, account)} |"
+              for name, app, status, account in rows]
     return "\n".join(lines)
 
 
@@ -169,7 +183,7 @@ class ModelTests(unittest.TestCase):
 
     def test_hitl_retries(self):
         def c(login, body, when, type_="User"):
-            return {"user": {"login": login, "type": type_}, "body": body, "created_at": when}
+            return {"user": who(login, type_), "body": body, "created_at": when}
         comments = [c(HITL, "/mission retry", "2026-10-23T02:00:00Z"), c(A2B, "/mission retry", "2026-10-23T03:00:00Z", "Bot"),
                     c("mallory", "/mission retry", "2026-10-23T04:00:00Z"), c(HITL, "please /mission retry", "2026-10-23T05:00:00Z"),
                     c(HITL.upper(), "  /mission retry  ", "2026-10-23T01:00:00Z"), c(HITL, "/mission retry", None),
@@ -634,6 +648,7 @@ class FakeGitHub:
         self.dispatch_error = None
         self.issue_listing_misses = False  # the issue listing comes back without any issue, as it did on 2026-10-22
         self.deleted = []  # branches the router deleted
+        self.account_overrides = {}  # login -> GitHub's account record, when a test changes it
 
     # --- git model
     def _commit(self, parents, tree):
@@ -659,7 +674,7 @@ class FakeGitHub:
     def _record(self, branch, before, after, by, kind="push"):
         self.activity_log.setdefault(branch, []).insert(0, {
             "activity_type": kind, "before": before or "0" * 40, "after": after,
-            "actor": {"login": by, "type": "Bot" if by.endswith("[bot]") else "User"}})
+            "actor": who(by, "Bot" if by.endswith("[bot]") else "User")})
 
     def set_branch(self, branch, sha, by=None):
         before = self.branches.get(branch)
@@ -713,8 +728,8 @@ class FakeGitHub:
         p = self.prs[n]
         head_sha = self.branches.get(p["head_ref"]) if p["state"] == "open" else p.get("head_sha_at_close")
         return {"number": n, "head": {"ref": p["head_ref"], "sha": head_sha, "repo": {"full_name": REPO}},
-                "base": {"ref": p["base_ref"]}, "user": {"login": p["user"], "type": p["user_type"]}, "draft": p["draft"],
-                "state": p["state"], "merged_at": p["merged_at"], "merged_by": {"login": p["merged_by"]} if p["merged_by"] else None,
+                "base": {"ref": p["base_ref"]}, "user": who(p["user"], p["user_type"]), "draft": p["draft"],
+                "state": p["state"], "merged_at": p["merged_at"], "merged_by": who(p["merged_by"]) if p["merged_by"] else None,
                 "merge_commit_sha": p["merge_commit_sha"]}
 
     def hitl_merge(self, n, who=HITL):
@@ -740,7 +755,7 @@ class FakeGitHub:
         return {"sha": merge, "merged": True}
 
     def comment_as(self, n, login, body, type_="User"):
-        self.comments.setdefault(n, []).append({"user": {"login": login, "type": type_}, "body": body,
+        self.comments.setdefault(n, []).append({"user": who(login, type_), "body": body,
                                                 "created_at": f"2026-10-19T00:00:{next(self.clock):04d}Z"})
 
     # --- API surface used by the router
@@ -789,9 +804,14 @@ class FakeGitHub:
             if n in self.issues:
                 return dict(self.issues[n])
             if n in self.prs:  # GitHub serves every PR as an issue too
-                return {"number": n, "title": "a PR", "pull_request": {}, "user": {"login": self.prs[n]["user"]}}
+                return {"number": n, "title": "a PR", "pull_request": {}, "user": who(self.prs[n]["user"])}
             raise GitHubError(404, "Not Found", path)
         raise AssertionError(f"unexpected get {path}")
+
+    def account(self, login):
+        if login in self.account_overrides:
+            return self.account_overrides[login]
+        return {"login": login, "id": ACCOUNTS.get(login, 9999), "type": "Bot" if login.endswith("[bot]") else "User"}
 
     def file_at(self, path, ref):
         return self.commits[self._resolve(ref)][1].get(path)
@@ -825,7 +845,7 @@ class FakeGitHub:
         self.prs[n]["base_ref"] = base
 
     def approve(self, n, sha, body):
-        self.reviews.setdefault(n, []).append({"user": {"login": BOT}, "state": "APPROVED", "commit_id": sha})
+        self.reviews.setdefault(n, []).append({"user": who(BOT), "state": "APPROVED", "commit_id": sha})
 
     def merge(self, n, sha, title):
         p = self.prs[n]
@@ -861,7 +881,7 @@ class FakeGitHub:
             n = self.next_number
             self.next_number += 1
             self.issues[n] = {"number": n, "title": body["title"], "body": body["body"], "state": "open",
-                              "labels": [{"name": l} for l in body["labels"]], "user": {"login": BOT}}
+                              "labels": [{"name": l} for l in body["labels"]], "user": who(BOT)}
             return self.issues[n]
         parts = path.split("/")
         n = int(parts[2])
@@ -2005,6 +2025,97 @@ class RouterLoopTests(unittest.TestCase):
         n = self.open_plan("M-LEG-004", {"id": "S-9", "kind": "CHAINED"})
         self.sweep()
         self.assertTrue(any("already landed" in c for c in self.bot_comments(n)))
+
+
+class AccountIdTests(unittest.TestCase):
+    """Amendment 011: every login is checked with its GitHub account ID; vectors 98-104."""
+
+    start_mission = RouterLoopTests.start_mission
+    a2_round = RouterLoopTests.a2_round
+    sweep = RouterLoopTests.sweep
+    issue = RouterLoopTests.issue
+    bot_comments = RouterLoopTests.bot_comments
+    assert_refused = RouterLoopTests.assert_refused
+
+    def make(self, mode="enforce", **extra):
+        self.gh = FakeGitHub()
+        self.logs = []
+        cfg = {**config(), "identity": mode, "hitl_account_ids": [ACCOUNTS[HITL]], "bot_account_id": ACCOUNTS[BOT], **extra}
+        self.router = MissionRouter(self.gh, cfg, CLASSIFY, log=self.logs.append)
+
+    def a2_merged(self, n):
+        return self.gh.prs[n]["merge_commit_sha"] is not None
+
+    def test_bot_login_with_another_account_id_is_foreign(self):  # vector 98
+        self.make()
+        self.start_mission()
+        self.gh.account_overrides[A2B] = {"login": A2B, "id": ACCOUNTS[A2B], "type": "Bot"}
+        with mock.patch.dict(ACCOUNTS, {A2B: 424242}):
+            n = self.a2_round(1)
+        self.assert_refused(n)
+        self.assertTrue(any("account ID 424242, not 5002" in line for line in self.logs))
+
+    def test_hitl_approval_from_another_account_id_merges_nothing(self):  # vector 99
+        self.make()
+        branch = f"mission/{MID}/a1"
+        self.gh.push(branch, {f"missions/{MID}/mission.json": manifest_doc(), f"missions/{MID}/PLAN.md": "plan"}, base="main")
+        n = self.gh.open_pr(branch, "main", A1B)
+        self.sweep()
+        with mock.patch.dict(ACCOUNTS, {HITL: 31337}):
+            self.gh.comment_as(n, HITL, f"/mission approve {self.gh.branches[branch]}")
+        self.sweep()
+        self.assertEqual(self.gh.prs[n]["state"], "open")
+        self.gh.comment_as(n, HITL, f"/mission approve {self.gh.branches[branch]}")
+        self.sweep()
+        self.assertEqual(self.gh.prs[n]["merged_by"], BOT, "the same approval from the right account merges")
+
+    def test_github_account_record_disagreeing_stops_only_that_agent(self):  # vector 100
+        self.make()
+        self.start_mission()
+        self.gh.account_overrides[A2B] = {"login": A2B, "id": 1, "type": "Bot"}
+        n = self.a2_round(1)
+        self.assert_refused(n)
+        self.assertNotIn("a2", self.router.identities())
+        self.assertIn("a3", self.router.identities())
+        self.assertTrue(any("account record has ID 1" in line for line in self.logs))
+        self.gh.account_overrides[A3B] = {"login": A3B, "id": ACCOUNTS[A3B], "type": "User"}
+        self.router._ids = None
+        self.assertNotIn("a3", self.router.identities(), "an account record that is not a Bot confirms nothing")
+
+    def test_registry_row_without_account_id_cannot_act(self):  # vector 101
+        for mode in ("observe", "enforce"):
+            with self.subTest(mode=mode):
+                self.make(mode)
+                self.gh.push("main", {REGISTRY_PATH: registry_doc(accounts={"a2": ""})}, by=HITL)
+                self.assertEqual(sorted(self.router.identities()), ["a1", "a3"])
+                self.assertTrue(any("a2 has no Account ID" in line for line in self.logs))
+
+    def test_observe_acts_on_the_login_and_logs(self):  # vector 102
+        self.make("observe")
+        self.start_mission()
+        self.gh.account_overrides[A3B] = {"login": A3B, "id": 1, "type": "Bot"}
+        with mock.patch.dict(ACCOUNTS, {A2B: 424242}):
+            n = self.a2_round(1)
+        self.assertTrue(self.a2_merged(n))
+        self.assertIn("a3", self.router.identities())
+        self.assertTrue(any(line.startswith("identity (observe): ") and "424242" in line for line in self.logs))
+        self.assertTrue(any("account record has ID 1" in line for line in self.logs))
+
+    def test_registry_is_authority(self):  # vector 103
+        for path in ("docs/IDENTITY-REGISTRY.md", "registry/CREDENTIALS-REGISTER.md",
+                     "tools/agent_workflow/mission_router/IDENTITY-REGISTRY.md"):
+            self.assertEqual(CLASSIFY(normalize_path(path)), "AUTHORITY", path)
+
+    def test_bad_identity_settings_stop_the_router(self):  # vector 104
+        for extra in ({"identity": "maybe"}, {"hitl_account_ids": []}, {"hitl_account_ids": ["6001"]},
+                      {"bot_account_id": True}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.make(**extra)
+
+    def test_live_config_names_every_account_id(self):
+        cfg = load_config()
+        self.assertEqual(len(cfg["hitl_account_ids"]), len(cfg["hitl_logins"]))
+        self.assertIsInstance(cfg["bot_account_id"], int)
 
 
 class StackUnitTests(unittest.TestCase):
