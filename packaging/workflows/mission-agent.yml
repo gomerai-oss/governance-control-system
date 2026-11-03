@@ -368,6 +368,7 @@ jobs:
           READ_TOKEN: ${{ github.token }}
           AGENT_TOKEN: ${{ steps.token.outputs.token }}
           AGENT_SLUG: ${{ steps.token.outputs.app-slug }}
+          APP_ID: ${{ vars.APP_ID }}
         run: >-
           python3 -m mission_dispatch publish --repo "$GITHUB_REPOSITORY"
           --root "$RUNNER_TEMP/publish" --artifact "$RUNNER_TEMP/artifact"
@@ -455,4 +456,5 @@ jobs:
           READ_TOKEN: ${{ github.token }}
           AGENT_TOKEN: ${{ steps.token.outputs.token }}
           AGENT_SLUG: ${{ steps.token.outputs.app-slug }}
+          APP_ID: ${{ vars.APP_ID }}
         run: python3 -m mission_dispatch land --repo "$GITHUB_REPOSITORY"

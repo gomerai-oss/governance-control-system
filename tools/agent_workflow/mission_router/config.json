@@ -1,9 +1,12 @@
 {
   "hitl_logins": ["your-github-login"],
+  "hitl_account_ids": [1000000],
   "bot_login": "github-actions[bot]",
+  "bot_account_id": 41898282,
   "default_branch": "main",
   "runtime_binding": "enforce",
   "blast_radius": "enforce",
+  "identity": "observe",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "agents": {
     "a2": "yourorg-agent-a2[bot]",

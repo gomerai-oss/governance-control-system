@@ -48,7 +48,7 @@ from mission_dispatch.dispatch import (
     still_wanted,
     task_text,
 )
-from mission_dispatch import binding, blast, runtimes
+from mission_dispatch import binding, blast, dispatch, runtimes
 from mission_dispatch.runtimes import CLAUDE_CODE, CURSOR_CLI, INBOX_DIR, SandboxError, agent_env, argv_for
 from mission_dispatch.workspace import Change, git_env
 from secrets_boundary import gate as boundary
@@ -1663,6 +1663,63 @@ class CredentialPathDenialTests(unittest.TestCase):
         with mock.patch.object(runtimes.secret_paths, "read_denials", return_value=("**/a b",)):
             with self.assertRaises(runtimes.SandboxError):
                 runtimes.secret_globs()
+
+class KeyCheckTests(unittest.TestCase):
+    """Amendment 013, §3i item 1: the App key must be the registered App's before anything is pushed (vectors 56-58)."""
+
+    REGISTRY = ("| Role | App ID | Installation ID | Status | Permissions | Account ID |\n|---|---|---|---|---|---|\n"
+                "| a2 | 1000002 | 2000002 | ACTIVE | contents write | 5002 |\n"
+                "| a3 | 1000003 | 2000003 | ACTIVE | contents write | |\n")
+    BOT = {"login": "agent-a2[bot]", "id": 5002, "type": "Bot"}
+
+    def problems(self, app_id="1000002", account=None, agent="a2", registry=None):
+        return dispatch.key_problems(agent, "agent-a2[bot]", app_id, registry or self.REGISTRY, account or self.BOT)
+
+    def test_the_registered_key_passes(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_a_key_minted_for_another_app_is_refused(self):  # vector 56
+        (problem,) = self.problems(app_id="1000003")
+        self.assertIn("App ID 1000003", problem)
+        self.assertTrue(self.problems(app_id=""))
+
+    def test_an_account_record_that_disagrees_is_refused(self):  # vector 57
+        self.assertIn("has ID 9", self.problems(account={"id": 9, "type": "Bot"})[0])
+        self.assertTrue(self.problems(account={"id": 5002, "type": "User"}))
+        self.assertTrue(self.problems(account={"error": "unreadable"}))
+
+    def test_a_row_without_account_id_or_no_row_is_refused(self):
+        self.assertIn("no Account ID", self.problems(agent="a3", app_id="1000003")[0])
+        self.assertIn("no row", self.problems(agent="a9")[0])
+        self.assertIn("unusable", self.problems(registry="no table here")[0])
+
+    def test_publish_refuses_under_enforce_and_logs_under_observe(self):  # vectors 56-58
+        from mission_dispatch import __main__ as cli
+
+        class Router:
+            registry_path, main = "docs/IDENTITY-REGISTRY.md", "main"
+
+            def __init__(self, mode):
+                self.identity_mode = mode
+                outer = self
+
+                class GH:
+                    def file_at(self, path, ref):
+                        return KeyCheckTests.REGISTRY
+
+                    def account(self, login):
+                        return {"id": 5002, "type": "Bot"}
+                self.gh = GH()
+
+        logs = []
+        with mock.patch.dict(os.environ, {"APP_ID": "1000003"}), mock.patch.object(cli, "_log", logs.append):
+            with self.assertRaises(dispatch.DispatchError):
+                cli.check_key(Router("enforce"), "a2", "agent-a2[bot]")
+            cli.check_key(Router("observe"), "a2", "agent-a2[bot]")
+        self.assertTrue(any(line.startswith("identity (observe): ") for line in logs), logs)
+        with mock.patch.dict(os.environ, {"APP_ID": "1000002"}):
+            cli.check_key(Router("enforce"), "a2", "agent-a2[bot]")
+
 
 if __name__ == "__main__":
     unittest.main()

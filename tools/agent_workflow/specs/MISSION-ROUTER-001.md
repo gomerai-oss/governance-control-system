@@ -29,6 +29,13 @@ HITL's `/mission halt` on a mission's tracking issue halts that mission, and on 
 stack; `/mission resume` posted after it lifts the halt. A halted mission merges nothing and starts no agent (§6).
 Its stage is `PAUSED`, an overlay on the stage it was in (recorded as `paused_from`): its PRs are held, never refused,
 so a halt never counts toward the 3 refusals that block a stage.
+**Amendment 011 (2026-11-02, HITL direction: ring 1, with MISSION-DISPATCH-001 Amendment 013):** identities are
+checked by account ID, not by login alone. The identity registry gains an `Account ID` column, the GitHub account ID
+of each agent's bot; `config.json` gains `hitl_account_ids` and `bot_account_id`. Wherever the router trusts a login
+(who opened a PR, who pushed a branch, who merged, who posted `/mission approve`, `retry`, `cancel`, `halt` or
+`resume`), the account ID GitHub records with it must match as well, and each agent's ID is confirmed against GitHub's
+own account record every sweep. The identity registry becomes SPEC-002 `AUTHORITY`. The mode is set by `"identity"`
+in `config.json` (§5a).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -331,6 +338,24 @@ check makes the merge fail, and the new commit is checked on the next sweep.
   is rejected, including HITL on an A2 or A3 branch and other agents, so an agent must update its own branch. If
   GitHub has not yet recorded the push that produced the head SHA, the PR waits. A branch with more than 300
   recorded updates is rejected, because they cannot all be verified.
+- **Account IDs (Amendment 011).** A login is a name GitHub lets an account change, and a deleted App's name can be
+  taken again by a new App with a new bot account. The account ID never changes and is never reused. So each identity
+  is a login and an account ID together:
+  - each agent's `Account ID` is in its identity registry row: `| Role | App ID | Installation ID | Status |
+    Permissions | Account ID |`. A missing or non-numeric ID makes that agent unable to act; the registry stays
+    usable for the others;
+  - `config.json` `hitl_account_ids` gives one ID per `hitl_logins` entry, in the same order, and `bot_account_id`
+    the ID of `bot_login`;
+  - every login check in this section, in §5c and §5d, and in the comment commands (§6) also compares the account ID
+    GitHub records with the login (`user.id` on PRs and comments, `merged_by.id`, `actor.id` in the activity log);
+  - once per sweep, the router reads GitHub's account record for each agent login (`GET /users/<login>`) and confirms
+    its ID and that its type is `Bot`. An agent whose record disagrees with its registry row may not act, and the
+    router logs why;
+  - **mode.** `"identity"` in `config.json`: `"observe"` (the default when the key is absent) logs every mismatch and
+    acts on the login alone, as before; `"enforce"` treats a mismatch as a foreign identity. Any other value stops
+    every agent. HITL switches to `"enforce"` after the live attack tests (MISSION-DISPATCH-001 §3i) pass.
+- **The registry is protected (Amendment 011).** The file `config.json` `identity_registry` names is SPEC-002
+  `AUTHORITY`, as `config.json` is: no mission can change who may act, and a status change is a HITL pipeline patch.
 - **Who approves.** `/mission approve <sha>` counts only from a `hitl_logins` user account. This is meaningful only
   while agents never run with the HITL's own GitHub credentials. The laptop orchestrator gives each agent its role's
   installation token and denies it the HITL's credential stores.
@@ -457,6 +482,10 @@ The router enforces everything it can see. These settings live in GitHub and onl
    pipeline. The `mission-agent-*` environments need no change: their jobs run from `main` whatever a mission targets.
 4. **Bot logins.** Each `config.json` `agents` value is the App's exact bot login (`<app-slug>[bot]`), confirmed
    from GitHub. A wrong login fails closed: that agent's PRs are rejected.
+5. **Account IDs (Amendment 011).** Each registry `Account ID` and each `hitl_account_ids` entry is read from
+   GitHub's account record (`GET /users/<login>`, field `id`), not typed from memory.
+6. **App installations (Amendment 011).** Each agent App is installed only on the repositories that run missions.
+   An App installed on every repository of an owner can be minted a token for any of them by whoever holds its key.
 
 ## 9. Known limits
 
@@ -481,6 +510,9 @@ The router enforces everything it can see. These settings live in GitHub and onl
    issue is read by its recorded number and does not depend on the listing.
 8. **A resume does not start the agent at once.** The router posts each stage's handoff once, so after a resume the
    Mission Agent's schedule (every 10 minutes) starts the waiting agent.
+9. **A HITL login is trusted as HITL (Amendment 011).** The account ID check stops a renamed or re-registered account,
+   not a program running on HITL's own machine with HITL's own GitHub login. That risk is accepted (HITL, 2026-11-01):
+   the pipeline is protected against agents acting through its own seats, not against HITL's own credentials.
 
 ## 10. Predicted vectors (A3 verifies)
 
@@ -583,3 +615,10 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 95 | One comment carries both `/mission halt` and `/mission resume` | Halted: stopping wins |
 | 96 | `/mission halt` on a stack's issue after every mission passed | Every mission of the stack is `PAUSED` and the landing PR is held until `/mission resume` |
 | 97 | `/mission cancel` on a halted mission | `CANCELLED`, as for any mission |
+| 98 | Enforced identity; A2 PR from the right bot login whose account ID differs from the registry row | Rejected as a foreign identity |
+| 99 | Enforced identity; `/mission approve <head>` from a `hitl_logins` login with another account ID | No merge |
+| 100 | Enforced identity; GitHub's account record for an agent login has another ID or is not a `Bot` | That agent may not act; the reason is logged; other agents are unaffected |
+| 101 | Registry row without a numeric `Account ID` | That agent may not act; the registry stays usable |
+| 102 | Observed identity; any of vectors 98–100 | Acted on the login alone, as before; each mismatch logged |
+| 103 | A plan whose `build_scope` covers the identity registry | Refused before approval: the registry is `AUTHORITY` |
+| 104 | `"identity"` set to an unknown value | No agent may act |

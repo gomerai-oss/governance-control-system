@@ -18,6 +18,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
                    evaluate_capture, evaluate_landing)
+from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
 from .github import GitHub, GitHubError
 from .model import (
     AGENT_RE,
@@ -38,6 +39,7 @@ from .model import (
     manifest_path,
     mission_of_ref,
     scopes_overlap,
+    parse_identity_accounts,
     parse_identity_registry,
     validate_deliverable,
     valid_target_branch,
@@ -169,6 +171,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         raise ValueError("config.json: agents must map agent names to distinct GitHub App bot logins")
     if not isinstance(config.get("identity_registry"), str):
         raise ValueError("config.json: identity_registry is required")
+    identity_mode(config)
+    config_accounts(config)
     issues = config.get("tracking_issues", {})
     if not (isinstance(issues, dict) and all(isinstance(k, str) and MISSION_ID_RE.fullmatch(k) for k in issues)
             and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in issues.values())):
@@ -198,7 +202,11 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 class MissionRouter:
     def __init__(self, gh: GitHub, config: dict, classify: Callable[[str], str], dry_run: bool = False,
                  log: Callable[[str], None] = print, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
-        self.gh = gh
+        # Every record GitHub returns passes the account-ID check before any rule reads it (Amendment 011).
+        self.identity_mode = identity_mode(config)
+        self.guard = AccountGuard(self.identity_mode, lambda message: self.log(message))
+        self.gh = GuardedGitHub(gh, self.guard)
+        self._accounts = config_accounts(config)
         self.now = now
         self.hitl = {login.casefold() for login in config["hitl_logins"]}
         self.bot = config["bot_login"]
@@ -286,6 +294,7 @@ class MissionRouter:
     def _discover(self) -> List[dict]:
         """Load tracking issues, open PRs and mission branches. Returns open non-mission PRs into the default branch."""
         self._ids = None
+        self.identities()  # sets the account IDs the guard expects before any record is read
         self._histories: Dict[str, Tuple[MergedStage, ...]] = {}
         self._issues, self._stack_issues = {}, {}
         self._tracking, self._plan_pr, self._stacks, self._landing_prs = {}, {}, {}, {}
@@ -510,11 +519,19 @@ class MissionRouter:
         """Agent -> GitHub App bot login, for agents ACTIVE in the identity registry on the default branch."""
         if self._ids is None:
             try:
-                statuses = parse_identity_registry(self.gh.file_at(self.registry_path, self.main))
+                text = self.gh.file_at(self.registry_path, self.main)
+                statuses, accounts = parse_identity_registry(text), parse_identity_accounts(text)
             except MissionInputError as exc:
                 self.log(f"identity registry unusable, no agent may act: {exc}")
-                statuses = {}
-            self._ids = {agent: login for agent, login in self.agents.items() if statuses.get(agent) == "ACTIVE"}
+                statuses, accounts = {}, {}
+            active = {agent: login for agent, login in self.agents.items() if statuses.get(agent) == "ACTIVE"}
+            for agent in sorted(a for a in active if accounts.get(a) is None):
+                self.log(f"identity registry: {agent} has no Account ID, so it may not act")
+            active = {agent: login for agent, login in active.items() if accounts.get(agent) is not None}
+            self.guard.expect({**self._accounts, **{login: accounts[agent] for agent, login in active.items()}})
+            confirmed = self.guard.confirm(self.gh.account, sorted(active.values()))
+            self._ids = {agent: login for agent, login in active.items()
+                         if login in confirmed or self.identity_mode == "observe"}
         return self._ids
 
     def _push_evidence(self, branch: str, head_sha: str) -> Tuple[Tuple[str, ...], bool]:

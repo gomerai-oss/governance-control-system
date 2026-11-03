@@ -511,6 +511,19 @@ class GitHubRecordTests(unittest.TestCase):
         self.assertTrue(any(r == "G1" and f"opened by {A2}" in d for r, d in found), found)
         self.assertTrue(any(r == "G1" and f"merged by {HITL}" in d for r, d in found), found)
 
+    def test_g1_an_opener_whose_account_id_is_not_the_registered_one(self):
+        """Amendment 011: under enforce, the right login with another account ID is a foreign identity."""
+        from mission_router.accounts import AccountGuard, GuardedGitHub
+        self.genuine()
+        for user in (pr["user"] for pr in self.gh.pulls.values()):
+            user["id"] = 424242 if user["login"] == A3 else 1
+        logs = []
+        guard = AccountGuard("enforce", logs.append)
+        guard.expect({A3: 5003})
+        self.gh = GuardedGitHub(self.gh, guard)
+        self.assert_rule("G1", "(account id mismatch)")
+        self.assertTrue(any("424242" in line for line in logs), logs)
+
     def test_g1_landing_from_the_wrong_branch(self):
         self.genuine(landing_ref="feature/sneaky")
         self.assert_rule("G1", "'feature/sneaky'")
