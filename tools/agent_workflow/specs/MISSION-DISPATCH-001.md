@@ -285,7 +285,8 @@ is never passed (A3 found the first version counting after forwarding, M-METHOD-
 
 **Mode.** `"identity"` in `config.json` (MISSION-ROUTER-001 §5a): `"observe"` (the default when the key is absent)
 records what enforcement would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job.
-HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass.
+HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass. **Switched on:** this repository's `config.json` sets
+`"enforce"` (ring 1, part 3, after AST-1.1 to 1.5 passed on 2026-11-03).
 
 1. **The key must be the registered App's.** Before `publish` or `land` pushes anything, it confirms the minted
    token belongs to the agent the job names: the App ID the token was minted with (`APP_ID`) equals the agent's

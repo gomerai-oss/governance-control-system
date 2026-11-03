@@ -356,7 +356,8 @@ check makes the merge fail, and the new commit is checked on the next sweep.
     router logs why;
   - **mode.** `"identity"` in `config.json`: `"observe"` (the default when the key is absent) logs every mismatch and
     acts on the login alone, as before; `"enforce"` treats a mismatch as a foreign identity. Any other value stops
-    every agent. HITL switches to `"enforce"` after the live attack tests (MISSION-DISPATCH-001 §3i) pass.
+    every agent. HITL switches to `"enforce"` after the live attack tests (MISSION-DISPATCH-001 §3i) pass. **Switched
+    on** in this repository on 2026-11-03, after AST-1.1 to 1.5 passed.
 - **The registry is protected (Amendment 011).** The file `config.json` `identity_registry` names is SPEC-002
   `AUTHORITY`, as `config.json` is: no mission can change who may act, and a status change is a HITL pipeline patch.
 - **Who approves.** `/mission approve <sha>` counts only from a `hitl_logins` user account. This is meaningful only
