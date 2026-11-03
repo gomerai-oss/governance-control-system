@@ -37,7 +37,7 @@ one mission, which stops any change of it reaching a PR (§3h). The mode is set 
 **Amendment 013 (2026-11-02, HITL direction: ring 1 of the six-ring security system, with MISSION-ROUTER-001
 Amendment 011):** identity and credentials. A job that holds an App key proves the key is the registered App's before
 it pushes; every credential the pipeline uses is listed in a credentials register with who holds it, what it can do and
-how it is revoked; and Policy CI refuses a workflow that uses a credential the register does not list (§3i). The mode
+how it is revoked; and the credentials check refuses a workflow that uses a credential the register does not list (§3i). The mode
 is set by `"identity"` in `config.json`.
 
 ## 1. Purpose
@@ -310,7 +310,9 @@ HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass.
    - **Rotated:** the date it was last replaced, or `-`.
 
    The register is SPEC-002 `AUTHORITY`: no mission can change it.
-3. **Policy CI checks the register against the workflows** (`credentials_check`, stdlib). For every
+3. **The credentials check compares the register with the workflows** (`credentials_check`, stdlib, run by the
+   Credentials Check workflow `credentials-check.yml` on every PR and every push to `main`; a release ships it in
+   `packaging/workflows/` with the other workflows, and `--workflows` points the check there). For every
    `secrets.<NAME>` and `vars.<NAME>` in `.github/workflows/*`, there must be a row for that name whose `Used by`
    names that workflow and job and whose `Held in` matches the job's `environment` (or `repository` or
    `organization` for a job without one). `secrets.GITHUB_TOKEN` and `github.token` are exempt: they are minted per
@@ -332,7 +334,7 @@ HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass.
    - **AST-1.3, wrong key.** One agent's environment holding another agent's App key: `publish` refuses before any
      push, and GitHub records no push to the stage branch.
    - **AST-1.4, credentials register.** PRs that add an unlisted `secrets.<NAME>`, a `secrets: inherit` and a stale
-     row: Policy CI fails each, naming the line.
+     row: the credentials check fails each, naming the line.
    - **AST-1.5, registry protection.** A plan whose `build_scope` covers the identity registry or the credentials
      register: refused before approval.
 
@@ -459,7 +461,7 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 9. **The Cursor CLI updates itself.** In a run with open network (`"observe"`), it downloaded another build of itself
    mid-run, so the SHA-256 pin held only for the install. Under `"enforce"` the download host is not listed and the
    install is root-owned and read-only.
-10. **The register is as true as HITL keeps it (Amendment 013).** Policy CI proves every credential a workflow uses is
+10. **The register is as true as HITL keeps it (Amendment 013).** The credentials check proves every credential a workflow uses is
     listed; it cannot see a credential held outside GitHub. Rows of the `outside:` kind are HITL's own record.
 11. **Environment settings are not read by the pipeline (Amendment 013).** That each environment allows `main` only,
     and which secrets it holds, are GitHub settings the workflow token cannot read. The register records them and
@@ -522,8 +524,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 56 | Enforced identity, `APP_ID` differs from the agent's registry `App ID` | Nothing pushed; the run fails with the reason |
 | 57 | Enforced identity, GitHub's account record for the token's bot has another ID than the registry | Nothing pushed; the run fails with the reason |
 | 58 | Observed identity, vector 56 or 57 | Published as before; the mismatch recorded in the run's log |
-| 59 | Enforced identity, a workflow references `secrets.<NAME>` with no register row for that workflow and job | Policy CI fails, naming the file and line |
-| 60 | Enforced identity, `secrets: inherit`, `toJSON(secrets)` or `secrets[...]` in a workflow | Policy CI fails |
-| 61 | Enforced identity, a register row whose `Used by` names a job that no longer references it | Policy CI fails: stale row |
-| 62 | Enforced identity, a job's `environment` does not match the row's `Held in` | Policy CI fails |
+| 59 | Enforced identity, a workflow references `secrets.<NAME>` with no register row for that workflow and job | The credentials check fails, naming the file and line |
+| 60 | Enforced identity, `secrets: inherit`, `toJSON(secrets)` or `secrets[...]` in a workflow | The credentials check fails |
+| 61 | Enforced identity, a register row whose `Used by` names a job that no longer references it | The credentials check fails: stale row |
+| 62 | Enforced identity, a job's `environment` does not match the row's `Held in` | The credentials check fails |
 | 63 | Observed identity, any of vectors 59–62 | Findings printed; the step passes |

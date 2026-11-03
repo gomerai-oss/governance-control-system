@@ -173,6 +173,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         raise ValueError("config.json: identity_registry is required")
     identity_mode(config)
     config_accounts(config)
+    if not isinstance(config.get("credentials_register", ""), str):
+        raise ValueError("config.json: credentials_register must name a file")
     issues = config.get("tracking_issues", {})
     if not (isinstance(issues, dict) and all(isinstance(k, str) and MISSION_ID_RE.fullmatch(k) for k in issues)
             and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in issues.values())):
