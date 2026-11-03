@@ -36,7 +36,7 @@ from mission_router.gate import classify_or_raise
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast
+from . import binding, blast, quarantine
 from .runtimes import BINARIES
 from .dispatch import (
     DispatchError,
@@ -166,6 +166,7 @@ def cmd_due(args) -> int:
 
 def cmd_checks(args) -> int:
     job = _job()
+    _quarantine_mode(load_config())
     network = None
     if args.run_as:  # §3h: the checks account's network is closed (or counted) before the first check
         try:
@@ -186,9 +187,20 @@ def _binding_mode(config: dict) -> str:
         raise DispatchError(str(exc)) from None
 
 
+def _quarantine_mode(config: dict) -> str:
+    """``"quarantine"`` (§3j); an unknown value fails the job. Items 1 and 4 apply in both modes."""
+    try:
+        value = quarantine.mode(config)
+    except quarantine.QuarantineError as exc:
+        raise DispatchError(str(exc)) from None
+    _log(f"quarantine: {value}")
+    return value
+
+
 def cmd_prepare(args) -> int:
     job = _job()
     config = load_config()
+    _quarantine_mode(config)
     prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), _env("GITHUB_TOKEN"), os.environ, _home(args),
             config["default_branch"], Path(args.checks_report) if args.checks_report else None,
             binding_mode=_binding_mode(config))
@@ -257,6 +269,7 @@ def cmd_publish(args) -> int:
     job = _job()
     read = GitHub(_env("READ_TOKEN"), args.repo)
     agent = GitHub(_env("AGENT_TOKEN"), args.repo)
+    _quarantine_mode(load_config())
     survey, router = live_survey(read, _log)
     check_key(router, job.agent, f"{_env('AGENT_SLUG')}[bot]")
     result = publish(job, survey, Path(args.artifact), Path(args.root), CLONE_URL.format(repo=args.repo),

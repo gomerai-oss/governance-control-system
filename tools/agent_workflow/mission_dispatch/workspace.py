@@ -105,6 +105,10 @@ class Checkout:
         """The commit message of ``rev``, or "" when there is no such commit."""
         return self._git("log", "-1", "--format=%B", rev, "--", env=env, check=False)
 
+    def rev(self, rev: str, env: Mapping[str, str]) -> str:
+        """The commit ``rev`` names, or "" when there is none."""
+        return self._git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", env=env, check=False).strip()
+
     def changes(self, env: Mapping[str, str]) -> List[Change]:
         out = self._git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignored=no", env=env)
         return [Change(entry[:2], entry[3:]) for entry in out.split("\0") if entry]
@@ -126,9 +130,10 @@ class Checkout:
                 modes.append((path, meta[1:].split(" ")[1]))
         return modes
 
-    def staged_numstat(self, base: str, env: Mapping[str, str]) -> List[Tuple[str, bool]]:
-        """(exact path, is binary) for every staged change since ``base``; ``-z`` keeps every path byte for byte."""
-        out = self._git("diff", "--cached", "--numstat", "-z", "--no-renames", base, "--", env=env)
+    def staged_numstat(self, base: str, env: Mapping[str, str], to: Optional[str] = None) -> List[Tuple[str, bool]]:
+        """(exact path, is binary) for every staged change since ``base`` (or every change from ``base`` to the
+        commit ``to``); ``-z`` keeps every path byte for byte."""
+        out = self._git("diff", *_range(base, to), "--numstat", "-z", "--no-renames", "--", env=env)
         entries = []
         for record in out.split("\0"):
             if record:
@@ -136,9 +141,10 @@ class Checkout:
                 entries.append((path, added == "-" and deleted == "-"))
         return entries
 
-    def staged_file_patch(self, base: str, path: str, env: Mapping[str, str]) -> str:
-        """The staged diff of exactly ``path`` since ``base``, with no context lines (the path is matched literally)."""
-        return self._git("diff", "--cached", "--no-renames", "--no-ext-diff", "--no-textconv", "-U0", base, "--", path,
+    def staged_file_patch(self, base: str, path: str, env: Mapping[str, str], to: Optional[str] = None) -> str:
+        """The staged diff of exactly ``path`` since ``base`` (or from ``base`` to the commit ``to``), with no context
+        lines (the path is matched literally)."""
+        return self._git("diff", *_range(base, to), "--no-renames", "--no-ext-diff", "--no-textconv", "-U0", "--", path,
                          env={**env, "GIT_LITERAL_PATHSPECS": "1"})
 
     def apply(self, patch: str, env: Mapping[str, str]) -> None:
@@ -158,6 +164,11 @@ class Checkout:
     def push(self, branch: str, env: Mapping[str, str]) -> None:
         """Create ``branch`` on the remote. Never forced: an existing branch makes this fail."""
         self._git("push", "--quiet", "--no-verify", "origin", f"HEAD:refs/heads/{branch}", env=env)
+
+
+def _range(base: str, to: Optional[str]) -> Tuple[str, ...]:
+    """The diff arguments: the index against ``base``, or ``base`` against the commit ``to``."""
+    return ("--cached", base) if to is None else (base, to)
 
 
 def _make_writable(root: Path) -> None:
