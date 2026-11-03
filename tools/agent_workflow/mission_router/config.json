@@ -8,6 +8,7 @@
   "blast_radius": "enforce",
   "identity": "observe",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
+  "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {
     "a2": "yourorg-agent-a2[bot]",
     "a3": "yourorg-agent-a3[bot]"
