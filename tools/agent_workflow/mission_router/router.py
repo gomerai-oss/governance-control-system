@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
                    evaluate_capture, evaluate_landing)
 from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
+from mission_dispatch.quarantine import inline as quarantined  # §5, Amendment 012: agent text the router posts
 from .github import GitHub, GitHubError
 from .model import (
     AGENT_RE,
@@ -967,13 +968,13 @@ class MissionRouter:
             if decision.reasons and not raw.get("draft"):
                 digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
                 self._comment_once(number, f"wait:{head_sha[:12]}:{digest}", "The mission router is holding this PR:\n\n"
-                                   + "\n".join(f"- {r}" for r in decision.reasons)
+                                   + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
                                    + "\n\nIt will continue on its own once this changes.")
             return False
         if decision.action == REJECT:
             digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
             self._comment_once(number, f"reject:{head_sha[:12]}:{digest}", "The mission router did not merge this PR:\n\n"
-                               + "\n".join(f"- {r}" for r in decision.reasons)
+                               + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
                                + "\n\nPush a fix to this branch, or ask HITL if the mission itself needs to change.")
             self._add_labels(number, ["agent:blocked"])
             if ref.role in ("A2", "A3") and ctx.state.expects(ref):
@@ -993,7 +994,7 @@ class MissionRouter:
                                    "any of these plans, or a new plan in the stack, needs a new approval.")
             else:
                 self._comment_once(number, f"approval:{head_sha[:12]}", "This PR needs HITL approval before the mission router merges it:\n\n"
-                                   + "\n".join(f"- {r}" for r in decision.reasons)
+                                   + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
                                    + f"\n\nTo approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```\n\n"
                                    "A new push needs a new approval.")
             self._add_labels(number, ["agent:needs-hitl"])
@@ -1047,7 +1048,7 @@ class MissionRouter:
         if raw["head"]["ref"] != branch or not same_repo or issue is None:
             return
         head = raw["head"]["sha"]
-        summary = decision.summary.replace("\n", " ")[:600]
+        summary = quarantined(decision.summary, 600)
         self._comment_once(issue["number"], f"refused:{ref.role}:{ref.round}:{head[:12]}",
                            f"**Mission router: {ref.role} round {ref.round} was refused:** {summary}\n\n"
                            f"PR #{raw['number']} at `{head[:12]}`. The stage branch is deleted so the agent runs again "
@@ -1153,16 +1154,16 @@ class MissionRouter:
         digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
         if decision.action == WAIT:
             self._comment_once(number, f"wait:{head_sha[:12]}:{digest}", "The mission router is holding this landing PR:\n\n"
-                               + "\n".join(f"- {r}" for r in decision.reasons) + "\n\nIt will continue on its own once this changes.")
+                               + "\n".join(f"- {quarantined(r)}" for r in decision.reasons) + "\n\nIt will continue on its own once this changes.")
             return False
         if decision.action == REJECT:
             self._comment_once(number, f"reject:{head_sha[:12]}:{digest}", "The mission router did not merge this landing PR:\n\n"
-                               + "\n".join(f"- {r}" for r in decision.reasons))
+                               + "\n".join(f"- {quarantined(r)}" for r in decision.reasons))
             self._add_labels(number, ["agent:blocked"])
             return False
         if decision.action == WAIT_APPROVAL:
             self._comment_once(number, f"approval:{head_sha[:12]}", f"Stack `{sid}` passed, but it needs HITL approval to land:\n\n"
-                               + "\n".join(f"- {r}" for r in decision.reasons)
+                               + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
                                + f"\n\nTo approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```")
             self._add_labels(number, ["agent:needs-hitl"])
             return False
@@ -1211,11 +1212,11 @@ class MissionRouter:
         if decision.action == WAIT:
             if not raw.get("draft"):
                 self._comment_once(number, f"wait:{head_sha[:12]}:{digest}", "The mission router is holding this capture:\n\n"
-                                   + "\n".join(f"- {r}" for r in decision.reasons) + "\n\nIt will continue on its own once this changes.")
+                                   + "\n".join(f"- {quarantined(r)}" for r in decision.reasons) + "\n\nIt will continue on its own once this changes.")
             return False
         if decision.action == REJECT:
             self._comment_once(number, f"reject:{head_sha[:12]}:{digest}", "The mission router did not merge this capture:\n\n"
-                               + "\n".join(f"- {r}" for r in decision.reasons)
+                               + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
                                + f"\n\nThe L1 capture route only appends DRAFT entries to `{self.capture_path}`, opened and "
                                "pushed by HITL. Push a fix to this branch; anything else goes through a mission.")
             self._add_labels(number, ["agent:blocked"])
@@ -1387,7 +1388,7 @@ def render_issue_body(state: MissionState, manifest: Optional[Manifest], repo: s
     elif state.stage == BLOCKED:
         lines += [f"**Blocked.** {state.reason}" + (f" ({state.when})" if state.when else "") + ". Recorded for HITL review; "
                   f"nothing from this mission reached `{main}`.", ""]
-        lines += [f"- {d}" for d in state.details] + ([""] if state.details else [])
+        lines += [f"- {quarantined(d)}" for d in state.details] + ([""] if state.details else [])
     elif state.stage == CANCELLED:
         lines += [f"**Cancelled.** {state.reason}. Nothing from this mission reached `{main}`, and its id cannot be reused.", ""]
     elif role and manifest:
@@ -1467,7 +1468,7 @@ def render_stage_comment(state: MissionState, manifest: Optional[Manifest], iden
         return f"**Mission complete.** A3 passed round {r}; the router merged the mission into {final} at `{state.landed_sha}`."
     if state.stage == BLOCKED:
         return (f"**Mission blocked.** {state.reason}" + (f" ({state.when})" if state.when else "") + ".\n\n"
-                + "".join(f"- {d}\n" for d in state.details)
+                + "".join(f"- {quarantined(d)}\n" for d in state.details)
                 + f"\nRecorded for HITL review. Nothing from this mission reaches {final}."
                 + _retry_hint(state))
     if state.stage == CANCELLED:
@@ -1542,7 +1543,7 @@ def render_stack_body(status: StackStatus, ctxs: Dict[str, _Context], manifests:
             st = ctxs[mid].state
             lines.append(f"- **`{mid}`**, round {st.round}" + (f", {st.when}" if st.when else "")
                          + (f", #{st.last_pr}" if st.last_pr else "") + f": {st.reason}")
-            lines += [f"  - {d}" for d in st.details]
+            lines += [f"  - {quarantined(d)}" for d in st.details]
     lines += ["", f"Stack branch: https://github.com/{repo}/tree/{branch}", "",
               "This issue is maintained by the mission router. Edits to it are overwritten."]
     return "\n".join(lines)

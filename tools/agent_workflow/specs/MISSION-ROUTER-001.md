@@ -36,6 +36,12 @@ of each agent's bot; `config.json` gains `hitl_account_ids` and `bot_account_id`
 `resume`), the account ID GitHub records with it must match as well, and each agent's ID is confirmed against GitHub's
 own account record every sweep. The identity registry becomes SPEC-002 `AUTHORITY`. The mode is set by `"identity"`
 in `config.json` (§5a).
+**Amendment 012 (2026-11-03, HITL direction: ring 3, with MISSION-DISPATCH-001 Amendment 014):** input quarantine at
+the router. Under `"quarantine": "enforce"`, an A2 PR that adds, changes or deletes a SPEC-002 `AGENT_POLICY` or
+`TOOL_CONFIG` file is refused like one touching `AUTHORITY`, and a plan whose `build_scope` or `deliverables` names
+one is refused before approval: a build may not carry files an agent runtime loads as instructions. Agent text the
+router posts (findings, blockers, verdict summaries) passes the quarantine first: `@` mentions are broken and
+`/mission` lines prefixed (§5).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -517,6 +523,8 @@ The router enforces everything it can see. These settings live in GitHub and onl
 9. **A HITL login is trusted as HITL (Amendment 011).** The account ID check stops a renamed or re-registered account,
    not a program running on HITL's own machine with HITL's own GitHub login. That risk is accepted (HITL, 2026-11-01):
    the pipeline is protected against agents acting through its own seats, not against HITL's own credentials.
+10. **Instruction files on the default branch are HITL's (Amendment 012).** The router keeps them out of builds. The
+    ones already on the default branch are loaded by the runtimes as they are; changing them is a HITL pipeline patch.
 
 ## 10. Predicted vectors (A3 verifies)
 
@@ -627,3 +635,7 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 103 | A plan whose `build_scope` covers the identity registry | Refused before approval: the registry is `AUTHORITY` |
 | 104 | `"identity"` set to an unknown value | No agent may act |
 | 105 | A stage PR refused and its branch deleted by the router; the agent pushes a new attempt on the same branch name | Judged on the pushes since the deletion: merged when only the agent pushed; refused when anyone else pushed after the deletion |
+| 106 | Enforced quarantine; A2 PR changing `products/x/CLAUDE.md` or `.cursor/rules/a.mdc` inside `build_scope` | Rejected, `agent:blocked`, naming the file |
+| 107 | Enforced quarantine; a plan whose `build_scope` covers `**/AGENTS.md` or names `.mcp.json` | Refused before approval |
+| 108 | A blocker or finding containing `@someone` or a `/mission approve` line, posted by the router | The mention is broken and the line prefixed; no one is notified and nothing reads as a command |
+| 109 | Observed quarantine; vector 106 or 107 | Handled as before; what enforcement would refuse is logged |
