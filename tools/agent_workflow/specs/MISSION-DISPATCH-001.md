@@ -355,7 +355,9 @@ instructions" in a prompt asks the reader to resist; ring 3 adds rules that hold
 
 **Mode.** `"quarantine"` in `config.json`: `"observe"` (the default when the key is absent) applies items 1 and 4 and
 records what items 2 and 3 would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job.
-HITL switches to `"enforce"` after AST-3.1 to 3.5 below pass.
+HITL switches to `"enforce"` after AST-3.1 to 3.5 below pass. **Switched on:** this repository's `config.json` sets
+`"enforce"` (ring 3, part 3, after AST-3.1 to 3.5 passed on 2026-11-04; AST-3.3 and 3.4 ran on a local throwaway
+clone with Cursor CLI 2026.10.22 and Claude Code 2.1.318, so they are re-run on the pinned versions at the next pin change).
 
 1. **One quarantine for every agent-to-agent text** (`mission_dispatch/quarantine.py`, stdlib). Each text below passes
    it before it is shown to an agent or posted:

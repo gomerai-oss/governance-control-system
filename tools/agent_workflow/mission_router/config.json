@@ -7,7 +7,7 @@
   "runtime_binding": "enforce",
   "blast_radius": "enforce",
   "identity": "enforce",
-  "quarantine": "observe",
+  "quarantine": "enforce",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {
