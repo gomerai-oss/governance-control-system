@@ -17,8 +17,9 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
-                   evaluate_capture, evaluate_landing)
+                   evaluate_capture, evaluate_landing, instruction_build_findings, instruction_plan_findings)
 from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
+from mission_dispatch import quarantine
 from mission_dispatch.quarantine import inline as quarantined  # §5, Amendment 012: agent text the router posts
 from .github import GitHub, GitHubError
 from .model import (
@@ -173,6 +174,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     if not isinstance(config.get("identity_registry"), str):
         raise ValueError("config.json: identity_registry is required")
     identity_mode(config)
+    quarantine.mode(config)  # an unknown value stops the router and the dispatcher alike (vector 71)
     config_accounts(config)
     if not isinstance(config.get("credentials_register", ""), str):
         raise ValueError("config.json: credentials_register must name a file")
@@ -207,6 +209,7 @@ class MissionRouter:
                  log: Callable[[str], None] = print, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
         # Every record GitHub returns passes the account-ID check before any rule reads it (Amendment 011).
         self.identity_mode = identity_mode(config)
+        self.quarantine_mode = quarantine.mode(config)  # Amendment 012
         self.guard = AccountGuard(self.identity_mode, lambda message: self.log(message))
         self.gh = GuardedGitHub(gh, self.guard)
         self._accounts = config_accounts(config)
@@ -943,11 +946,17 @@ class MissionRouter:
             approved, _, _ = self._stack_approved(manifest.stack_id)
             if approved:
                 approvals = approvals | {head_sha}  # one approval of the stack covers every plan in it at its exact commit
+        enforce = self.quarantine_mode == quarantine.ENFORCE
+        if not enforce and manifest is not None:  # vector 109: what enforcement would refuse is logged
+            would = (instruction_plan_findings(manifest, self.classify) if ref.role == "A1"
+                     else instruction_build_findings(files, self.classify) if ref.role == "A2" else [])
+            for reason in would:
+                self.log(f"  quarantine (observe): PR #{raw['number']} would be refused: {reason}")
         return evaluate(pr, state, manifest, self.classify, approvals, integration_actual,
                         verdict, verdict_error, promotion, promotion_complete,
                         self.landing_branch(manifest) if ref.role == "A1" else ctx.landing,
                         start_rejects, start_waits, integration_clean, self.identities(),
-                        hitl_logins=self.hitl)
+                        hitl_logins=self.hitl, refuse_instruction_files=enforce)
 
     # ---------------------------------------------------------------- acting
     def _handle_pr(self, raw: dict, ctx: "_Context") -> bool:

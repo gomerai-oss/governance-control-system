@@ -39,6 +39,7 @@ from router_spec002.policy import load_tables, normalize_path
 from . import binding, blast, quarantine
 from .runtimes import BINARIES
 from .dispatch import (
+    REFUSAL_MAX_CHARS,
     DispatchError,
     key_problems,
     busy_lanes,
@@ -243,7 +244,8 @@ def cmd_run(args) -> int:
 
 def cmd_collect(args) -> int:
     job = _job()
-    result = collect(job, Path(args.root), Path(args.out), os.environ)
+    result = collect(job, Path(args.root), Path(args.out), os.environ, quarantine_mode=_quarantine_mode(load_config()),
+                     log=_log)
     _log(f"{job.key}: change accepted: {', '.join(result['paths'])}" + (f"; verdict {result['verdict']}" if result["verdict"] else ""))
     return 0
 
@@ -269,12 +271,13 @@ def cmd_publish(args) -> int:
     job = _job()
     read = GitHub(_env("READ_TOKEN"), args.repo)
     agent = GitHub(_env("AGENT_TOKEN"), args.repo)
-    _quarantine_mode(load_config())
+    mode = _quarantine_mode(load_config())
     survey, router = live_survey(read, _log)
     check_key(router, job.agent, f"{_env('AGENT_SLUG')}[bot]")
     result = publish(job, survey, Path(args.artifact), Path(args.root), CLONE_URL.format(repo=args.repo),
                      _env("READ_TOKEN"), _env("AGENT_TOKEN"), f"{_env('AGENT_SLUG')}[bot]", os.environ,
-                     agent.create_pull, os.environ.get("RUN_URL", ""))
+                     agent.create_pull, os.environ.get("RUN_URL", ""),
+                     checks_dir=Path(args.checks) if args.checks else None, quarantine_mode=mode, log=_log)
     if result["status"] == "skipped":
         _log(f"{job.key}: not published: {result['reason']}")
     else:
@@ -310,9 +313,26 @@ def cmd_report(args) -> int:
     if issue is None:
         raise DispatchError(f"{job.mission_id} has no tracking issue to report on")
     run_url = os.environ.get("RUN_URL", "")
-    gh.comment(int(issue["number"]), failure_comment(job, reason, run_url))
+    gh.comment(int(issue["number"]), failure_comment(job, reason, run_url, read_refusals(args.refusal or [])))
     _log(f"{job.key}: reported on #{issue['number']}: " + reason)
     return 0
+
+
+def read_refusals(paths) -> list:
+    """The ``--refusal`` records the collect and publish steps left (missing ones are skipped)."""
+    out = []
+    for name in paths:
+        path = Path(name)
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= 64 * 1024:
+            out.append(path.read_text(encoding="utf-8", errors="replace").strip())
+    return out
+
+
+def write_refusal(path: str, reason: str) -> None:
+    """Record why a step refused, for the report job's failure record (vectors 67, 68)."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(reason[:REFUSAL_MAX_CHARS] + "\n", encoding="utf-8")
 
 
 def main(argv=None) -> int:
@@ -333,6 +353,10 @@ def main(argv=None) -> int:
     sub.choices["run"].add_argument("--runtime-dir", default="", help="where the pinned runtimes are installed")
     sub.choices["collect"].add_argument("--out", required=True)
     sub.choices["publish"].add_argument("--artifact", required=True)
+    sub.choices["publish"].add_argument("--checks", default="", help="the checks job's results (A3 PASS, §3j item 3)")
+    for name in ("collect", "publish"):
+        sub.choices[name].add_argument("--refusal", default="", help="where to record why this step refused")
+    sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
     args = parser.parse_args(argv)
     steps = {"blast-mode": cmd_blast_mode, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
@@ -341,6 +365,8 @@ def main(argv=None) -> int:
         return steps[args.step](args)
     except DispatchError as exc:
         print(f"::error::{str(exc).splitlines()[0][:500]}", file=sys.stderr)
+        if getattr(args, "refusal", None) and isinstance(args.refusal, str):
+            write_refusal(args.refusal, str(exc))
         return 1
 
 

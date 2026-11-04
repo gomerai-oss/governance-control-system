@@ -89,13 +89,17 @@ def evaluate(
     integration_clean: bool = True,
     identities: Mapping[str, str] = {},
     hitl_logins: Set[str] = frozenset(),
+    refuse_instruction_files: bool = False,
 ) -> Decision:
     """``start_rejects`` / ``start_waits`` are the router's stack checks for an A1 PR
     (scope overlap with active missions, unmet CHAINED dependencies); ``integration_clean``
     says the integration branch holds nothing beyond the default branch before A1 merges.
     ``identities`` maps each ACTIVE agent to its GitHub App bot login; an agent missing
     from it cannot act in any role. ``hitl_logins`` names the human seats: A1 is held
-    by HITL, so for the plan stage a HITL login is the assigned actor (spec section 5a)."""
+    by HITL, so for the plan stage a HITL login is the assigned actor (spec section 5a).
+    ``refuse_instruction_files`` is ``"quarantine": "enforce"`` (Amendment 012): a plan or an A2 build naming a
+    SPEC-002 AGENT_POLICY or TOOL_CONFIG file is refused like AUTHORITY. Under observe the router logs
+    ``instruction_plan_findings`` / ``instruction_build_findings`` itself."""
     ref = pr.ref
     if pr.draft:
         return Decision(WAIT, ("the PR is a draft",))
@@ -161,6 +165,8 @@ def evaluate(
         # only (checked below). This is what lets one approval carry an CHAINED stack to its later missions.
         _check_a1_files(pr, c)
         c.reasons.extend(plan_findings(manifest, classify))
+        if refuse_instruction_files:
+            c.reasons.extend(instruction_plan_findings(manifest, classify))
         c.reasons.extend(start_rejects)
         if c.reasons:
             return Decision(REJECT, tuple(c.reasons))
@@ -174,6 +180,8 @@ def evaluate(
         c.require(pr.base_ref == integration, f"A2 PRs must target {integration}")
         c.require(pr.behind_by == 0, f"the branch is behind {integration}; rebase or merge it first")
         _check_build_files(pr.files, manifest, classify, c)
+        if refuse_instruction_files:
+            c.reasons.extend(instruction_build_findings(pr.files, classify))
         return Decision(REJECT, tuple(c.reasons)) if c.reasons else Decision(MERGE)
 
     # A3
@@ -394,6 +402,44 @@ def plan_findings(manifest: Manifest, classify) -> list:
         if family == "AUTHORITY":
             reasons.append(f"{what} {path} is AUTHORITY under SPEC-002; the router refuses it in every A2 PR, so it "
                            "cannot go through a mission")
+    return reasons
+
+
+INSTRUCTION_FAMILIES = ("AGENT_POLICY", "TOOL_CONFIG")
+
+
+def instruction_plan_findings(manifest: Manifest, classify) -> list:
+    """Plan entries naming a file an agent runtime loads as instructions or settings (Amendment 012, vector 107).
+
+    Every deliverable and every build_scope entry, globs included: a pattern is classified as written, so
+    ``**/AGENTS.md`` and ``.cursor/rules/**`` are AGENT_POLICY. A broad pattern such as ``tools/**`` is not, and an
+    instruction file A2 delivers under it is refused in the A2 PR instead. Unsafe paths are ``plan_findings``'.
+    """
+    reasons = []
+    named = [(p, "deliverable") for p in manifest.deliverables] + [(p, "build_scope entry") for p in manifest.build_scope]
+    for path, what in named:
+        try:
+            family = classify(path)
+        except ValueError:
+            continue
+        if family in INSTRUCTION_FAMILIES:
+            reasons.append(f"{what} {path} is {family} under SPEC-002: files agent runtimes load as instructions or "
+                           "settings are not build material; changing them is a HITL pipeline patch")
+    return reasons
+
+
+def instruction_build_findings(files: Sequence[FileChange], classify) -> list:
+    """A2 changes to files an agent runtime loads as instructions or settings (Amendment 012, vector 106)."""
+    reasons = []
+    for change in files:
+        for path in _paths(change):
+            try:
+                family = classify(path)
+            except ValueError:
+                continue  # refused as an unsafe path by _check_build_files
+            if family in INSTRUCTION_FAMILIES:
+                reasons.append(f"{path} is {family} under SPEC-002: A2 may not add, change or delete a file agent "
+                               "runtimes load as instructions or settings")
     return reasons
 
 
