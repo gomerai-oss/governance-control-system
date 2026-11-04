@@ -36,6 +36,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -73,6 +74,8 @@ from mission_router.model import (
     verdict_path,
 )
 from mission_router.github import GitHubError
+from mission_router.gate import INSTRUCTION_FAMILIES, classify_or_raise
+from router_spec002.policy import load_tables, normalize_path
 from mission_router.state import AWAIT_A2, AWAIT_A3, PAUSED, MissionState
 
 from . import binding, blast, quarantine
@@ -121,6 +124,8 @@ CHECKS_MD_MAX_BYTES = 128 * 1024
 FEEDBACK_MAX_CHARS = 2000
 FINDINGS_MAX_CHARS = 32 * 1024  # A3's findings as A2's next round is told about them (§3j item 1)
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+CHECKS_JSON_MAX_BYTES = 4 * 1024 * 1024
+REFUSAL_MAX_CHARS = 2000
 # An A2 commit message with this section may hand on an empty build: A3 then confirms the blockers.
 _BLOCKERS_RE = re.compile(r"(?mi)^[\s#>*_`-]*Blockers\s*:")
 # A model login shorter than this is not a real key; checking for it would only cause false refusals.
@@ -614,6 +619,93 @@ def check_changes(job: Job, tree: Path, changes: Sequence[Change],
     return [], verdict.verdict
 
 
+_CLASSIFY: List[Callable[[str], str]] = []
+
+
+def classify(path: str) -> str:
+    """The SPEC-002 family of ``path`` (raises ValueError on an unsafe path); the tables load once."""
+    if not _CLASSIFY:
+        _CLASSIFY.append(classify_or_raise(load_tables(), normalize_path))
+    return _CLASSIFY[0](path)
+
+
+def instruction_files(job: Job, changes: Sequence[Change]) -> List[str]:
+    """§3j item 2: A2's additions, changes and deletions of files agent runtimes load as instructions or settings
+    (SPEC-002 AGENT_POLICY, TOOL_CONFIG), even inside build_scope. Empty for A3, whose change is its verdict."""
+    if job.role != "A2":
+        return []
+    found = []
+    for change in changes:
+        try:
+            family = classify(change.path)
+        except ValueError:
+            continue  # unsafe names are refused by check_changes / the router
+        if family in INSTRUCTION_FAMILIES:
+            found.append(f"{change.path} is {family} under SPEC-002: A2 may not add, change or delete a file agent "
+                         "runtimes load as instructions or settings")
+    return found
+
+
+def check_failures(job: Job, checks_dir: Optional[Path]) -> List[str]:
+    """§3j item 3: why an A3 PASS may not be published; empty when the plan has no checks, or every check ran on
+    ``job.base_sha`` and exited 0.
+
+    The record is ``checks.json``, written by the dispatcher in the checks job from each check's exit code. No
+    text is read for this: output that claims success cannot make a failed check pass.
+    """
+    if not job.checks:
+        return []
+    path = checks_dir / CHECKS_JSON if checks_dir else None
+    if path is None or path.is_symlink() or not path.is_file():
+        return ["the checks job left no results, so no check is recorded as run"]
+    if path.stat().st_size > CHECKS_JSON_MAX_BYTES:
+        return ["the checks results are too large to read"]
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return ["the checks results cannot be read"]
+    if not isinstance(record, dict) or record.get("job") != job.key or record.get("commit") != job.base_sha:
+        return [f"the checks results are not for {job.key} at {job.base_sha}"]
+    results = record.get("results")
+    results = [r for r in results if isinstance(r, dict)] if isinstance(results, list) else []
+    problems = []
+    for index, command in enumerate(job.checks, 1):
+        ran = [r for r in results if r.get("index") == index and r.get("command") == command]
+        code = ran[0].get("exit_code") if len(ran) == 1 else None
+        if len(ran) != 1:
+            problems.append(f"check {index} (`{command}`) did not run")
+        elif type(code) is not int:
+            problems.append(f"check {index} (`{command}`) did not finish")
+        elif code != 0:
+            problems.append(f"check {index} (`{command}`) exited {code}")
+    return problems
+
+
+def checks_summary(job: Job, checks_dir: Optional[Path]) -> str:
+    """The plan checks' exit codes as the dispatcher recorded them, for the A3 PR body (§3j item 3)."""
+    if not job.checks:
+        return ""
+    failed = check_failures(job, checks_dir)
+    head = f"### Plan checks on `{job.base_sha}`, recorded by the dispatcher\n\n"
+    if not failed:
+        return head + f"All {len(job.checks)} exited 0.\n\n"
+    return head + "".join(f"- {quarantine.inline(problem)}\n" for problem in failed) + "\n"
+
+
+def enforce_or_log(problems: Sequence[str], mode: str, log: Callable[[str], None]) -> None:
+    """Under ``"quarantine": "enforce"`` raise for ``problems`` (nothing is pushed); under observe log them (vector 70)."""
+    if not problems:
+        return
+    if mode == quarantine.ENFORCE:
+        raise DispatchError("; ".join(problems))
+    for problem in problems:
+        log(f"quarantine (observe): would refuse: {problem}")
+
+
+def _stderr(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
 def apply_deletions(job: Job, tree: Path) -> List[str]:
     """Delete the files A2 listed in ``DELETIONS_FILE`` and return their paths (Amendment 010).
 
@@ -665,7 +757,8 @@ def pr_title(job: Job, verdict: Optional[str]) -> str:
     return f"[mission] {job.mission_id}: {job.role} round {job.round}" + (f" ({verdict})" if verdict else "")
 
 
-def pr_body(job: Job, message: str, run_url: str, steering: Optional[Sequence[quarantine.Hit]] = None) -> str:
+def pr_body(job: Job, message: str, run_url: str, steering: Optional[Sequence[quarantine.Hit]] = None,
+            checks: str = "") -> str:
     """The stage PR body. The agent's message passes the quarantine for GitHub (§3j item 1); for A2 the steering
     lines of its change are listed for HITL (§3j item 4)."""
     text = quarantine.quarantine(message, f"{job.role} (`{job.login}`)", f"round {job.round}, from `{job.base_sha}`",
@@ -675,7 +768,7 @@ def pr_body(job: Job, message: str, run_url: str, steering: Optional[Sequence[qu
         scan = ("### Steering scan of the change\n\n" + ("\n".join(quarantine.machine_note(steering, github=True))
                 if steering else "No added line looks written to steer the reviewer (a heuristic, not a clearance).\n")
                 + "\n")
-    return (f"{text}\n{scan}---\n"
+    return (f"{text}\n{scan}{checks}---\n"
             f"Mission `{job.mission_id}`, {job.role} round {job.round}, from `{job.base_sha}`.\n\n"
             f"Opened by the Mission Agent workflow for agent `{job.agent}` (`{job.login}`), {_runs_as(job)}"
             + (f" ([run]({run_url}))" if run_url else "") + ". "
@@ -830,7 +923,8 @@ def _staged(checkout: Checkout, base: str, git: Mapping[str, str]) -> Tuple[List
     return checkout.changes(git), checkout.staged_modes(base, git)
 
 
-def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> dict:
+def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
+            quarantine_mode: str = quarantine.OBSERVE, log: Callable[[str], None] = _stderr) -> dict:
     """Check the agent's change and write it to ``out_dir`` as a patch plus a message."""
     checkout = Checkout(root)
     git = git_env(environ)
@@ -847,6 +941,7 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
         problems, verdict = check_changes(job, checkout.tree, changes, modes, read_message(raw, job, None))
         if problems:
             raise DispatchError("; ".join(problems))
+        enforce_or_log(instruction_files(job, changes), quarantine_mode, log)
         patch = checkout.staged_patch(job.base_sha, git)
     except GitError as exc:
         raise DispatchError(str(exc)) from None
@@ -878,7 +973,8 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str]) -> 
 
 def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str, read_token: str,
             agent_token: str, agent_login: str, environ: Mapping[str, str],
-            create_pull: Callable[[str, str, str, str], dict], run_url: str = "") -> dict:
+            create_pull: Callable[[str, str, str, str], dict], run_url: str = "", checks_dir: Optional[Path] = None,
+            quarantine_mode: str = quarantine.OBSERVE, log: Callable[[str], None] = _stderr) -> dict:
     """Re-check everything on a fresh clone, then push the stage branch and open the PR as the agent.
 
     Everything from the agent job (the patch, the message) is data: it is applied with
@@ -910,6 +1006,11 @@ def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str
     problems, verdict = check_changes(job, checkout.tree, changes, modes, read_message(raw, job, None))
     if problems:
         raise DispatchError("; ".join(problems))
+    enforce_or_log(instruction_files(job, changes), quarantine_mode, log)
+    if verdict == "PASS":  # §3j item 3; FAIL and BLOCKED are published as before (vector 69)
+        failed = check_failures(job, checks_dir)
+        enforce_or_log(["an A3 PASS needs every plan check to have passed: " + "; ".join(failed)] if failed else [],
+                       quarantine_mode, log)
     message = read_message(raw, job, verdict)
     base = job.landing_branch if verdict == "PASS" else integration_branch(job.mission_id)
     steering = None
@@ -920,7 +1021,8 @@ def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str
         checkout.push(job.branch, git_env(environ, agent_token))
     except GitError as exc:
         raise DispatchError(f"publishing failed: {exc}") from None
-    pr = create_pull(job.branch, base, pr_title(job, verdict), pr_body(job, message, run_url, steering))
+    pr = create_pull(job.branch, base, pr_title(job, verdict),
+                     pr_body(job, message, run_url, steering, checks_summary(job, checks_dir) if job.role == "A3" else ""))
     return {"status": "published", "commit": commit, "base": base, "verdict": verdict or "",
             "pr_number": int(pr.get("number") or 0), "pr_url": str(pr.get("html_url") or "")}
 
@@ -1022,8 +1124,11 @@ def _runs_as(job: Job) -> str:
     return f"runtime `{job.runtime}`" + (f", model `{job.model}`" if job.model else "")
 
 
-def failure_comment(job: Job, reason: str, run_url: str) -> str:
-    return (f"**Mission Agent: {job.role} round {job.round} did not finish.** {reason}.\n\n"
+def failure_comment(job: Job, reason: str, run_url: str, refusals: Sequence[str] = ()) -> str:
+    """``refusals`` are the reasons the collect or publish step gave (its ``--refusal`` record), so the record names
+    what was refused (vectors 67, 68). They may quote agent output, so they pass the quarantine."""
+    refused = "".join(f"\n\nRefused: {quarantine.inline(r, REFUSAL_MAX_CHARS)}" for r in refusals if r.strip())
+    return (f"**Mission Agent: {job.role} round {job.round} did not finish.** {reason}.{refused}\n\n"
             f"Agent `{job.agent}` (`{job.login}`), {_runs_as(job)}, from `{job.base_sha}`."
             + (f" Run log: {run_url}" if run_url else "") + "\n\n"
             f"The next run starts it again. After {MAX_AGENT_ATTEMPTS} failures in a row the stage is recorded as blocked; "
