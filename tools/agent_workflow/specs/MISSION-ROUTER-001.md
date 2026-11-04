@@ -41,7 +41,7 @@ the router. Under `"quarantine": "enforce"`, an A2 PR that adds, changes or dele
 `TOOL_CONFIG` file is refused like one touching `AUTHORITY`, and a plan whose `build_scope` or `deliverables` names
 one is refused before approval: a build may not carry files an agent runtime loads as instructions. Agent text the
 router posts (findings, blockers, verdict summaries) passes the quarantine first: `@` mentions are broken and
-`/mission` lines prefixed (§5).
+`/mission` lines prefixed (§5). **Switched on** in this repository on 2026-11-04, after AST-3.1 to 3.5 passed.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
