@@ -65,6 +65,11 @@ and its merge, signed so it can be checked later. Its code is in `tools/agent_wo
   for each property (`## Disposable`, `## No ambient credentials`, `## Not shared`, `## Root for the job`), plus
   `Confirmed by:` and `Confirmed on:` lines. No mission may change the file, and every stage PR names it. The pipeline
   cannot test what the file says: you are vouching for it.
+- **Workflow permissions.** `tools/agent_workflow/credentials_check/grants.json` lists the most each job of the
+  mission workflows, and each App-token step, may ask for. It matches the shipped workflows exactly. If you change a
+  workflow's `permissions` or an App-token step, the credentials check flags it until the table says the same, and
+  will refuse it once you set `"permissions": "enforce"` in `config.json`. Widen the table only on purpose: each
+  PR's check run also lists every grant it widens (`GRANT` lines).
 
 **Running cost.** The router runs every 5 minutes and the Mission Agent every 10, whether or not a mission is running.
 In a public repository Actions minutes are free. In a private one each run is billed as at least one minute, which can

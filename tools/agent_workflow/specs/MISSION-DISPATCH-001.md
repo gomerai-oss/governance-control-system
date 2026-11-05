@@ -532,6 +532,14 @@ HITL switches to `"enforce"` after AST-2.1 to 2.5 below pass.
    - **Defence in depth.** This is a second wall: `collect` and `publish` still refuse any change outside
      `build_scope` (§3c), so an over-broad runtime rule could never publish. What changes is that the runtime itself
      denies the write, and the denial is in the agent log.
+   - **Clarified in part 2:**
+     - **Observe.** Under `"observe"` the rules stay `Edit(**)`. The narrowed rules, or why the scope cannot be
+       rendered, are logged and kept in the binding record (`write_scope`).
+     - **A3.** A3's rules are `Read(**)` and `Edit(missions/<ID>/reviews/**)`, unchanged. A3 has no `COMMIT_MSG`
+       rule today, so its optional PR note is not written under Claude Code; nothing is added for it.
+     - **Cursor.** Cursor's writes inside its workspace are its sandbox default, not an allow rule. The narrowed
+       paths are added as `Write(<path>)` allow rules, but they narrow nothing by themselves (§7 limit 18). For a
+       Cursor seat the §3c check is the wall.
 3. **Every widening is listed by name.** The credentials check compares the PR's base and head and prints one
    `GRANT` line for each:
    - capability added to a matrix role's `admit`, or removed from its `blocked`;
@@ -734,6 +742,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 17. **The table checks what the workflows ask for, not what the Apps may grant (Amendment 016).** An App's own
     permissions and the repositories it is installed on are GitHub settings (MISSION-ROUTER-001 §8 item 6). A token
     narrowed by the workflow is only as narrow as the App allows.
+18. **A Cursor seat's writes are not narrowed by its rules (Amendment 016, part 2).** The Cursor CLI writes anywhere
+    in its workspace by default; an allow rule adds, and a deny rule cannot carve out "everything but the scope". The
+    narrowed paths are written as allow rules for the record, and `collect` and `publish` refuse any change outside
+    `build_scope` (§3c). Narrowing applies to Claude Code, which runs in `dontAsk` mode and so denies any write no
+    rule allows. AST-2.4 uses a Claude Code A2.
 
 ## 8. Predicted vectors (A3 verifies)
 

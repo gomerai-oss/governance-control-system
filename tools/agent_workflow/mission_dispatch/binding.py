@@ -14,6 +14,10 @@ Ring 2 (MISSION-DISPATCH-001 §3k item 1): before binding, the gateway catalog's
 (``permissions.description_findings``); under ``"permissions": "enforce"`` a finding refuses the binding, under
 ``"observe"`` it is logged. The binder is then asked to pin the catalog in the session (``catalog_mode``), and the
 binding record keeps the digest, the mode and the findings beside the audit.
+
+Ring 2 part 2 (§3k item 2): under ``"enforce"`` the binder narrows a writer's ``Edit(**)`` to the mission's
+``build_scope`` (plus the hand-in files) and refuses a scope it cannot render; under ``"observe"`` the rules stay as
+before and the narrowed rules are logged and kept in the binding record (``write_scope``).
 """
 
 from __future__ import annotations
@@ -173,7 +177,8 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
     refused = getattr(binder, "BindingRefused", None)
     try:
         result = binder.bind(job.role, job.runtime, mission, checkout.resolve(), session_path, evidence,
-                             gateway_root(), now, catalog_mode=permissions_mode)
+                             gateway_root(), now, catalog_mode=permissions_mode,
+                             narrow_writes=permissions_mode == permissions.ENFORCE)
         tools, allowed, denied, mcp_tools = check(result.tools, result.allowed_rules, result.denied_rules,
                                                   result.mcp_tools)
         session, audit = result.session, result.audit
@@ -199,9 +204,16 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
         audit_text = json.dumps(audit, sort_keys=True)
     except (TypeError, ValueError):
         raise BindingError("the binding's audit record is not JSON") from None
+    scoped, problem = list(getattr(result, "scoped_rules", ()) or ()), getattr(result, "scope_problem", "") or ""
+    narrowed = permissions_mode == permissions.ENFORCE
+    write_scope = {"applied": narrowed, "rules": scoped, "problem": problem}
+    if not narrowed and (problem or (scoped and scoped != list(allowed))):
+        log("permissions: write grant " + (f"cannot be narrowed: {problem}" if problem else
+                                           f"would narrow to {', '.join(scoped)}") + " (observe: not applied)")
     catalog = {"sha256": getattr(result, "catalog_sha256", ""), "mode": permissions_mode, "findings": findings}
     log(f"permissions: gateway catalog pinned {catalog['sha256'] or '(not pinned)'} (mode={permissions_mode})")
-    _write_readonly(out / BINDING_FILE, {"bound": asdict(bound), "audit": json.loads(audit_text), "catalog": catalog})
+    _write_readonly(out / BINDING_FILE, {"bound": asdict(bound), "audit": json.loads(audit_text), "catalog": catalog,
+                                         "write_scope": write_scope})
     return bound
 
 
