@@ -8,7 +8,7 @@
   "blast_radius": "enforce",
   "identity": "enforce",
   "quarantine": "enforce",
-  "substrate": "observe",
+  "substrate": "enforce",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {
