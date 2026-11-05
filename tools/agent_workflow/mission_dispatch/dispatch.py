@@ -758,9 +758,10 @@ def pr_title(job: Job, verdict: Optional[str]) -> str:
 
 
 def pr_body(job: Job, message: str, run_url: str, steering: Optional[Sequence[quarantine.Hit]] = None,
-            checks: str = "") -> str:
+            checks: str = "", substrate_declared: Optional[str] = None) -> str:
     """The stage PR body. The agent's message passes the quarantine for GitHub (§3j item 1); for A2 the steering
-    lines of its change are listed for HITL (§3j item 4)."""
+    lines of its change are listed for HITL (§3j item 4). A repository with a substrate declaration says so in every
+    stage PR (§3h item 6)."""
     text = quarantine.quarantine(message, f"{job.role} (`{job.login}`)", f"round {job.round}, from `{job.base_sha}`",
                                  MESSAGE_MAX_BYTES, github=True).text
     scan = ""
@@ -774,7 +775,8 @@ def pr_body(job: Job, message: str, run_url: str, steering: Optional[Sequence[qu
             + (f" ([run]({run_url}))" if run_url else "") + ". "
             "The agent only edited files in a checkout with no GitHub access; a separate job re-checked the change, "
             "committed it, and pushed and opened this PR with the agent's GitHub App token. The mission router decides "
-            "what happens next.")[:60000]
+            "what happens next."
+            + (f"\n\nRuns on a declared substrate: `{substrate_declared}`." if substrate_declared else ""))[:60000]
 
 
 def previous_findings(job: Job, tree: Path) -> str:
@@ -974,7 +976,8 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
 def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str, read_token: str,
             agent_token: str, agent_login: str, environ: Mapping[str, str],
             create_pull: Callable[[str, str, str, str], dict], run_url: str = "", checks_dir: Optional[Path] = None,
-            quarantine_mode: str = quarantine.OBSERVE, log: Callable[[str], None] = _stderr) -> dict:
+            quarantine_mode: str = quarantine.OBSERVE, log: Callable[[str], None] = _stderr,
+            substrate_declared: Optional[str] = None) -> dict:
     """Re-check everything on a fresh clone, then push the stage branch and open the PR as the agent.
 
     Everything from the agent job (the patch, the message) is data: it is applied with
@@ -1022,7 +1025,8 @@ def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str
     except GitError as exc:
         raise DispatchError(f"publishing failed: {exc}") from None
     pr = create_pull(job.branch, base, pr_title(job, verdict),
-                     pr_body(job, message, run_url, steering, checks_summary(job, checks_dir) if job.role == "A3" else ""))
+                     pr_body(job, message, run_url, steering, checks_summary(job, checks_dir) if job.role == "A3" else "",
+                             substrate_declared))
     return {"status": "published", "commit": commit, "base": base, "verdict": verdict or "",
             "pr_number": int(pr.get("number") or 0), "pr_url": str(pr.get("html_url") or "")}
 

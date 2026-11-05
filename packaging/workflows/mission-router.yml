@@ -64,6 +64,12 @@ jobs:
           ref: ${{ github.event.repository.default_branch || 'main' }}
           persist-credentials: false
 
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+          PYTHONPATH: tools/agent_workflow
+        run: python3 -B -m mission_router.substrate
+
       - name: Sweep missions
         env:
           GITHUB_TOKEN: ${{ github.token }}
