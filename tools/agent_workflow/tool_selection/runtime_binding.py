@@ -11,6 +11,9 @@ shipped matrix, and turns the admitted surface into a ``Binding``:
 ``mcp_tools``      admitted gateway tools, bare names
 ``session``        the gateway session document (``mcp_gateway/session.py`` format)
 ``catalog_sha256`` the gateway catalog's digest, when ``catalog_mode`` was given (else ``""``)
+``scoped_rules``   the allowed rules with a mutation-capable seat's ``Edit(**)`` narrowed to the mission's
+                   ``build_scope`` (MISSION-DISPATCH-001 §3k item 2), whether or not they were applied
+``scope_problem``  why the scope could not be rendered as rules (else ``""``)
 ``audit``          the ``signed`` part of an EPAP link named ``RUNTIME_BINDING``
 
 The binding is a consumer of the selection, never a second policy: every bound tool comes from an admitted
@@ -23,6 +26,12 @@ runtime rules: the dispatcher renders those itself.
 catalog the seat is bound against: its canonical SHA-256 goes into the session as ``catalog`` (with the mode, so the
 gateway knows whether a different catalog refuses its start or is only recorded) and into the audit as a material
 (``catalogs``). Without ``catalog_mode`` nothing about the catalog is recorded, as before.
+
+``bind(..., narrow_writes=True)`` (§3k item 2) binds the narrowed rules: a mutation-capable seat gets one
+``Edit(<pattern>)`` per ``build_scope`` pattern plus ``Edit(.mission-dispatch/COMMIT_MSG)`` and
+``Edit(.mission-dispatch/DELETE)`` instead of ``Edit(**)``, and keeps ``Read(**)``; a scope that cannot be rendered
+refuses the binding. Without it the rules are as before, and ``scoped_rules`` says what narrowing would bind.
+This supersedes decision 17 of ``IMPLEMENTATION-DECISIONS.md`` when narrowing is asked for.
 """
 
 from __future__ import annotations
@@ -60,6 +69,8 @@ COMMAND = "tool_selection.runtime_binding.bind"
 _MISSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _GATEWAY_TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}")
+HAND_IN = (".mission-dispatch/COMMIT_MSG", ".mission-dispatch/DELETE")  # A2's message and deletion list (§3c)
+_SCOPE_PATTERN = re.compile(r"[A-Za-z0-9_+-][A-Za-z0-9_.*+/-]*")  # renderable as a rule inside the checkout
 
 
 class BindingRefused(ValueError):
@@ -75,6 +86,8 @@ class Binding:
     session: dict
     audit: dict
     catalog_sha256: str = ""
+    scoped_rules: tuple = ()
+    scope_problem: str = ""
 
 
 def _is_int(value: Any) -> bool:
@@ -187,6 +200,27 @@ def _surface(selection: S.Selection, registry: Mapping, matrix: Mapping) -> Tupl
     return tuple(t for t in BUILTINS if t in tools), rules, tuple(gateway), bound
 
 
+def scoped_rules(allowed: list, scope: list) -> Tuple[tuple, str]:
+    """``allowed`` with ``Edit(**)`` replaced by one ``Edit(<pattern>)`` per ``scope`` pattern and the hand-in files,
+    and why the scope cannot be rendered ("" when it can). Rules without ``Edit(**)`` are returned unchanged."""
+    if "Edit(**)" not in allowed:
+        return tuple(allowed), ""
+    for pattern in scope:
+        segments = pattern.split("/")
+        if (not _SCOPE_PATTERN.fullmatch(pattern) or any(s in ("", ".", "..") for s in segments)
+                or segments[0] in ("*", "**")):
+            return tuple(allowed), (f"build_scope pattern {pattern!r} cannot be rendered as a rule inside the "
+                                    "checkout (absolute, '..', empty, a leading wildcard, or a character a rule "
+                                    "cannot carry)")
+    if not scope:
+        return tuple(allowed), "build_scope is empty"
+    rules = [r for r in allowed if r != "Edit(**)"]
+    for rule in [f"Edit({p})" for p in scope] + [f"Edit({p})" for p in HAND_IN]:
+        if rule not in rules:
+            rules.append(rule)
+    return tuple(rules), ""
+
+
 def _artifact(folder: str, value: Any) -> Tuple[str, dict]:
     sha = R.digest(value)
     if sha is None:
@@ -216,7 +250,7 @@ def audit_material(seat: str, runtime: str, seat_doc: Mapping, seats: Mapping, m
 
 
 def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Path, evidence_dir: Path,
-         gateway_root: Path, now: Any, catalog_mode: Any = None) -> Binding:
+         gateway_root: Path, now: Any, catalog_mode: Any = None, narrow_writes: bool = False) -> Binding:
     """The admitted runtime surface of ``seat`` for ``mission``; raises ``BindingRefused`` otherwise."""
     if runtime not in RUNTIMES:
         raise BindingRefused(f"unknown runtime {runtime!r}")
@@ -260,6 +294,13 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
         raise BindingRefused(f"selection record is inconsistent: {problem}")
 
     tools, allowed, mcp_tools, bound = _surface(selection, registry, matrix)
+    scoped, scope_problem = scoped_rules(allowed, mission["build_scope"])
+    if narrow_writes is True:
+        if scope_problem:
+            raise BindingRefused(scope_problem)
+        allowed = list(scoped)
+    elif narrow_writes is not False:
+        raise BindingRefused("narrow_writes must be true or false")
     if not set(bound) <= selection.surface:
         raise BindingRefused("the binding would grant a tool outside the admitted surface")
     catalog, served = _gateway_catalog(gateway_root)
@@ -291,4 +332,4 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
                            catalog if catalog_mode is not None else None)
     if links.link_problem(audit):
         raise BindingRefused(f"the binding's audit link is malformed: {links.link_problem(audit)}")
-    return Binding(tools, allowed, denied, mcp_tools, session, audit, pinned)
+    return Binding(tools, allowed, denied, mcp_tools, session, audit, pinned, scoped, scope_problem)

@@ -15,7 +15,9 @@ findings fail the check only under ``"substrate": "enforce"``; a declaration tha
 And it runs ring 2's checks (MISSION-DISPATCH-001 §3k): one ``DESCRIPTION <text>`` line per gateway tool description
 that fails item 1, then ``description_findings=<count> mode=<mode>``, failing the check only under
 ``"permissions": "enforce"``; and, with ``--base`` (the PR's base, checked out beside the head), one ``GRANT <text>``
-line per widening from the base (item 3), then ``grants=<count>``. Grant lines never fail the check. Both lists are
+line per widening from the base (item 3), then ``grants=<count>``. Grant lines never fail the check. And one
+``PERMISSION <text>`` line per workflow or App-token permission ``credentials_check/grants.json`` does not allow
+(item 4), then ``permission_findings=<count> mode=<mode>``, failing the check only under ``"enforce"``. The lists are
 also written to the step summary when ``GITHUB_STEP_SUMMARY`` is set.
 """
 
@@ -62,6 +64,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         catalog_path = root / args.tooling / permissions.CATALOG
         on_descriptions = (permissions.description_findings(permissions.read_catalog(catalog_path))
                            if catalog_path.is_file() else [f"no gateway catalog at {args.tooling}/{permissions.CATALOG}"])
+        table_path = root / args.tooling / permissions.GRANTS_TABLE
+        on_table = (permissions.grant_findings(permissions.read_grants_table(table_path), workflows)
+                    if table_path.is_file() else [f"no permissions table at {args.tooling}/{permissions.GRANTS_TABLE}"])
         grants = (permissions.grant_lines(Path(args.base), root, args.tooling, args.workflows or ".github/workflows")
                   if args.base else [])
     except (OSError, ValueError, RegisterError, UnicodeDecodeError) as exc:
@@ -77,24 +82,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     for finding in on_descriptions:
         print(f"DESCRIPTION {finding}")
     print(f"description_findings={len(on_descriptions)} mode={permissions_mode}")
+    for finding in on_table:
+        print(f"PERMISSION {finding}")
+    print(f"permission_findings={len(on_table)} mode={permissions_mode}")
     for line in grants:
         print(f"GRANT {line}")
     print(f"grants={len(grants)} base={'given' if args.base else 'none'}")
     for finding in findings:
         print(f"FINDING {finding}")
     print(f"findings={len(findings)} mode={mode}")
-    _summary(on_descriptions, permissions_mode, grants, bool(args.base))
+    _summary(on_descriptions, permissions_mode, grants, bool(args.base), on_table)
     return 1 if ((findings and mode == "enforce") or (on_substrate and substrate_mode == "enforce")
-                 or (on_descriptions and permissions_mode == "enforce")) else 0
+                 or ((on_descriptions or on_table) and permissions_mode == "enforce")) else 0
 
 
-def _summary(descriptions: List[str], permissions_mode: str, grants: List[str], based: bool) -> None:
-    """Ring 2's two lists in the check run's summary (MISSION-DISPATCH-001 §3k items 1 and 3)."""
+def _summary(descriptions: List[str], permissions_mode: str, grants: List[str], based: bool,
+             table: List[str]) -> None:
+    """Ring 2's lists in the check run's summary (MISSION-DISPATCH-001 §3k items 1, 3 and 4)."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
         return
     out = [f"### Tool descriptions ({permissions_mode})", ""]
     out += [f"- {d}" for d in descriptions] or ["Every gateway tool description passes."]
+    out += ["", f"### Workflow permissions against the table ({permissions_mode})", ""]
+    out += [f"- {t}" for t in table] or ["Every workflow and App-token permission is within the table."]
     out += ["", "### Grant changes", ""]
     if not based:
         out.append("No base tree was given, so widenings were not compared.")

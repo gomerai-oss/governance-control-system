@@ -174,6 +174,10 @@ def cursor_permissions(checkout: Path, home: Path, bound: Optional[Bound] = None
             narrowed.append(f"Read({ws}/**)")
         if not {"Edit", "Write"} & set(bound.tools):
             narrowed.append(f"Write({ws}/**)")
+        elif "Edit(**)" not in bound.allowed:
+            # §3k item 2: the bound write paths as allow rules. Cursor's workspace writes are its sandbox default,
+            # not an allow rule, so these narrow nothing by themselves (MISSION-DISPATCH-001 §7 limit 18).
+            allow += [f"Write({ws}/{rule[5:-1]})" for rule in bound.allowed if rule.startswith("Edit(")]
     deny = [
         *(f"Shell({cmd})" for cmd in GIT_WRITE_COMMANDS),
         *(f"Shell(git *{needle}*)" for needle in GIT_READONLY_DENY_SUBSTRINGS),

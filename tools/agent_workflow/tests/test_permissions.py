@@ -317,6 +317,14 @@ jobs:
 """
 
 
+CLEAN_WORKFLOW = WORKFLOW.replace("    permissions: write-all\n", "    permissions:\n      contents: read\n")
+FIXTURE_TABLE = {"schema": "workflow-grants-v1", "workflows": {"mission-agent.yml": {
+    "top level": {},
+    "jobs": {"plan": {"contents": "read", "issues": "read"}, "publish": {"contents": "read"},
+             "report": {"contents": "read"}},
+    "app_tokens": {"publish": [{"contents": "write", "pull-requests": "write"}]}}}}
+
+
 class WorkflowGrants(unittest.TestCase):
     def test_jobs_tokens_and_inline_forms(self):
         g = P.workflow_grants("w.yml", WORKFLOW)
@@ -432,12 +440,14 @@ class CredentialsCheckCli(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name) / "head"
         (self.root / ".github" / "workflows").mkdir(parents=True)
-        (self.root / ".github" / "workflows" / "mission-agent.yml").write_text(WORKFLOW)
+        (self.root / ".github" / "workflows" / "mission-agent.yml").write_text(CLEAN_WORKFLOW)
         (self.root / "REG.md").write_text(self.REGISTER)
         for rel in (P.MATRIX, P.SEATS, P.REGISTRY, P.CATALOG):
             target = self.root / P.TOOLING / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(AW / rel, target)
+        (self.root / P.TOOLING / P.GRANTS_TABLE).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / P.TOOLING / P.GRANTS_TABLE).write_text(json.dumps(FIXTURE_TABLE))
         self.base = Path(tmp.name) / "base"
         shutil.copytree(self.root, self.base)
         self.config = {"hitl_logins": ["hitl"], "bot_login": "github-actions[bot]", "default_branch": "main",
@@ -497,6 +507,272 @@ class CredentialsCheckCli(unittest.TestCase):
     def test_an_unknown_mode_cannot_be_read(self):
         code, _ = self.run_check("on")
         self.assertEqual(code, 2)
+
+
+# ------------------------------------------------------------------ part 2: the write grant (item 2)
+class ScopedRules(unittest.TestCase):  # vectors 74, 75
+    def test_the_writer_s_edit_rule_becomes_its_scope_and_hand_in_files(self):
+        rules, problem = RB.scoped_rules(["Read(**)", "Edit(**)"], ["tools/demo/**", "docs/a.md"])
+        self.assertEqual(problem, "")
+        self.assertEqual(rules, ("Read(**)", "Edit(tools/demo/**)", "Edit(docs/a.md)",
+                                 "Edit(.mission-dispatch/COMMIT_MSG)", "Edit(.mission-dispatch/DELETE)"))
+
+    def test_a_reviewer_s_rules_are_unchanged(self):
+        rules = ["Read(**)", "Edit(missions/M-1/reviews/**)"]
+        self.assertEqual(RB.scoped_rules(rules, ["tools/**"]), (tuple(rules), ""))
+
+    def test_a_scope_that_cannot_be_rendered(self):
+        for bad in (["/etc/**"], ["a/../b"], ["a//b"], ["**/x"], ["a b/**"], ["a/./b"], []):
+            with self.subTest(bad=bad):
+                rules, problem = RB.scoped_rules(["Read(**)", "Edit(**)"], bad)
+                self.assertTrue(problem)
+                self.assertIn("Edit(**)", rules)
+
+
+class NarrowedBinding(BindingPin):
+    def bind_seat(self, seat, scope, **kw):
+        agent = {"A2": "a2", "A3": "a3"}[seat]
+        mission = {"id": "M-TEST-PERM-001", "round": 1, "agent": agent, "base_sha": BASE_SHA, "build_scope": scope}
+        return RB.bind(seat, "claude-code", mission, self.tmp / "checkout", self.tmp / "session.json",
+                       self.tmp / "evidence", AW, NOW, **kw)
+
+    def test_enforced_the_writer_gets_its_scope_only(self):  # vector 74
+        b = self.bind_seat("A2", ["docs/a/**"], narrow_writes=True)
+        self.assertEqual(b.allowed_rules, ["Read(**)", "Edit(docs/a/**)", "Edit(.mission-dispatch/COMMIT_MSG)",
+                                           "Edit(.mission-dispatch/DELETE)"])
+        self.assertNotIn("Edit(**)", json.dumps(b.audit))
+        dispatch_binding.check(b.tools, b.allowed_rules, b.denied_rules, b.mcp_tools)  # within the ceiling
+
+    def test_observed_the_rules_are_as_before_and_the_narrowing_is_reported(self):
+        b = self.bind_seat("A2", ["docs/a/**"])
+        self.assertEqual(b.allowed_rules, ["Read(**)", "Edit(**)"])
+        self.assertIn("Edit(docs/a/**)", b.scoped_rules)
+
+    def test_the_reviewer_is_unchanged(self):
+        wide, narrow = self.bind_seat("A3", ["docs/a/**"]), self.bind_seat("A3", ["docs/a/**"], narrow_writes=True)
+        self.assertEqual(wide.allowed_rules, narrow.allowed_rules)
+
+    def test_an_unrenderable_scope_refuses_only_when_narrowing(self):  # vector 75
+        with self.assertRaisesRegex(RB.BindingRefused, "cannot be rendered"):
+            self.bind_seat("A2", ["a b/**"], narrow_writes=True)
+        self.assertIn("cannot be rendered", self.bind_seat("A2", ["a b/**"]).scope_problem)
+
+    def test_narrow_writes_must_be_a_boolean(self):
+        with self.assertRaises(RB.BindingRefused):
+            self.bind_seat("A2", ["docs/**"], narrow_writes="yes")
+
+
+class DispatcherRecord(unittest.TestCase):
+    """The dispatcher passes the mode to the binder, logs what observe would narrow, and records it."""
+
+    class Binder:
+        BindingRefused = ValueError
+
+        def bind(self, seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now,
+                 catalog_mode=None, narrow_writes=False):
+            self.narrow_writes = narrow_writes
+            scoped = ("Read(**)", "Edit(docs/**)", "Edit(.mission-dispatch/COMMIT_MSG)",
+                      "Edit(.mission-dispatch/DELETE)")
+            allowed = list(scoped) if narrow_writes else ["Read(**)", "Edit(**)"]
+            from types import SimpleNamespace
+            return SimpleNamespace(tools=["Read", "Edit", "Write"], allowed_rules=allowed, denied_rules=[],
+                                   mcp_tools=[], session={"principal": "a2"}, audit={"seat": seat},
+                                   catalog_sha256="0" * 64, scoped_rules=scoped, scope_problem="")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "checkout").mkdir()
+        tooling = self.root / "tooling"
+        (tooling / "mcp_gateway").mkdir(parents=True)
+        shutil.copy(CATALOG, tooling / "mcp_gateway" / "tools.json")
+        patcher = mock.patch.object(dispatch_binding, "gateway_root", return_value=tooling)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from types import SimpleNamespace
+        self.job = SimpleNamespace(role="A2", runtime="claude-code", mission_id="M-TEST-PERM-001", round=1,
+                                   agent="a2", base_sha=BASE_SHA, build_scope=("docs/**",))
+
+    def bind(self, mode):
+        lines, binder = [], self.Binder()
+        bound = dispatch_binding.bind(self.job, self.root, self.root / "checkout", self.root, NOW, binder,
+                                      permissions_mode=mode, log=lines.append)
+        record = json.loads((dispatch_binding.binding_dir(self.root) / dispatch_binding.BINDING_FILE).read_text())
+        return bound, binder, lines, record
+
+    def test_observe(self):
+        bound, binder, lines, record = self.bind("observe")
+        self.assertFalse(binder.narrow_writes)
+        self.assertIn("Edit(**)", bound.allowed)
+        self.assertEqual(record["write_scope"]["applied"], False)
+        self.assertTrue(any("would narrow to Read(**), Edit(docs/**)" in l and "(observe: not applied)" in l
+                            for l in lines))
+
+    def test_enforce(self):
+        bound, binder, lines, record = self.bind("enforce")
+        self.assertTrue(binder.narrow_writes)
+        self.assertNotIn("Edit(**)", bound.allowed)
+        self.assertEqual(record["write_scope"], {"applied": True, "problem": "",
+                                                 "rules": ["Read(**)", "Edit(docs/**)",
+                                                           "Edit(.mission-dispatch/COMMIT_MSG)",
+                                                           "Edit(.mission-dispatch/DELETE)"]})
+        self.assertFalse(any("would narrow" in l for l in lines))
+
+
+class RuntimeRules(unittest.TestCase):
+    def test_claude_code_gets_the_scope_inside_the_checkout_and_cursor_gets_allow_rules(self):
+        from mission_dispatch import runtimes
+        bound = dispatch_binding.Bound(("Read", "Edit", "Write", "Glob", "Grep"),
+                                       ("Read(**)", "Edit(docs/a/**)", "Edit(.mission-dispatch/COMMIT_MSG)"), (), (), "")
+        self.assertEqual(bound.path_rules("/w"), ("Read(/w/**)", "Edit(/w/docs/a/**)",
+                                                  "Edit(/w/.mission-dispatch/COMMIT_MSG)"))
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout, home = Path(tmp) / "checkout", Path(tmp) / "home"
+            checkout.mkdir()
+            home.mkdir()
+            rules = runtimes.cursor_permissions(checkout, home, bound)
+        ws = str(checkout)
+        self.assertIn(f"Write({ws}/docs/a/**)", rules["allow"])
+        self.assertIn(f"Write({ws}/.mission-dispatch/COMMIT_MSG)", rules["allow"])
+        wide = dispatch_binding.Bound(("Read", "Edit", "Write"), ("Read(**)", "Edit(**)"), (), (), "")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(any(r.startswith("Write(") for r in
+                                 runtimes.cursor_permissions(Path(tmp), Path(tmp), wide)["allow"]))
+
+
+# ------------------------------------------------------------------ part 2: the permissions table (item 4)
+TABLE = AW / P.GRANTS_TABLE
+
+
+def shipped_workflows():
+    root = REPO / ".github" / "workflows"
+    if not (root / "mission-agent.yml").is_file():
+        root = REPO / "packaging" / "workflows"
+    return {n: (root / n).read_text(encoding="utf-8") for n in P.WORKFLOWS if (root / n).is_file()}
+
+
+class PermissionsTable(unittest.TestCase):  # vectors 77, 78, 110
+    def setUp(self):
+        self.table = P.read_grants_table(TABLE)
+        self.workflows = shipped_workflows()
+
+    def findings(self, name, old, new, count=1):
+        workflows = dict(self.workflows)
+        self.assertIn(old, workflows[name])
+        workflows[name] = workflows[name].replace(old, new, count)
+        return P.grant_findings(self.table, workflows)
+
+    def test_the_shipped_workflows_match_the_table(self):
+        self.assertEqual(set(self.workflows), set(P.WORKFLOWS))
+        self.assertEqual(P.grant_findings(self.table, self.workflows), [])
+
+    def test_a_job_over_its_row(self):  # AST-2.3 (a)
+        old = "  agent:\n"
+        text = self.workflows["mission-agent.yml"]
+        start = text.index(old)
+        block = text[start:text.index("      contents: read\n", start) + len("      contents: read\n")]
+        (finding,) = self.findings("mission-agent.yml", block, block.replace("contents: read", "contents: write"))
+        self.assertEqual(finding, "mission-agent.yml: job agent asks for contents: write, more than its row's read")
+
+    def test_write_all_and_computed(self):  # AST-2.3 (b)
+        text = self.workflows["mission-agent.yml"]
+        start = text.index("  plan:\n")
+        perm = text.index("    permissions:\n", start)
+        block = text[perm:text.index("      checks: read\n", perm) + len("      checks: read\n")]
+        (finding,) = self.findings("mission-agent.yml", block, "    permissions: write-all\n")
+        self.assertIn("job plan asks for every permission (write-all", finding)
+        (finding,) = self.findings("mission-agent.yml", block, "    permissions: ${{ fromJSON(vars.P) }}\n")
+        self.assertIn("job plan asks for computed permissions", finding)
+
+    def test_an_app_token_widened_or_unscoped(self):  # AST-2.3 (c)
+        found = self.findings("mission-agent.yml", "          permission-pull-requests: write\n",
+                              "          permission-pull-requests: write\n          permission-administration: write\n")
+        self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 asks for administration: write, "
+                                 "which its row does not list"])
+        found = self.findings("mission-agent.yml", "          repositories: ${{ steps.repo.outputs.name }}\n", "")
+        self.assertEqual(len(found), 1)
+        self.assertIn("job publish, App token 1 must name repositories", found[0])
+
+    def test_the_router_s_sweep(self):  # vector 110
+        found = self.findings("mission-router.yml", "      actions: write", "      actions: write\n      administration: write")
+        self.assertEqual(found, ["mission-router.yml: job sweep asks for administration: write, which its row does "
+                                 "not list"])
+
+    def test_top_level(self):
+        found = self.findings("mission-router.yml", "permissions: {}\n", "permissions: write-all\n")
+        self.assertIn("mission-router.yml: top level asks for every permission", found[0])
+        found = self.findings("mission-router.yml", "permissions: {}\n", "")
+        self.assertIn("no top-level permissions", found[0])
+        found = self.findings("credentials-check.yml", "  contents: read\n", "  contents: write\n")
+        self.assertEqual(found, ["credentials-check.yml: top level asks for contents: write, more than its row's read"])
+
+    def test_a_job_with_no_row(self):
+        workflows = dict(self.workflows)
+        workflows["mission-router.yml"] += ("  extra:\n    runs-on: ubuntu-latest\n    permissions:\n"
+                                            "      contents: read\n    steps:\n      - run: echo\n")
+        self.assertEqual(P.grant_findings(self.table, workflows),
+                         ["mission-router.yml: job extra asks for permissions but has no row in the permissions table"])
+
+    def test_a_second_app_token_has_no_row(self):
+        text = self.workflows["mission-agent.yml"]
+        start = text.index("      - name: Mint the agent's App token", text.index("  publish:\n"))
+        end = text.index("      - name:", start + 10)
+        step = text[start:end]
+        found = self.findings("mission-agent.yml", step, step + step)
+        self.assertEqual(found, ["mission-agent.yml: job publish, App token 2 has no row in the permissions table"])
+
+    def test_narrowing_is_always_allowed_and_an_uninstalled_workflow_asks_for_nothing(self):
+        self.assertEqual(self.findings("mission-agent.yml", "      issues: write\n", "      issues: read\n"), [])
+        workflows = {k: v for k, v in self.workflows.items() if k != "mission-router.yml"}
+        self.assertEqual(P.grant_findings(self.table, workflows), [])
+
+    def test_a_malformed_table_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "grants.json"
+            for bad in ({}, {"schema": "workflow-grants-v1", "workflows": {"x.yml": {"jobs": {}}}},
+                        {"schema": "workflow-grants-v1", "workflows": {"x.yml": {
+                            "top level": {"contents": "admin"}, "jobs": {}, "app_tokens": {}}}}):
+                path.write_text(json.dumps(bad))
+                with self.subTest(bad=bad), self.assertRaises(P.PermissionsError):
+                    P.read_grants_table(path)
+
+    def test_the_cli_fails_only_under_enforce(self):  # vector 79
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github" / "workflows").mkdir(parents=True)
+            text = self.workflows["mission-router.yml"].replace("      actions: write", "      actions: write\n"
+                                                                "      administration: write")
+            (root / ".github" / "workflows" / "mission-router.yml").write_text(text)
+            for rel in (P.CATALOG, P.GRANTS_TABLE):
+                (root / P.TOOLING / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(AW / rel, root / P.TOOLING / rel)
+            (root / "REG.md").write_text(CredentialsCheckCli.REGISTER)
+            config = {"hitl_logins": ["hitl"], "bot_login": "github-actions[bot]", "default_branch": "main",
+                      "identity_registry": "IDS.md", "agents": {"a2": "agent-a2[bot]"},
+                      "credentials_register": "REG.md", "identity": "observe"}
+            for mode, code in (("observe", 0), ("enforce", 1)):
+                (root / "config.json").write_text(json.dumps({**config, "permissions": mode}))
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    got = credentials_main(["--root", tmp, "--config", str(root / "config.json")])
+                self.assertEqual(got, code, out.getvalue())
+                self.assertIn("PERMISSION mission-router.yml: job sweep asks for administration: write", out.getvalue())
+                self.assertIn(f"permission_findings=1 mode={mode}", out.getvalue())
+            (root / P.TOOLING / P.GRANTS_TABLE).unlink()
+            out = io.StringIO()
+            with redirect_stdout(out):
+                credentials_main(["--root", tmp, "--config", str(root / "config.json")])
+            self.assertIn("PERMISSION no permissions table at", out.getvalue())
+
+
+class ApprovalComment(unittest.TestCase):  # vector 112
+    def test_the_plan_s_write_grant_is_stated(self):
+        from types import SimpleNamespace
+        from mission_router.router import write_grant_line
+        line = write_grant_line(SimpleNamespace(mission_id="M-X-001", build_scope=("docs/a/**", "b.md")))
+        self.assertEqual(line, "A2 may write (`M-X-001`): `docs/a/**`, `b.md`\n\n")
+        self.assertEqual(write_grant_line(None), "")
 
 
 if __name__ == "__main__":

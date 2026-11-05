@@ -1,0 +1,33 @@
+{
+  "schema": "workflow-grants-v1",
+  "spec": "MISSION-DISPATCH-001 §3k item 4",
+  "workflows": {
+    "mission-agent.yml": {
+      "top level": {},
+      "jobs": {
+        "plan": {"actions": "read", "contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
+        "checks": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
+        "agent": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
+        "publish": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
+        "report": {"contents": "read", "issues": "write", "pull-requests": "read", "checks": "read"},
+        "land": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"}
+      },
+      "app_tokens": {
+        "publish": [{"contents": "write", "pull-requests": "write"}],
+        "land": [{"contents": "write", "pull-requests": "write"}]
+      }
+    },
+    "mission-router.yml": {
+      "top level": {},
+      "jobs": {
+        "sweep": {"contents": "write", "pull-requests": "write", "issues": "write", "checks": "write", "actions": "write"}
+      },
+      "app_tokens": {}
+    },
+    "credentials-check.yml": {
+      "top level": {"contents": "read"},
+      "jobs": {},
+      "app_tokens": {}
+    }
+  }
+}

@@ -205,6 +205,15 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     return config
 
 
+def write_grant_line(manifest: Optional[Manifest]) -> str:
+    """The plan's write grant, stated where HITL approves it (MISSION-ROUTER-001 Amendment 014): under ring 2 the
+    agent's write rules are its ``build_scope``, so approving the scope approves what A2 may write."""
+    if manifest is None or not manifest.build_scope:
+        return ""
+    return (f"A2 may write (`{manifest.mission_id}`): " + ", ".join(f"`{quarantined(p)}`" for p in manifest.build_scope)
+            + "\n\n")
+
+
 class MissionRouter:
     def __init__(self, gh: GitHub, config: dict, classify: Callable[[str], str], dry_run: bool = False,
                  log: Callable[[str], None] = print, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
@@ -998,6 +1007,7 @@ class MissionRouter:
                 self._comment_once(number, f"approval:stack:{fingerprint[:12]}",
                                    f"Stack `{manifest.stack_id}` ({manifest.stack_kind}) needs HITL approval to start. "
                                    f"One approval covers every plan in it, each at this exact commit:\n\n{listed}\n\n"
+                                   + write_grant_line(manifest) +
                                    f"To approve the whole stack, a HITL login comments (here or on any of those PRs):\n\n"
                                    f"```\n/mission approve {fingerprint}\n```\n\n"
                                    "After that nothing waits for HITL until the stack lands or is blocked. A new push to "
@@ -1005,7 +1015,8 @@ class MissionRouter:
             else:
                 self._comment_once(number, f"approval:{head_sha[:12]}", "This PR needs HITL approval before the mission router merges it:\n\n"
                                    + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
-                                   + f"\n\nTo approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```\n\n"
+                                   + "\n\n" + (write_grant_line(manifest) if ref.role == "A1" else "")
+                                   + f"To approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```\n\n"
                                    "A new push needs a new approval.")
             self._add_labels(number, ["agent:needs-hitl"])
             return False

@@ -1636,9 +1636,9 @@ class FakeBinder:
         self.calls = []
 
     def bind(self, seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now,
-             catalog_mode=None):
+             catalog_mode=None, narrow_writes=False):
         self.calls.append((seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now))
-        self.catalog_mode = catalog_mode
+        self.catalog_mode, self.narrow_writes = catalog_mode, narrow_writes
         if self.refuse:
             raise self.BindingRefused(self.refuse)
         allowed = self.allowed if self.allowed is not None else ["Read(**)", "Edit(**)"]

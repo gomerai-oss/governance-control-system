@@ -12,6 +12,10 @@
 - ``grant_lines(base, head)``: one line per widening between two trees (item 3): a capability a matrix role newly
   admits or no longer blocks, a tool new to the runtime registry or the gateway catalog, a seat or a seat resource
   that is new, and a workflow or App-token permission that is new or raised. Information for HITL; never a refusal.
+- ``grant_findings(table, workflows)``: every permission the mission workflows ask for, held to
+  ``credentials_check/grants.json`` (item 4): a job over its row or with no row, a top level other than its row,
+  ``write-all``, ``read-all`` or a computed ``permissions``, and an App-token step without the literal
+  ``repositories: ${{ steps.repo.outputs.name }}`` or asking for a permission its row does not list.
 """
 
 from __future__ import annotations
@@ -37,6 +41,9 @@ SEATS = "tool_selection/seats.json"
 REGISTRY = "tool_selection/runtime_registry.json"
 WORKFLOWS = ("mission-agent.yml", "mission-router.yml", "credentials-check.yml")
 APP_TOKEN_ACTION = "actions/create-github-app-token@"
+GRANTS_TABLE = "credentials_check/grants.json"  # under the tooling tree (AUTHORITY with the rest of credentials_check/)
+GRANTS_SCHEMA = "workflow-grants-v1"
+THIS_REPOSITORY = "${{ steps.repo.outputs.name }}"  # the only repositories: an App-token step may name
 
 
 class PermissionsError(ValueError):
@@ -323,3 +330,79 @@ def grant_lines(base: Path, head: Path, tooling: str = TOOLING, workflows: str =
             if was is None or _rank(level) > _rank(was):
                 lines.append(f"{where} asks for {perm}: {level}" + (f" (was {was})" if was else ""))
     return lines
+
+
+# ------------------------------------------------------------------ the GitHub permissions table (item 4)
+def read_grants_table(path: Path) -> dict:
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise PermissionsError(f"the permissions table {path} cannot be read: {exc}") from None
+    workflows = doc.get("workflows") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or doc.get("schema") != GRANTS_SCHEMA or not isinstance(workflows, dict):
+        raise PermissionsError(f"the permissions table must be {GRANTS_SCHEMA!r} with a workflows map")
+    for name, row in workflows.items():
+        ok = (isinstance(row, dict) and set(row) == {"top level", "jobs", "app_tokens"}
+              and isinstance(row["top level"], dict) and isinstance(row["jobs"], dict)
+              and all(isinstance(v, dict) for v in row["jobs"].values()) and isinstance(row["app_tokens"], dict)
+              and all(isinstance(v, list) and all(isinstance(t, dict) for t in v) for v in row["app_tokens"].values()))
+        levels = [lvl for block in ([row["top level"]] + list(row["jobs"].values())
+                                    + [t for v in row["app_tokens"].values() for t in v]) for lvl in block.values()] \
+            if ok else []
+        if not ok or not all(lvl in ("read", "write") for lvl in levels):
+            raise PermissionsError(f"the permissions table's row for {name} is malformed")
+    return doc
+
+
+def _over(asked: Mapping[str, str], row: Mapping[str, str], where: str) -> List[str]:
+    findings = []
+    for perm, level in asked.items():
+        if perm == "(repositories)":
+            continue
+        if perm == "*":
+            findings.append(f"{where} asks for {'every permission' if level != COMPUTED else 'computed permissions'}"
+                            f" ({level}-all or an expression); name each permission")
+        elif level == COMPUTED:
+            findings.append(f"{where} computes {perm}; the table cannot hold an expression")
+        elif perm not in row:
+            findings.append(f"{where} asks for {perm}: {level}, which its row does not list")
+        elif _rank(level) > _rank(row[perm]):
+            findings.append(f"{where} asks for {perm}: {level}, more than its row's {row[perm]}")
+    return findings
+
+
+def grant_findings(table: Mapping, workflows: Mapping[str, str]) -> List[str]:
+    """Every permission the mission workflows ask for that ``table`` does not allow (item 4)."""
+    findings: List[str] = []
+    for name, row in table["workflows"].items():
+        if name not in workflows:
+            continue  # a workflow that is not installed asks for nothing
+        asked = workflow_grants(name, workflows[name])
+        top = asked.get(f"{name}: top level")
+        if top is None:
+            findings.append(f"{name}: no top-level permissions, so every job not naming its own gets the "
+                            "repository's default token")
+        else:
+            findings += _over(top, row["top level"], f"{name}: top level")
+        for where, perms in asked.items():
+            if where == f"{name}: top level":
+                continue
+            job_part = where[len(name) + 2:]  # "job <j>" or "job <j>, App token <n>"
+            if ", App token " in job_part:
+                job, number = job_part[4:].split(", App token ")
+                rows = row["app_tokens"].get(job, [])
+                index = int(number) - 1
+                if index >= len(rows):
+                    findings.append(f"{where} has no row in the permissions table")
+                    continue
+                if perms.get("(repositories)") != THIS_REPOSITORY:
+                    findings.append(f"{where} must name repositories: {THIS_REPOSITORY} (this repository only), "
+                                    f"not {perms.get('(repositories)')!r}")
+                findings += _over(perms, rows[index], where)
+                continue
+            job = job_part[4:]
+            if job not in row["jobs"]:
+                findings.append(f"{where} asks for permissions but has no row in the permissions table")
+                continue
+            findings += _over(perms, row["jobs"][job], where)
+    return findings
