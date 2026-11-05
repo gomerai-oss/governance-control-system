@@ -45,6 +45,13 @@ GitHub passes one quarantine that normalises it, bounds it, fences it and labels
 lines that look written to steer the reader. A build may not carry files an agent runtime loads as instructions or
 tool settings. And a PASS needs every plan check to have passed by its exit code, whatever any text says (§3j). The
 mode is set by `"quarantine"` in `config.json`.
+**Amendment 015 (2026-11-04, HITL direction: ring 5 amendment, with MISSION-ROUTER-001 Amendment 013):** the
+execution substrate. Ring 5's rules hold only on a machine that holds nothing but what the job is given. That was an
+assumption ("throwaway GitHub-hosted VMs", §2); it becomes a stated requirement, written as properties, not as a
+product, and checked twice: before merge, no job of the two mission workflows may name a runner that is not
+GitHub-hosted, and at run time a job on any other machine stops before it clones, mints a token or starts a
+runtime. A repository that runs on its own machines declares how they meet the properties, in a file only HITL can
+change (§3h item 6). The mode is set by `"substrate"` in `config.json`.
 
 ## 1. Purpose
 
@@ -64,8 +71,9 @@ Goals, in priority order:
 
 ## 2. Where it runs
 
-Everything runs on GitHub Actions in `.github/workflows/mission-agent.yml`, on throwaway GitHub-hosted VMs. No laptop,
-no laptop credentials, and no HITL login are involved. The workflow runs:
+Everything runs on GitHub Actions in `.github/workflows/mission-agent.yml`, on throwaway GitHub-hosted VMs, or on
+machines HITL has declared meet the same properties (§3h item 6, Amendment 015). No laptop, no laptop credentials,
+and no HITL login are involved. The workflow runs:
 
 - when the router starts it at a handoff;
 - every 10 minutes on a schedule, as a fallback;
@@ -249,6 +257,48 @@ are kept with the run's artifacts in both modes. **Switched on:** this repositor
    lists it in no matrix, `due` stops it before the agent starts, and `publish` re-derives the mission's state and
    pushes nothing for it. A run already in progress when HITL halts therefore ends without a PR. HITL can also cancel
    the workflow run in GitHub, and disabling the two mission workflows stops every mission at once (§6).
+6. **The machine is part of the boundary (Amendment 015).** Items 1 to 5 hold only on a machine that holds nothing
+   but what the job is given. The requirement is a set of properties, not a product. Every job of
+   `mission-agent.yml` and `mission-router.yml` runs on a machine that:
+   - is **disposable**: fresh for the job and destroyed after it, so nothing of one job (files, processes, caches,
+     logins) is there for the next;
+   - holds **no ambient credentials**: no other user's home, credential store, browser data, SSH agent or cloud
+     login, and no instance metadata service that hands out credentials;
+   - is **not shared** with other work while the job runs;
+   - lets the job set up items 1 to 3 (it has root, so it can add the firewall rules and the agent account), so that
+     the agent gets **explicit mounts only** (item 2) and **listed egress only** (item 3).
+
+   GitHub-hosted runners have these properties. A self-hosted runner, a laptop or a long-lived VM does not by default:
+   an agent hijacked there could reach what the machine holds, and rules at the plan, tool and proof level would not
+   trap it.
+
+   **How it is checked.**
+   - **Before merge.** The credentials check (§3i), which already reads every workflow, also refuses a job of the two
+     mission workflows whose `runs-on` is not a GitHub-hosted label (`ubuntu-` followed by a version or `latest`),
+     or is computed (`${{ ... }}`), or names a runner group, unless the repository has a substrate declaration. So a
+     self-hosted label cannot land in a mission workflow by mistake, and the workflows are SPEC-002 `AUTHORITY`
+     already, so only HITL can change them.
+   - **At run time.** The first step of every job reads `runner.environment`. On anything but `github-hosted`, and
+     with no declaration, the job fails before it clones, mints a token or starts a runtime. Each job records
+     `substrate: github-hosted` or `substrate: declared` with the run's artifacts. *Clarified in part 1 (HITL,
+     2026-11-04):* the check needs the default branch's `config.json`, so it is the step right after the job's
+     checkout of the default branch's own tooling, before any other step; that checkout holds no credential once
+     done (`persist-credentials: false`). The record is the job's log and step summary, which GitHub keeps with the
+     run, since not every job uploads artifacts.
+   - **The declaration.** A repository that runs on its own machines sets `"substrate_declaration"` in
+     `config.json` to a file that states, for each property above, how its runners meet it, who confirmed it and
+     when. The file is SPEC-002 `AUTHORITY`, so it changes only by a hand-merged PR. With it, both checks accept a
+     runner that is not GitHub-hosted, and every stage PR body says "Runs on a declared substrate: `<file>`" so
+     the reader sees it. The pipeline cannot test a declaration: it makes sure one exists and is visible.
+
+   **Mode.** `"substrate"` in `config.json`: `"observe"` (the default when the key is absent) records what the two
+   checks would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job. HITL switches to
+   `"enforce"` after AST-5.6 and 5.7 below.
+
+   **Known limit.** GitHub sends an environment's secrets to the runner with the job, before any step runs, so the
+   run-time check cannot keep a secret off a machine that should not have it: it only stops the agent from running
+   there. What keeps the secrets off is the check before merge, together with no self-hosted runner being registered
+   on the repository unless a declaration covers it (MISSION-ROUTER-001 §8).
 
 **The attack tests.** Each part ships permanent attack tests in `tools/agent_workflow/tests/` that fail on today's
 code and pass on the new code. Before the switch-on, HITL authorizes these live tests:
@@ -264,6 +314,14 @@ code and pass on the new code. Before the switch-on, HITL authorizes these live 
   hosts, and only those, go into `egress-policy.json` in the switch-on PR.
 - **AST-5.5**: HITL halts a mission while its agent runs; no PR opens, and `/mission resume` lets the next run open
   it.
+- **AST-5.6 (Amendment 015)**, on the throwaway repository: a copy of the mission workflows with one job on a
+  `self-hosted` label, and another with a computed `runs-on`, are both refused by the credentials check. With a
+  declaration in place both are accepted, and naming it in `config.json` is itself a change only a hand-merged PR
+  makes. A normal run records `substrate: github-hosted` for every job.
+- **AST-5.7 (Amendment 015)**, only if HITL registers a throwaway self-hosted runner on that repository for it (a VM
+  or container made for the test and deleted after), with an environment holding only stand-in secrets: a job sent
+  there with no declaration fails at its first step, before any clone, token or runtime, and the run records why.
+  If HITL registers no such runner, unit tests cover the step, and the switch-on PR says so.
 
 **The list (AST-5.4, M-AST-HALT-001's observe-mode logs).** `claude-code`: `api.anthropic.com`. `cursor-cli`:
 `*.cursor.sh` (the CLI reached `api2.cursor.sh`, `agentn.global.api5.cursor.sh` and `repo42.cursor.sh`; the middle

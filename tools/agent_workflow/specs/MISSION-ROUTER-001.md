@@ -42,6 +42,11 @@ the router. Under `"quarantine": "enforce"`, an A2 PR that adds, changes or dele
 one is refused before approval: a build may not carry files an agent runtime loads as instructions. Agent text the
 router posts (findings, blockers, verdict summaries) passes the quarantine first: `@` mentions are broken and
 `/mission` lines prefixed (§5). **Switched on** in this repository on 2026-11-04, after AST-3.1 to 3.5 passed.
+**Amendment 013 (2026-11-04, HITL direction: ring 5 amendment, with MISSION-DISPATCH-001 Amendment 015):** the
+router runs on the same kind of machine as the Mission Agent. Its jobs hold the merge credentials, so
+`mission-router.yml` meets the same machine properties and passes the same two checks (MISSION-DISPATCH-001 §3h
+item 6): a GitHub-hosted runner, or machines the repository has declared. The mode is the same `"substrate"` key in
+`config.json`. A registered self-hosted runner is a setting outside this repository's files (§8).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -496,6 +501,11 @@ The router enforces everything it can see. These settings live in GitHub and onl
    GitHub's account record (`GET /users/<login>`, field `id`), not typed from memory.
 6. **App installations (Amendment 011).** Each agent App is installed only on the repositories that run missions.
    An App installed on every repository of an owner can be minted a token for any of them by whoever holds its key.
+7. **Self-hosted runners (Amendment 013).** No self-hosted runner is registered on the repository, or on the owner
+   for its use, unless the substrate declaration (MISSION-DISPATCH-001 §3h item 6) covers it. GitHub sends an
+   environment's secrets to whichever runner takes the job, so a runner the declaration does not cover could receive
+   App keys and model logins before any check of the pipeline runs. HITL confirms it from GitHub
+   (`GET /repos/<owner>/<repo>/actions/runners`, `total_count` 0).
 
 ## 9. Known limits
 

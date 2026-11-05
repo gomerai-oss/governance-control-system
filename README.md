@@ -51,6 +51,20 @@ and its merge, signed so it can be checked later. Its code is in `tools/agent_wo
 - An account for each runtime you use: an Anthropic API key (or a Claude Code OAuth token) for `claude-code`, a Cursor
   API key for `cursor-cli`.
 - Familiarity with GitHub Apps, Actions environments and repository secrets. Setup takes about an hour.
+- **GitHub-hosted runners.** The workflows ship with `runs-on: ubuntu-latest`, and they should stay that way. The
+  sandbox rules (no network for checks, the agent's own account, listed egress only) hold only on a machine that is
+  fresh for each job, holds no other logins, is shared with nothing else, and gives the job root. GitHub-hosted runners
+  are such machines. A self-hosted runner, a laptop or a long-lived VM usually is not, and an agent hijacked there could
+  reach what that machine holds. Register no self-hosted runner on the repository. GitHub sends a job's secrets to
+  whichever runner takes the job, before any check of the pipeline runs.
+
+  The credentials check flags a mission-workflow job on any other runner, and each job checks its machine right after
+  its checkout. Both only report for now (`"substrate": "observe"` in `config.json`), and will refuse once you set
+  `"enforce"`. **Your own machines:** if they meet the four properties, describe how in a file named
+  `SUBSTRATE-DECLARATION.md` and set `"substrate_declaration"` in `config.json` to its path. The file needs one heading
+  for each property (`## Disposable`, `## No ambient credentials`, `## Not shared`, `## Root for the job`), plus
+  `Confirmed by:` and `Confirmed on:` lines. No mission may change the file, and every stage PR names it. The pipeline
+  cannot test what the file says: you are vouching for it.
 
 **Running cost.** The router runs every 5 minutes and the Mission Agent every 10, whether or not a mission is running.
 In a public repository Actions minutes are free. In a private one each run is billed as at least one minute, which can

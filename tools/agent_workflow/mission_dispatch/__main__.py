@@ -33,6 +33,7 @@ from typing import Callable, Tuple
 
 from mission_router.github import GitHub, GitHubError
 from mission_router.gate import classify_or_raise
+from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
@@ -271,13 +272,19 @@ def cmd_publish(args) -> int:
     job = _job()
     read = GitHub(_env("READ_TOKEN"), args.repo)
     agent = GitHub(_env("AGENT_TOKEN"), args.repo)
-    mode = _quarantine_mode(load_config())
+    config = load_config()
+    mode = _quarantine_mode(config)
+    try:
+        declared = substrate.declaration(config)
+    except substrate.SubstrateError as exc:
+        raise DispatchError(str(exc)) from None
     survey, router = live_survey(read, _log)
     check_key(router, job.agent, f"{_env('AGENT_SLUG')}[bot]")
     result = publish(job, survey, Path(args.artifact), Path(args.root), CLONE_URL.format(repo=args.repo),
                      _env("READ_TOKEN"), _env("AGENT_TOKEN"), f"{_env('AGENT_SLUG')}[bot]", os.environ,
                      agent.create_pull, os.environ.get("RUN_URL", ""),
-                     checks_dir=Path(args.checks) if args.checks else None, quarantine_mode=mode, log=_log)
+                     checks_dir=Path(args.checks) if args.checks else None, quarantine_mode=mode, log=_log,
+                     substrate_declared=declared)
     if result["status"] == "skipped":
         _log(f"{job.key}: not published: {result['reason']}")
     else:

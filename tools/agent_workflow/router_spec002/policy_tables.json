@@ -27,6 +27,7 @@
       {"prefix": "tools/agent_workflow/egress/"},
       {"basename": "IDENTITY-REGISTRY.md"},
       {"basename": "CREDENTIALS-REGISTER.md"},
+      {"basename": "SUBSTRATE-DECLARATION.md"},
       {"prefix": "tools/agent_workflow/credentials_check/"},
       {"exact": "tools/agent_workflow/epap/ed25519.py"},
       {"exact": "tools/agent_workflow/epap/links.py"},
