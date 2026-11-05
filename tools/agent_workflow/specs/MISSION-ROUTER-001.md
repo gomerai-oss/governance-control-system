@@ -46,7 +46,8 @@ router posts (findings, blockers, verdict summaries) passes the quarantine first
 router runs on the same kind of machine as the Mission Agent. Its jobs hold the merge credentials, so
 `mission-router.yml` meets the same machine properties and passes the same two checks (MISSION-DISPATCH-001 §3h
 item 6): a GitHub-hosted runner, or machines the repository has declared. The mode is the same `"substrate"` key in
-`config.json`. A registered self-hosted runner is a setting outside this repository's files (§8).
+`config.json`. A registered self-hosted runner is a setting outside this repository's files (§8). **Switched on** in
+this repository on 2026-11-04, after AST-5.6 passed (AST-5.7 skipped by HITL; unit tests only).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL

@@ -293,7 +293,9 @@ are kept with the run's artifacts in both modes. **Switched on:** this repositor
 
    **Mode.** `"substrate"` in `config.json`: `"observe"` (the default when the key is absent) records what the two
    checks would refuse, without refusing it; `"enforce"` refuses it. Any other value fails the job. HITL switches to
-   `"enforce"` after AST-5.6 and 5.7 below.
+   `"enforce"` after AST-5.6 and 5.7 below. **Switched on:** this repository's `config.json` sets `"enforce"` (ring 5
+   amendment, part 2, after AST-5.6 passed on 2026-11-04; HITL skipped AST-5.7, so the run-time refusal on a machine
+   that is not GitHub-hosted is covered by unit tests only, `tests/test_substrate.py`).
 
    **Known limit.** GitHub sends an environment's secrets to the runner with the job, before any step runs, so the
    run-time check cannot keep a secret off a machine that should not have it: it only stops the agent from running
