@@ -49,3 +49,9 @@ There is no `__init__.py`: `mcp_gateway` is a namespace package, like the earlie
 - **Where the history is.** The dispatcher keeps the checkout's git dir outside the work tree and passes it as `--git-dir`. Without `--git-dir`, `trace` reads only a `.git` inside `--root`, and refuses rather than let git search an enclosing directory.
 - **Fail closed.** Any git or proof error returns nothing and logs `trace_error`. A result passes the secrets boundary like every other result.
 - **AUTHORITY.** The gateway now imports `evidence_graph`, so SPEC-002 lists it as AUTHORITY (amendment 2026-11-01).
+
+## Catalog pin (MISSION-DISPATCH-001 §3k item 1, ring 2 part 1)
+
+- **Optional session field.** A session may carry `catalog` `{"sha256", "mode"}`, written by the runtime binding; any other shape makes the session invalid (every call DENY, stop 13), like any other session defect. A session without it is read as before.
+- **Compared at start.** The gateway computes the canonical SHA-256 of the catalog file it loads (`catalog_digest`, the same `epap.signing` form the binding's audit uses). When the session pins another digest: under `"enforce"` the gateway refuses to start (exit 2); under `"observe"` it starts and appends one `catalog_pin` entry (`expected`, `loaded`, `mode`) to `decisions.jsonl`.
+- **Import closure.** `epap.signing` was already in the closure through `mcp_auth.records` and `retrieval.retrieve`; the gateway now imports it directly too. No new module joins the closure.

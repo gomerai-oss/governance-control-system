@@ -1635,8 +1635,10 @@ class FakeBinder:
         self.tools, self.mcp_tools, self.allowed, self.denied, self.refuse = tools, mcp_tools, allowed, denied, refuse
         self.calls = []
 
-    def bind(self, seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now):
+    def bind(self, seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now,
+             catalog_mode=None):
         self.calls.append((seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now))
+        self.catalog_mode = catalog_mode
         if self.refuse:
             raise self.BindingRefused(self.refuse)
         allowed = self.allowed if self.allowed is not None else ["Read(**)", "Edit(**)"]

@@ -39,6 +39,9 @@ Each line of ``decisions.jsonl`` is one JSON object with an ``entry`` field:
                      ``path``, ``head`` and ``changes`` (how many were returned)
 ``trace_error``      after an ALLOW whose trace failed: nothing was returned
 ``refusal``          a call naming no catalog tool: no action to decide, nothing run
+``catalog_pin``      at start, when the session pins a catalog (MISSION-DISPATCH-001 §3k item 1) and the one
+                     loaded differs: ``expected``, ``loaded`` and ``mode``. Under ``"enforce"`` the gateway refuses
+                     to start instead, so this entry is only ever written under ``"observe"``.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from evidence_graph import history as evidence_history
 from mcp_auth import decide
 from mcp_auth import policy as P
 from mcp_auth import records as auth_records
+from epap import signing
 from retrieval import corpus as corpus_mod
 from retrieval import records as retrieval_records
 from retrieval import retrieve
@@ -196,6 +200,14 @@ def load_catalog(path: Any, policy: Mapping, registry: corpus_mod.CorpusRegistry
     return tools
 
 
+def catalog_digest(path: Any) -> str:
+    """SHA-256 of the catalog file's canonical JSON: the value the runtime binding pins in the session."""
+    try:
+        return signing.sha256_hex(signing.canonical_bytes(json.loads(Path(path).read_text(encoding="utf-8"))))
+    except (OSError, UnicodeDecodeError, ValueError, TypeError, RecursionError, signing.CanonicalError) as exc:
+        raise GatewayError(f"tool catalog has no canonical form: {exc}") from None
+
+
 def argument_problem(schema: Mapping, arguments: Any) -> Optional[str]:
     """Why ``arguments`` do not satisfy a catalog input schema, or None."""
     if not isinstance(arguments, dict):
@@ -300,6 +312,14 @@ class Gateway:
         except session_mod.SessionError as exc:
             self.session_problem = str(exc)
         self._calls = 0
+        if self.session is not None and self.session.catalog_sha256:
+            loaded = catalog_digest(catalog_path)
+            if loaded != self.session.catalog_sha256:
+                if self.session.catalog_mode == "enforce":
+                    raise GatewayError(f"the tool catalog is not the one this session was bound against "
+                                       f"(bound {self.session.catalog_sha256}, loaded {loaded})")
+                self._append({"entry": "catalog_pin", "expected": self.session.catalog_sha256, "loaded": loaded,
+                              "mode": self.session.catalog_mode})
 
     # -- decisions ---------------------------------------------------------
 
