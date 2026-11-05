@@ -7,7 +7,12 @@ checkout. It has exactly these fields, and no other key at either level::
      "mission": {"id": <mission id>, "authority_ref": "MISSION-ROUTER-001",
                  "base_sha": <40 lowercase hex>, "round": <int >= 1>},
      "resources": [<policy resource id>, ...],
-     "issued_at": <epoch seconds>, "expires_at": <epoch seconds>}
+     "issued_at": <epoch seconds>, "expires_at": <epoch seconds>,
+     "catalog": {"sha256": <64 lowercase hex>, "mode": "observe" | "enforce"}}   (optional)
+
+``catalog`` (MISSION-DISPATCH-001 §3k item 1, ring 2) is the gateway catalog the seat was bound against. The gateway
+compares it with the catalog it loads: under ``"enforce"`` a different catalog refuses its start; under
+``"observe"`` the difference is recorded in the evidence log.
 
 There is no approval field: the gateway grants nothing on a session's word
 beyond the overlay below, whose approvals are always empty. The gateway never
@@ -39,6 +44,10 @@ PRINCIPAL_KIND = "agent"
 SESSION_FIELDS = frozenset({"principal", "acting_identity", "role", "mission", "resources",
                             "issued_at", "expires_at"})
 MISSION_FIELDS = frozenset({"id", "authority_ref", "base_sha", "round"})
+OPTIONAL_FIELDS = frozenset({"catalog"})
+CATALOG_FIELDS = frozenset({"sha256", "mode"})
+CATALOG_MODES = ("observe", "enforce")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_BYTES = 65536
 _SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -60,6 +69,8 @@ class Session:
     resources: Tuple[str, ...]
     issued_at: int
     expires_at: int
+    catalog_sha256: str = ""
+    catalog_mode: str = ""
 
     def live_at(self, now: int) -> bool:
         return self.issued_at <= now < self.expires_at
@@ -91,8 +102,14 @@ def parse(data: bytes) -> Session:
         raise
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise SessionError("session is not valid JSON") from None
-    if not isinstance(doc, dict) or set(doc) != SESSION_FIELDS:
-        raise SessionError(f"session must have exactly the fields {sorted(SESSION_FIELDS)}")
+    if not isinstance(doc, dict) or not SESSION_FIELDS <= set(doc) <= SESSION_FIELDS | OPTIONAL_FIELDS:
+        raise SessionError(f"session must have exactly the fields {sorted(SESSION_FIELDS)}"
+                           f" (and optionally {sorted(OPTIONAL_FIELDS)})")
+    catalog = doc.get("catalog", {"sha256": "", "mode": ""})
+    if "catalog" in doc and (not isinstance(catalog, dict) or set(catalog) != CATALOG_FIELDS
+                             or not isinstance(catalog["sha256"], str) or not _DIGEST.fullmatch(catalog["sha256"])
+                             or catalog["mode"] not in CATALOG_MODES):
+        raise SessionError("session catalog must be {sha256: 64 lowercase hex, mode: observe|enforce}")
     for field in ("principal", "acting_identity", "role"):
         if not P.is_name(doc[field]):
             raise SessionError(f"session {field} must be a non-empty string")
@@ -119,7 +136,8 @@ def parse(data: bytes) -> Session:
         principal=doc["principal"], acting_identity=doc["acting_identity"], role=doc["role"],
         mission_id=mission["id"], authority_ref=mission["authority_ref"],
         base_sha=mission["base_sha"], round=mission["round"],
-        resources=tuple(resources), issued_at=issued, expires_at=expires)
+        resources=tuple(resources), issued_at=issued, expires_at=expires,
+        catalog_sha256=catalog["sha256"], catalog_mode=catalog["mode"])
 
 
 def _inside(path: Path, root: Path) -> bool:

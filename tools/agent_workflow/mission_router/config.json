@@ -9,6 +9,7 @@
   "identity": "enforce",
   "quarantine": "enforce",
   "substrate": "enforce",
+  "permissions": "observe",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {

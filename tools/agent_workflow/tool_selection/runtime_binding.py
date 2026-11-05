@@ -10,6 +10,7 @@ shipped matrix, and turns the admitted surface into a ``Binding``:
 ``denied_rules``   extra denials (none today)
 ``mcp_tools``      admitted gateway tools, bare names
 ``session``        the gateway session document (``mcp_gateway/session.py`` format)
+``catalog_sha256`` the gateway catalog's digest, when ``catalog_mode`` was given (else ``""``)
 ``audit``          the ``signed`` part of an EPAP link named ``RUNTIME_BINDING``
 
 The binding is a consumer of the selection, never a second policy: every bound tool comes from an admitted
@@ -17,6 +18,11 @@ registry entry, so it can only be as wide as the selection. Anything that is not
 unknown seat or runtime, a malformed mission, a selection that does not admit, a session or evidence path
 inside the checkout) raises ``BindingRefused`` and nothing is returned. It does not write the MCP config or any
 runtime rules: the dispatcher renders those itself.
+
+``bind(..., catalog_mode="observe"|"enforce")`` (MISSION-DISPATCH-001 §3k item 1, ring 2) also pins the gateway
+catalog the seat is bound against: its canonical SHA-256 goes into the session as ``catalog`` (with the mode, so the
+gateway knows whether a different catalog refuses its start or is only recorded) and into the audit as a material
+(``catalogs``). Without ``catalog_mode`` nothing about the catalog is recorded, as before.
 """
 
 from __future__ import annotations
@@ -68,6 +74,7 @@ class Binding:
     mcp_tools: Tuple[str, ...]
     session: dict
     audit: dict
+    catalog_sha256: str = ""
 
 
 def _is_int(value: Any) -> bool:
@@ -132,12 +139,17 @@ def render_registry(doc: Mapping, mission_id: str) -> dict:
     return out
 
 
-def _gateway_tools(gateway_root: Path) -> frozenset:
+CATALOG_MODES = ("observe", "enforce")
+
+
+def _gateway_catalog(gateway_root: Path) -> Tuple[dict, frozenset]:
+    """The gateway catalog under ``gateway_root`` and the names of its tools."""
     try:
         doc = M.read_file(Path(gateway_root) / GATEWAY_CATALOG, "gateway catalog")
-        return frozenset(t["name"] for t in doc["tools"])
+        return doc, frozenset(t["name"] for t in doc["tools"])
     except (ValueError, KeyError, TypeError) as exc:
         raise BindingRefused(f"the gateway catalog under {gateway_root} cannot be read: {exc}") from None
+
 
 
 def _rule(kind: str, path: str) -> str:
@@ -183,10 +195,14 @@ def _artifact(folder: str, value: Any) -> Tuple[str, dict]:
 
 
 def audit_material(seat: str, runtime: str, seat_doc: Mapping, seats: Mapping, matrix: Mapping,
-                   registry: Mapping, request: Mapping, selection: S.Selection, bound_doc: Mapping) -> dict:
-    """The ``signed`` part of the ``RUNTIME_BINDING`` link: inputs as materials, record and binding as products."""
-    materials = dict(_artifact(folder, value) for folder, value in
-                     (("matrix", matrix), ("registries", registry), ("requests", request), ("seats", seats)))
+                   registry: Mapping, request: Mapping, selection: S.Selection, bound_doc: Mapping,
+                   catalog: Any = None) -> dict:
+    """The ``signed`` part of the ``RUNTIME_BINDING`` link: inputs as materials, record and binding as products.
+    With ``catalog`` (ring 2) the gateway catalog is a material too."""
+    inputs = [("matrix", matrix), ("registries", registry), ("requests", request), ("seats", seats)]
+    if catalog is not None:
+        inputs.insert(0, ("catalogs", catalog))
+    materials = dict(_artifact(folder, value) for folder, value in inputs)
     products = dict(materials)
     products.update(dict(_artifact(folder, value) for folder, value in
                          (("records", selection.record), ("bindings", bound_doc))))
@@ -200,10 +216,12 @@ def audit_material(seat: str, runtime: str, seat_doc: Mapping, seats: Mapping, m
 
 
 def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Path, evidence_dir: Path,
-         gateway_root: Path, now: Any) -> Binding:
+         gateway_root: Path, now: Any, catalog_mode: Any = None) -> Binding:
     """The admitted runtime surface of ``seat`` for ``mission``; raises ``BindingRefused`` otherwise."""
     if runtime not in RUNTIMES:
         raise BindingRefused(f"unknown runtime {runtime!r}")
+    if catalog_mode is not None and catalog_mode not in CATALOG_MODES:
+        raise BindingRefused(f"catalog_mode must be one of {list(CATALOG_MODES)}")
     seats = load_seats(SEATS_PATH)
     if not isinstance(seat, str) or seat not in seats["seats"]:
         raise BindingRefused(f"unknown seat {seat!r}")
@@ -244,7 +262,8 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
     tools, allowed, mcp_tools, bound = _surface(selection, registry, matrix)
     if not set(bound) <= selection.surface:
         raise BindingRefused("the binding would grant a tool outside the admitted surface")
-    missing = sorted(set(mcp_tools) - _gateway_tools(gateway_root))
+    catalog, served = _gateway_catalog(gateway_root)
+    missing = sorted(set(mcp_tools) - served)
     if missing:
         raise BindingRefused(f"admitted gateway tools {missing} are not served by the gateway")
 
@@ -258,11 +277,18 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
         "issued_at": now,
         "expires_at": now + SESSION_TTL,
     }
+    pinned = ""
+    if catalog_mode is not None:
+        pinned = R.digest(catalog)
+        if pinned is None:
+            raise BindingRefused("the gateway catalog has no canonical form")
+        session["catalog"] = {"sha256": pinned, "mode": catalog_mode}
     denied: list = []
     bound_doc = {"seat": seat, "runtime": runtime, "mission": mission, "tools": list(tools),
                  "allowed_rules": list(allowed), "denied_rules": list(denied), "mcp_tools": list(mcp_tools),
                  "tool_map": bound, "session": session}
-    audit = audit_material(seat, runtime, seat_doc, seats, matrix, registry, request, selection, bound_doc)
+    audit = audit_material(seat, runtime, seat_doc, seats, matrix, registry, request, selection, bound_doc,
+                           catalog if catalog_mode is not None else None)
     if links.link_problem(audit):
         raise BindingRefused(f"the binding's audit link is malformed: {links.link_problem(audit)}")
-    return Binding(tools, allowed, denied, mcp_tools, session, audit)
+    return Binding(tools, allowed, denied, mcp_tools, session, audit, pinned)

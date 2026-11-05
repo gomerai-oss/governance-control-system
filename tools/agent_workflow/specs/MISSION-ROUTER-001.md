@@ -48,6 +48,13 @@ router runs on the same kind of machine as the Mission Agent. Its jobs hold the 
 item 6): a GitHub-hosted runner, or machines the repository has declared. The mode is the same `"substrate"` key in
 `config.json`. A registered self-hosted runner is a setting outside this repository's files (§8). **Switched on** in
 this repository on 2026-11-04, after AST-5.6 passed (AST-5.7 skipped by HITL; unit tests only).
+**Amendment 014 (2026-11-05, HITL direction: ring 2, with MISSION-DISPATCH-001 Amendment 016):** the router's own
+grant is held to the same table. The `sweep` job's `permissions` are a row of `credentials_check/grants.json`, so the
+credentials check refuses a widening of them under `"permissions": "enforce"`. No plan or comment text can name a tool,
+permission or resource: the plan's keys are a closed set (`model.py`), and a `build_scope` that covers a grant file is
+refused as `AUTHORITY`. Because a seat's write grant now follows the plan's `build_scope` (MISSION-DISPATCH-001 §3k
+item 2), the scope HITL approves is also the agent's write grant. The comment in which the router asks HITL for
+`/mission approve <sha>` says so: "A2 may write: <patterns>". An unknown `"permissions"` value stops the router.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -650,3 +657,7 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 107 | Enforced quarantine; a plan whose `build_scope` covers `**/AGENTS.md` or names `.mcp.json` | Refused before approval |
 | 108 | A blocker or finding containing `@someone` or a `/mission approve` line, posted by the router | The mention is broken and the line prefixed; no one is notified and nothing reads as a command |
 | 109 | Observed quarantine; vector 106 or 107 | Handled as before; what enforcement would refuse is logged |
+| 110 | Enforced permissions; a PR widens the `sweep` job's `permissions` | The credentials check fails, naming the job and permission |
+| 111 | A plan carrying a key such as `tools`, `permissions` or `resources` | Refused: unknown keys |
+| 112 | The router asks HITL to approve a plan | Its comment lists "A2 may write:" with the `build_scope` patterns |
+| 113 | `"permissions"` set to an unknown value | The router stops |

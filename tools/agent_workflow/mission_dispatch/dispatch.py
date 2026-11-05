@@ -799,7 +799,7 @@ def previous_findings(job: Job, tree: Path) -> str:
 # ------------------------------------------------------------ the job steps
 def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapping[str, str], home: Path,
             default_branch: str, checks_report: Optional[Path] = None, binding_mode: str = binding.OFF,
-            now: Optional[int] = None, binder: object = None) -> Checkout:
+            now: Optional[int] = None, binder: object = None, permissions_mode: str = "observe") -> Checkout:
     """Fresh checkout of ``job.base_sha`` on the stage branch, with the task (and any checks report) written.
 
     With ``binding_mode`` ``enforce`` (Amendment 011) the seat's tool surface is bound here, before any agent
@@ -847,7 +847,7 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
     try:
         if binding_mode == binding.ENFORCE:
             when = int(time.time()) if now is None else now
-            bound = binding.bind(job, root, checkout.tree, home, when, binder)
+            bound = binding.bind(job, root, checkout.tree, home, when, binder, permissions_mode=permissions_mode)
         if job.runtime == CURSOR_CLI:
             write_cursor_config(checkout.tree, home, bound)
             if bound is not None:

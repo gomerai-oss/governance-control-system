@@ -37,7 +37,7 @@ from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast, quarantine
+from . import binding, blast, permissions, quarantine
 from .runtimes import BINARIES
 from .dispatch import (
     REFUSAL_MAX_CHARS,
@@ -189,6 +189,16 @@ def _binding_mode(config: dict) -> str:
         raise DispatchError(str(exc)) from None
 
 
+def _permissions_mode(config: dict) -> str:
+    """``"permissions"`` (§3k, ring 2); an unknown value fails the job."""
+    try:
+        value = permissions.mode(config)
+    except permissions.PermissionsError as exc:
+        raise DispatchError(str(exc)) from None
+    _log(f"permissions: {value}")
+    return value
+
+
 def _quarantine_mode(config: dict) -> str:
     """``"quarantine"`` (§3j); an unknown value fails the job. Items 1 and 4 apply in both modes."""
     try:
@@ -205,7 +215,7 @@ def cmd_prepare(args) -> int:
     _quarantine_mode(config)
     prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), _env("GITHUB_TOKEN"), os.environ, _home(args),
             config["default_branch"], Path(args.checks_report) if args.checks_report else None,
-            binding_mode=_binding_mode(config))
+            binding_mode=_binding_mode(config), permissions_mode=_permissions_mode(config))
     _log(f"{job.key}: checkout ready at {job.base_sha}")
     return 0
 

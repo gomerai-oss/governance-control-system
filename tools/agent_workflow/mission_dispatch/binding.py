@@ -9,6 +9,11 @@ The binding library only says which tools are admitted. This module keeps the di
 writes the gateway command itself: a binding can narrow the built-in tools, add read rules inside the checkout,
 add denials, and admit gateway tools, and nothing else. The gateway runs from the dispatcher's own tooling tree,
 never from the checkout the agent is editing.
+
+Ring 2 (MISSION-DISPATCH-001 §3k item 1): before binding, the gateway catalog's tool descriptions are checked
+(``permissions.description_findings``); under ``"permissions": "enforce"`` a finding refuses the binding, under
+``"observe"`` it is logged. The binder is then asked to pin the catalog in the session (``catalog_mode``), and the
+binding record keeps the digest, the mode and the findings beside the audit.
 """
 
 from __future__ import annotations
@@ -18,7 +23,9 @@ import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Tuple
+
+from mission_dispatch import permissions
 
 OFF, ENFORCE = "off", "enforce"
 MODES = (OFF, ENFORCE)
@@ -122,8 +129,33 @@ def _write_readonly(path: Path, doc: Any) -> None:
     path.chmod(0o444)
 
 
-def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any = None) -> Bound:
+def _stderr(line: str) -> None:
+    import sys
+    print(line, file=sys.stderr)
+
+
+def check_descriptions(mode: str, log: Callable[[str], None] = _stderr) -> list:
+    """§3k item 1 at bind time: the findings for the tooling tree's gateway catalog. Under ``enforce`` any finding
+    is a BindingError; under ``observe`` each is logged and the list returned."""
+    try:
+        findings = permissions.description_findings(permissions.read_catalog(gateway_root() / permissions.CATALOG))
+    except permissions.PermissionsError as exc:
+        findings = [str(exc)]
+    for finding in findings:
+        log(f"permissions: tool description: {finding}" + ("" if mode == permissions.ENFORCE else
+                                                         " (observe: not refused)"))
+    if findings and mode == permissions.ENFORCE:
+        raise BindingError(f"the gateway catalog fails the tool-description check ({len(findings)} finding(s)); "
+                           "refusing to bind")
+    return findings
+
+
+def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any = None,
+         permissions_mode: str = permissions.OBSERVE, log: Callable[[str], None] = _stderr) -> Bound:
     """Bind ``job``'s seat; write the session, the MCP config and the record. Any failure is a BindingError."""
+    if permissions_mode not in permissions.MODES:
+        raise BindingError(f"unknown permissions mode {permissions_mode!r}")
+    findings = check_descriptions(permissions_mode, log)
     if binder is None:
         try:
             from tool_selection import runtime_binding as binder  # the tooling tree's copy, never the checkout's
@@ -141,7 +173,7 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
     refused = getattr(binder, "BindingRefused", None)
     try:
         result = binder.bind(job.role, job.runtime, mission, checkout.resolve(), session_path, evidence,
-                             gateway_root(), now)
+                             gateway_root(), now, catalog_mode=permissions_mode)
         tools, allowed, denied, mcp_tools = check(result.tools, result.allowed_rules, result.denied_rules,
                                                   result.mcp_tools)
         session, audit = result.session, result.audit
@@ -167,7 +199,9 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
         audit_text = json.dumps(audit, sort_keys=True)
     except (TypeError, ValueError):
         raise BindingError("the binding's audit record is not JSON") from None
-    _write_readonly(out / BINDING_FILE, {"bound": asdict(bound), "audit": json.loads(audit_text)})
+    catalog = {"sha256": getattr(result, "catalog_sha256", ""), "mode": permissions_mode, "findings": findings}
+    log(f"permissions: gateway catalog pinned {catalog['sha256'] or '(not pinned)'} (mode={permissions_mode})")
+    _write_readonly(out / BINDING_FILE, {"bound": asdict(bound), "audit": json.loads(audit_text), "catalog": catalog})
     return bound
 
 
