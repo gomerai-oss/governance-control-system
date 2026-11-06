@@ -498,7 +498,11 @@ only HITL changes them. Four gaps remain:
 - `"enforce"` refuses it;
 - any other value fails the job, and stops the router.
 
-HITL switches to `"enforce"` after AST-2.1 to 2.5 below pass.
+HITL switches to `"enforce"` after AST-2.1 to 2.5 below pass. **Switched on:** this repository's `config.json` sets
+`"enforce"` (ring 2 switch-on, after AST-2.1 to 2.5 passed on 2026-11-05 on the throwaway repository; AST-2.4 ran
+locally in a bwrap sandbox with Claude Code 2.1.318, as AST-3.4 did, because the throwaway repository has no working
+model login). From then on, a Cursor writer's grant is still not narrowed by rules (known limit 18): the §3c scope
+check is its wall.
 
 1. **Tool descriptions are checked, then pinned.**
    - **What is checked.** Every text the model reads about a gateway tool: its `description`, and each `description`

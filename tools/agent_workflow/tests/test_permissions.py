@@ -77,9 +77,9 @@ class Mode(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "permissions must be one of"):
                 load_config(path)
 
-    def test_this_repository_observes(self):
+    def test_this_repository_enforces(self):  # switched on after AST-2.1 to 2.5 (2026-11-05)
         config = json.loads((AW / "mission_router" / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(config.get("permissions"), "observe")
+        self.assertEqual(config.get("permissions"), "enforce")
 
 
 class Descriptions(unittest.TestCase):  # vector 72
@@ -416,8 +416,10 @@ class GrantLines(unittest.TestCase):  # vector 76
         self.assertEqual(self.lines(), [
             "mission-agent.yml: job plan asks for issues: write (was read)",
             "mission-agent.yml: job plan asks for actions: read",
+            "mission-agent.yml: job publish, App token 1 drops repositories: (was '${{ steps.repo.outputs.name }}'), "
+            "so the token reaches every repository the App is installed on",
             "mission-agent.yml: job publish, App token 1 asks for administration: write"])
-        # a dropped repositories: line is a change of what the token reaches; listed when it is given another value
+        # a repositories: line given another value is listed too
         (self.head / ".github" / "workflows" / "mission-agent.yml").write_text(
             WORKFLOW.replace("${{ steps.repo.outputs.name }}", "a, b"))
         self.assertEqual(self.lines(), ["mission-agent.yml: job publish, App token 1 names repositories 'a, b' "
@@ -691,8 +693,11 @@ class PermissionsTable(unittest.TestCase):  # vectors 77, 78, 110
         self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 asks for administration: write, "
                                  "which its row does not list"])
         found = self.findings("mission-agent.yml", "          repositories: ${{ steps.repo.outputs.name }}\n", "")
-        self.assertEqual(len(found), 1)
-        self.assertIn("job publish, App token 1 must name repositories", found[0])
+        self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 must name repositories: "
+                                 "${{ steps.repo.outputs.name }} (this repository only), and names none"])
+        found = self.findings("mission-agent.yml", "${{ steps.repo.outputs.name }}", "a, b")
+        self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 must name repositories: "
+                                 "${{ steps.repo.outputs.name }} (this repository only), not 'a, b'"])
 
     def test_the_router_s_sweep(self):  # vector 110
         found = self.findings("mission-router.yml", "      actions: write", "      actions: write\n      administration: write")
