@@ -285,6 +285,10 @@ class Gateway:
         if self.git_dir is not None and not self.git_dir.is_dir():
             raise GatewayError("--git-dir is not a directory")
         self._history: Optional[Tuple[str, Any, list]] = None
+        # Ring 4 (MISSION-DISPATCH-001 §3l item 4): GitHub's record of each landing, written by prepare beside the
+        # session file; without it every landing is "not checked".
+        self.session_path = Path(session_path) if session_path is not None else None
+        self._provenance: Optional[dict] = None
         self.known = tuple(v for v in (os.environ.get(k, "") for k in KNOWN_SECRET_ENV)
                            if len(v) >= boundary_detector.MIN_KNOWN)
         evidence = Path(evidence_dir)
@@ -471,20 +475,45 @@ class Gateway:
             self._history = (head, repo, evidence_graph.walk(repo, ids, head))
         return self._history
 
-    @staticmethod
-    def _change(entry: Any) -> dict:
+    def _record(self) -> dict:
+        if self._provenance is None:
+            from mission_dispatch import provenance  # the tooling tree's copy, as the gateway itself
+            self._provenance = provenance.read_record(self.session_path) if self.session_path else {}
+        return self._provenance
+
+    def _github(self, entry: Any) -> Tuple[str, bool]:
+        """GitHub's result for a landing, and whether the record is enforced (``"supply_chain": "enforce"``)."""
+        record = self._record()
+        status = (record.get("landings") or {}).get(entry.commit.sha, "not checked")
+        return str(status), record.get("mode") == "enforce"
+
+    def _change(self, entry: Any) -> dict:
         commit = entry.commit.sha
         if entry.kind == evidence_history.LANDING:
             proof = entry.proof
             final = proof.reviews.get(proof.round)
+            status, enforced = self._github(entry)
+            # Enforced, a landing is proven only when its git rules and GitHub's record both pass; observed, the
+            # git-only answer stands, with GitHub's result beside it.
+            proven = (proof.proven and status == "passed") if enforced else proof.proven
             return {"kind": "mission", "commit": commit, "mission": proof.mission, "plan": proof.plan_sha,
                     "approval": proof.approval_kind, "round": proof.round,
                     "verdict": final.verdict if final else None,
                     "reviewed_sha": final.reviewed_sha if final else None,
-                    "specs": list(proof.specs), "proven": proof.proven, "rules": proof.rules}
+                    "specs": list(proof.specs), "proven": proven, "rules": proof.rules,
+                    "git_rules": proof.rules, "github_record": status}
         if entry.kind == evidence_history.HAND_MERGE:
             return {"kind": "hand_merge", "commit": commit, "pr": entry.pr, "independent_review": "none"}
         return {"kind": "direct", "commit": commit, "independent_review": "none"}
+
+    def _line(self, entry: Any) -> str:
+        line = evidence_cli.trace_line(entry)
+        if entry.kind == evidence_history.LANDING:
+            status, enforced = self._github(entry)
+            line += f" github-record {status.split(':', 1)[0].replace(' ', '-')}"
+            if enforced and status != "passed" and not entry.proof.findings:
+                line += " UNPROVEN github-record"
+        return line
 
     def _trace(self, request_id: str, tool: Tool, path: str, decision: decide.Decision, now: int) -> dict:
         """Which first-parent changes made ``path`` what it is, newest first; any defect returns nothing."""
@@ -493,7 +522,7 @@ class Gateway:
             repo.prefetch_files([e.commit for e in entries])
             touched = [e for e in reversed(entries) if path in repo.files(e.commit)]
             changes = [self._change(e) for e in touched]
-            lines = [evidence_cli.trace_line(e) for e in touched]
+            lines = [self._line(e) for e in touched]
         except Exception as exc:  # fail closed, as retrieval does
             try:
                 self._append({"entry": "trace_error", "request_id": request_id, "tool": tool.name,

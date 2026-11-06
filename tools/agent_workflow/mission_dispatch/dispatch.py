@@ -79,7 +79,7 @@ from mission_router.gate import INSTRUCTION_FAMILIES, classify_or_raise
 from router_spec002.policy import load_tables, normalize_path
 from mission_router.state import AWAIT_A2, AWAIT_A3, PAUSED, MissionState
 
-from . import binding, blast, login, quarantine
+from . import binding, blast, login, provenance, quarantine
 from .runtimes import (
     BINARIES,
     CLAUDE_CODE,
@@ -808,7 +808,9 @@ def previous_findings(job: Job, tree: Path) -> str:
 # ------------------------------------------------------------ the job steps
 def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapping[str, str], home: Path,
             default_branch: str, checks_report: Optional[Path] = None, binding_mode: str = binding.OFF,
-            now: Optional[int] = None, binder: object = None, permissions_mode: str = "observe") -> Checkout:
+            now: Optional[int] = None, binder: object = None, permissions_mode: str = "observe",
+            supply_mode: str = "observe", provenance_dir: Optional[Path] = None,
+            verify: Optional[Callable] = None, log: Callable[[str], None] = _stderr) -> Checkout:
     """Fresh checkout of ``job.base_sha`` on the stage branch, with the task (and any checks report) written.
 
     With ``binding_mode`` ``enforce`` (Amendment 011) the seat's tool surface is bound here, before any agent
@@ -863,6 +865,14 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
                 binding.write_cursor_mcp(checkout.tree, bound)
     except (SandboxError, binding.BindingError) as exc:
         raise DispatchError(str(exc)) from None
+    if bound is not None:
+        # Ring 4 (§3l item 4): GitHub's record of each landing, for the gateway's trace. It never fails the job: a
+        # landing whose record cannot be had is "not checked", never "proven".
+        try:
+            provenance.record(root, checkout.tree, checkout.git_dir, supply_mode, provenance_dir, verify, log)
+        except Exception as exc:  # noqa: BLE001 - any failure leaves no record, which trace reads as not checked
+            log(f"::warning::provenance: GitHub's record could not be written ({type(exc).__name__}: "
+                f"{str(exc)[:200]}); trace reports every landing as not checked")
     return checkout
 
 

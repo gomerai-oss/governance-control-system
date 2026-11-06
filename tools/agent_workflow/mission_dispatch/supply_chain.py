@@ -217,6 +217,9 @@ def pin_lines(base: Path, head: Path, tooling: str, workflows_rel: str) -> List[
     old_rt, new_rt = before.get("runtimes", {}) or {}, after.get("runtimes", {}) or {}
     for runtime in sorted(set(old_rt) | set(new_rt)):
         old, new = old_rt.get(runtime) or {}, new_rt.get(runtime) or {}
+        if not old and new:  # a new row, as when the table is first written: nothing was pinned before it
+            lines.append(f"pins.json adds runtime {runtime} at {new.get('version')}")
+            continue
         changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
         if changed:
             owed = ", ".join(TESTS_OWED.get(runtime, ()))

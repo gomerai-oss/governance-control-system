@@ -643,6 +643,42 @@ class TraceTests(GatewayCase):
         self.assertEqual(self.entries("decision")[0]["record"]["disposition"], "ALLOW")
         self.assertEqual(len(self.entries("boundary")), 1)
 
+    def provenance(self, mode, status):
+        """The record prepare writes beside the session file (ring 4, MISSION-DISPATCH-001 §3l item 4)."""
+        landings = {} if status is None else {self.mission["landing"]: status}
+        (self.outside / "provenance.json").write_text(json.dumps(
+            {"schema": "provenance-record-v1", "mode": mode, "head": self.hand, "source": None,
+             "checked_directly": 0, "landings": landings}), encoding="utf-8")
+
+    def landing(self):
+        body = self.trace({"path": self.EG.APP}, git_dir=self.git_dir)["result"]["structuredContent"]
+        (change,) = [c for c in body["result"]["changes"] if c["kind"] == "mission"]
+        (line,) = [ln for ln in body["lines"] if ln.startswith("mission ")]
+        return change, line
+
+    def test_without_a_record_every_landing_is_not_checked_and_the_git_answer_stands(self):
+        change, line = self.landing()
+        self.assertEqual((change["proven"], change["github_record"], change["git_rules"]), (True, "not checked", []))
+        self.assertTrue(line.endswith(" github-record not-checked"), line)
+
+    def test_enforced_a_landing_is_proven_only_when_github_s_record_passed(self):  # vector 94; AST-4.3
+        for status, proven in (("passed", True), ("finding: G1 landing x is not the merge commit of any merged "
+                                                  "pull request", False), (None, False)):
+            with self.subTest(status=status):
+                self.provenance("enforce", status)
+                change, line = self.landing()
+                self.assertEqual(change["proven"], proven)
+                self.assertEqual(change["github_record"], status or "not checked")
+                self.assertEqual(change["git_rules"], [], "the git rules still pass; GitHub's record decides")
+                self.assertEqual(line.endswith("UNPROVEN github-record"), not proven, line)
+
+    def test_observed_the_git_answer_stands_with_github_s_result_beside_it(self):  # vector 96
+        self.provenance("observe", "finding: G1 not a merged pull request")
+        change, line = self.landing()
+        self.assertEqual((change["proven"], change["github_record"]), (True, "finding: G1 not a merged pull request"))
+        self.assertIn(" github-record finding", line)
+        self.assertNotIn("UNPROVEN", line)
+
     def test_reviewer_seat_may_trace_too(self):
         result = self.trace({"path": self.EG.APP}, seat="a3", git_dir=self.git_dir)["result"]
         self.assertFalse(result["isError"], result)

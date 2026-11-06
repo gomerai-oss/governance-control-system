@@ -75,6 +75,23 @@ and its merge, signed so it can be checked later. Its code is in `tools/agent_wo
   and the agent gets a stand-in that is worthless outside the job. The Cursor CLI keeps its own login. The template
   ships `"enforce"`. Before the agent starts, a readiness request goes through the endpoint, so a login the provider
   will not take there fails the job at once. `"observe"` records that result without changing the run.
+- **Pinned actions and runtimes.** `tools/agent_workflow/credentials_check/pins.json` lists every action the workflows
+  may run, by full commit SHA, and each runtime's version, SHA-256 and registry key. The credentials check flags:
+  - an action that is not pinned, or not listed;
+  - a runtime pin that differs from its row;
+  - any other install in a mission workflow.
+
+  Each PR's check run lists every pin it changes (`PIN-CHANGE`), with the live tests a runtime change owes. Before
+  Claude Code is installed, the npm registry's signature is checked against the pinned key. The template ships
+  `"supply_chain": "observe"`. If you add workflows of your own, add their actions to the table first.
+- **Provenance from GitHub's record.** The gateway's `trace` tool tells an agent which mission made a file. It takes
+  each landing's proof from GitHub's own record of its pull requests (who opened, approved and merged them), never
+  from commit author names. The dispatcher checks that record directly for the newest 10 landings in a job's
+  history, and reports any older one as "not checked", never "proven". A repository that also runs
+  `evidence_graph check --github` on every push to its default branch, in a workflow named `policy-ci.yml` that
+  uploads the result as an `evidence-graph` artifact, gets every landing checked at little cost: the dispatcher
+  reuses that verified graph. This release does not ship such a workflow. Under `"supply_chain": "enforce"`, a
+  landing is reported proven only when GitHub's record agrees.
 
 **Running cost.** The router runs every 5 minutes and the Mission Agent every 10, whether or not a mission is running.
 In a public repository Actions minutes are free. In a private one each run is billed as at least one minute, which can
