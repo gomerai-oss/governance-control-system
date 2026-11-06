@@ -433,6 +433,15 @@ HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass. **Switched on:** t
    `"enforce"` requires `"blast_radius": "enforce"`: only then does the agent run as its own account (§3h item 2),
    which cannot read the runner account's processes or files. `"model_login": "enforce"` with blast radius on
    `"observe"` fails the job before the agent starts. HITL switches to `"enforce"` after AST-1.6 to 1.8 below pass.
+   **Switched on:** this repository's `config.json` sets `"enforce"` (ring 1 amendment switch-on, after AST-1.6 to 1.8
+   passed on 2026-11-06).
+   - **Where they ran.** All three ran locally, because the throwaway repository has no working model login. They
+     used the pipeline's own proxy and dispatcher code, the pinned Claude Code 2.1.305, and bwrap's own PID namespace
+     and empty `/home` and `/tmp` in place of the agent account.
+   - **AST-1.6.** HITL's OAuth login was accepted through the endpoint, which answers limit 22 for an OAuth login.
+   - **AST-1.7.** Under `"observe"`, base64 and hex were still refused by the secrets boundary, as they always were
+     (item 6d, clarified in part 1).
+   - **The first enforced job's readiness check** shows whether the login in `mission-runtime` is accepted.
 
    a. **The proxy holds the login.** The `run` step never puts a Claude Code runtime's login in the runtime's
       environment. It writes the login to a file only the runner account can read, in the job's private folder (not

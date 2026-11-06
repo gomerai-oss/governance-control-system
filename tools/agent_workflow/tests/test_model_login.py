@@ -52,9 +52,10 @@ class ModeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "model_login must be one of"):
                 load_config(path)
 
-    def test_this_repository_observes(self):
+    def test_this_repository_enforces(self):  # switched on after AST-1.6 to 1.8 (2026-11-06)
         shipped = Path(__file__).resolve().parents[1] / "mission_router" / "config.json"
-        self.assertEqual(json.loads(shipped.read_text(encoding="utf-8")).get("model_login"), "observe")
+        config = json.loads(shipped.read_text(encoding="utf-8"))
+        self.assertEqual((config.get("model_login"), config.get("blast_radius")), ("enforce", "enforce"))
 
     def test_the_login_the_runtime_prefers(self):
         self.assertEqual(login.credential({"ANTHROPIC_API_KEY": REAL, "CLAUDE_CODE_OAUTH_TOKEN": "o" * 40}),
@@ -232,6 +233,7 @@ class ModelEndpointTests(unittest.TestCase):
                 self.assertIn(self.post(port, **kw), (403, 405))
         self.assertEqual(_ModelHost.seen, [], "nothing was forwarded")
         self.assertTrue(all(line["decision"] == "refused" for line in self.lines()))
+        self.assertIn("/v1/files", [line.get("path") for line in self.lines()], "logged without the /model prefix")
         text = self.log.read_text()
         self.assertNotIn(REAL, text)
         self.assertNotIn(STANDIN, text)

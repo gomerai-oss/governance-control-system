@@ -59,7 +59,7 @@ in this repository on 2026-11-05, after AST-2.1 to 2.5 passed.
 **Amendment 015 (2026-11-05, HITL direction: ring 1 amendment, with MISSION-DISPATCH-001 Amendment 017):** the router
 reads `"model_login"` from `config.json` with the other modes, and an unknown value stops it. The router holds no model
 login and is otherwise unchanged; the login moves out of the agent's process inside the Mission Agent's `agent` job
-(MISSION-DISPATCH-001 §3i item 6).
+(MISSION-DISPATCH-001 §3i item 6). **Switched on** in this repository on 2026-11-06, after AST-1.6 to 1.8 passed.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
