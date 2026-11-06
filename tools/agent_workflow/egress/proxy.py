@@ -328,7 +328,7 @@ class Egress:
     def record_model(self, method: str, path: str, decision: Decision, status: int = 0, up: int = 0,
                      down: int = 0) -> None:
         line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "route": "model",
-                           "method": method[:10], "path": path.partition("?")[0][:200],
+                           "method": method[:10], "path": _logged_path(path),
                            "decision": "allowed" if decision.allowed else "refused", "reason": decision.reason,
                            "status": status, "bytes_up": up, "bytes_down": down}, sort_keys=True)
         with self.lock, open(self.log_path, "a", encoding="utf-8") as log:
@@ -341,6 +341,14 @@ class Egress:
                           sort_keys=True)
         with self.lock, open(self.log_path, "a", encoding="utf-8") as log:
             log.write(line + "\n")
+
+
+def _logged_path(path: str) -> str:
+    """The model path as logged: without the endpoint's prefix or any query, refused or forwarded alike."""
+    path = path.partition("?")[0]
+    if path == MODEL_PREFIX or path.startswith(MODEL_PREFIX + "/"):
+        path = path[len(MODEL_PREFIX):] or "/"
+    return path[:200]
 
 
 class _Handler(socketserver.BaseRequestHandler):
