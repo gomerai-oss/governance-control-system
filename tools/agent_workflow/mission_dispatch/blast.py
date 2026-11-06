@@ -19,8 +19,10 @@ import json
 import os
 import re
 import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -294,14 +296,21 @@ class AgentEgress:
 
     def __init__(self, runtime: str, blast_mode: str, root: Path, account: Optional[str] = None,
                  run: Runner = _run, popen: Callable[..., Any] = subprocess.Popen, policy: Path = POLICY_FILE,
-                 probe_host: Optional[Callable[[], str]] = None, log: Callable[[str], None] = print) -> None:
+                 probe_host: Optional[Callable[[], str]] = None, log: Callable[[str], None] = print,
+                 model_login: Optional[Mapping[str, str]] = None, exclusive: bool = False) -> None:
+        """``model_login`` (``{"kind", "login", "standin"}``, MISSION-DISPATCH-001 §3i item 6) makes the proxy serve
+        the runtime's model endpoint; ``exclusive`` (``"model_login": "enforce"``) closes the tunnel to the model
+        host. The login reaches the proxy in a file only this account can read, never by environment or argv."""
         if blast_mode not in MODES:
             raise BlastError(f"unknown blast-radius mode {blast_mode!r}")
+        if exclusive and not model_login:
+            raise BlastError("an exclusive model endpoint needs a login")
         if blast_mode == ENFORCE and not account:
             raise BlastError("blast radius is enforced but the agent has no account of its own to run as")
         self.runtime, self.mode, self.root, self.account = runtime, blast_mode, root, account
         self.run, self.popen, self.policy, self.log = run, popen, policy, log
         self.probe_host = probe_host or _probe_host
+        self.model_login, self.exclusive = dict(model_login) if model_login else None, exclusive
         self.proc: Any = None
         self.port = 0
 
@@ -328,20 +337,34 @@ class AgentEgress:
         tooling = str(Path(__file__).resolve().parents[1])
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": tooling, "LANG": "C.UTF-8"}
         err_path = self.root / EGRESS_ERR  # a file, not a pipe: nothing reads it while the agent runs
-        with open(err_path, "wb") as err:
-            self.proc = self.popen([sys.executable, "-B", "-m", "egress", "serve", "--policy", str(self.policy),
-                                    "--runtime", self.runtime, "--mode", self.mode,
-                                    "--log", str(self.root / EGRESS_LOG), "--ready", str(ready)],
-                                   env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
-        deadline = time.monotonic() + EGRESS_START_TIMEOUT
-        while not ready.is_file():
-            if self.proc.poll() is not None:
-                why = err_path.read_bytes()[-300:].decode("utf-8", "replace").strip()
-                raise BlastError(f"the egress proxy did not start: {why}")
-            if time.monotonic() > deadline:
-                raise BlastError("the egress proxy did not start in time")
-            time.sleep(0.05)
-        self.port = int(ready.read_text(encoding="utf-8").strip())
+        argv = [sys.executable, "-B", "-m", "egress", "serve", "--policy", str(self.policy),
+                "--runtime", self.runtime, "--mode", self.mode,
+                "--log", str(self.root / EGRESS_LOG), "--ready", str(ready)]
+        private = None
+        if self.model_login:
+            # A fresh 0700 folder of this account's, outside the job root the agent account is handed parts of;
+            # the proxy reads the file and deletes it before it writes its port.
+            private = Path(tempfile.mkdtemp(prefix="mission-login-"))
+            login_file = private / "login.json"
+            fd = os.open(login_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                json.dump({k: self.model_login[k] for k in ("kind", "login", "standin")}, out)
+            argv += ["--login-file", str(login_file)] + (["--exclusive"] if self.exclusive else [])
+        try:
+            with open(err_path, "wb") as err:
+                self.proc = self.popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+            deadline = time.monotonic() + EGRESS_START_TIMEOUT
+            while not ready.is_file():
+                if self.proc.poll() is not None:
+                    why = err_path.read_bytes()[-300:].decode("utf-8", "replace").strip()
+                    raise BlastError(f"the egress proxy did not start: {why}")
+                if time.monotonic() > deadline:
+                    raise BlastError("the egress proxy did not start in time")
+                time.sleep(0.05)
+            self.port = int(ready.read_text(encoding="utf-8").strip())
+        finally:
+            if private is not None:
+                shutil.rmtree(private, ignore_errors=True)  # the proxy has deleted the file; nothing is left behind
 
     def _close_network(self) -> None:
         for argv in agent_firewall_argv(self.account, self.port):

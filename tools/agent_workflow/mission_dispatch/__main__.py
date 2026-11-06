@@ -37,7 +37,7 @@ from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast, permissions, quarantine
+from . import binding, blast, login, permissions, quarantine
 from .runtimes import BINARIES
 from .dispatch import (
     REFUSAL_MAX_CHARS,
@@ -240,6 +240,16 @@ def cmd_blast_mode(args) -> int:
     return 0
 
 
+def _login_mode(config: dict) -> str:
+    """``"model_login"`` (§3i item 6, ring 1 amendment); an unknown value fails the job."""
+    try:
+        value = login.mode(config)
+    except login.LoginError as exc:
+        raise DispatchError(str(exc)) from None
+    _log(f"model login: {value}")
+    return value
+
+
 def cmd_run(args) -> int:
     job = _job()
     config = load_config()
@@ -248,15 +258,16 @@ def cmd_run(args) -> int:
         binaries = {name: str(Path(args.runtime_dir) / binary) for name, binary in BINARIES.items()}
     log_path = run_agent(job, Path(args.root), os.environ, _home(args), timeout=args.timeout, binaries=binaries,
                          binding_mode=_binding_mode(config), blast_mode=_blast_mode(config),
-                         run_as=args.run_as or None)
+                         run_as=args.run_as or None, login_mode=_login_mode(config), log=_log)
     _log(f"{job.key}: {job.runtime} finished (log: {log_path})")
     return 0
 
 
 def cmd_collect(args) -> int:
     job = _job()
-    result = collect(job, Path(args.root), Path(args.out), os.environ, quarantine_mode=_quarantine_mode(load_config()),
-                     log=_log)
+    config = load_config()
+    result = collect(job, Path(args.root), Path(args.out), os.environ, quarantine_mode=_quarantine_mode(config),
+                     log=_log, login_mode=_login_mode(config))
     _log(f"{job.key}: change accepted: {', '.join(result['paths'])}" + (f"; verdict {result['verdict']}" if result["verdict"] else ""))
     return 0
 

@@ -60,6 +60,15 @@ the plan's `build_scope` instead of the whole checkout. Every GitHub permission 
 own token or an App's, is held to a table. And a change that widens any grant is listed by name for HITL (§3k). The
 mode is set by `"permissions"` in `config.json`.
 
+**Amendment 017 (2026-11-05, HITL direction: ring 1 amendment, with MISSION-ROUTER-001 Amendment 015):** the model
+login stays outside the agent. Until now the runtime holds its model login in its own process environment, and
+`collect` refuses a change only when it contains the login as written; the same login base64-encoded, reversed or
+split would pass. Under this amendment the egress proxy holds the login and adds it to each model request on the way
+out, and a Claude Code runtime is given only a stand-in that is worthless outside the job. `collect` also refuses the
+common encodings of every login and stand-in. The Cursor CLI has no documented way to send its model requests through
+a local endpoint, so it keeps its login (known limit 19). The mode is set by `"model_login"` in `config.json` (§3i
+item 6).
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -114,7 +123,8 @@ Top-level permissions are empty.
 ### 3b. The agent's sandbox
 
 - **Environment.** It holds no GitHub credential: every `*TOKEN*`, `*SECRET*`, `*KEY`, `*PRIVATE*` and `SSH_AUTH_SOCK`
-  variable is dropped, except the runtime's own model login. git is pinned to the job's own git directory, which
+  variable is dropped, except the runtime's own model login (a stand-in, for Claude Code under `"model_login":
+  "enforce"`, §3i item 6). git is pinned to the job's own git directory, which
   lives outside the checkout, with no global or system config.
 - **Claude Code.** `--tools Read,Edit,Write,Glob,Grep` (no shell, web or subagents). `--setting-sources user`, so the
   checkout's own `.claude/` cannot load. `--strict-mcp-config`. Read and edit are allowed in the checkout only.
@@ -411,6 +421,111 @@ HITL switches to `"enforce"` after AST-1.1 to 1.5 below pass. **Switched on:** t
      row: the credentials check fails each, naming the line.
    - **AST-1.5, registry protection.** A plan whose `build_scope` covers the identity registry or the credentials
      register: refused before approval.
+6. **The model login stays outside the agent (Amendment 017).** Ring 1 kept GitHub credentials out of the agent; the
+   model login was the one credential the agent's own process still held (known limit 1). This item moves it out.
+
+   **Mode.** `"model_login"` in `config.json`:
+   - `"observe"` (the default when the key is absent): the runtime keeps its login as today. The encodings check
+     (d) and the readiness check (e) run and record what they find, without refusing anything;
+   - `"enforce"`: (a) to (f) below apply, and a finding refuses;
+   - any other value fails the job, and stops the router.
+
+   `"enforce"` requires `"blast_radius": "enforce"`: only then does the agent run as its own account (§3h item 2),
+   which cannot read the runner account's processes or files. `"model_login": "enforce"` with blast radius on
+   `"observe"` fails the job before the agent starts. HITL switches to `"enforce"` after AST-1.6 to 1.8 below pass.
+
+   a. **The proxy holds the login.** The `run` step never puts a Claude Code runtime's login in the runtime's
+      environment. It writes the login to a file only the runner account can read, in the job's private folder (not
+      the job root the agent account is given), and starts the egress proxy with that file's path. The proxy reads the
+      file once and deletes it, so the value is not in any environment or on any command line. The runtime gets a
+      **stand-in login**: a fresh random value for this run only, which the provider would reject. `collect` and the
+      log scrub treat the stand-in as a login too (§3c).
+   b. **A model endpoint on loopback.** The egress proxy also serves plain HTTP for the runtime's model API, on
+      `127.0.0.1` only. Claude Code is pointed at it with `ANTHROPIC_BASE_URL`, and given the stand-in as its
+      `ANTHROPIC_AUTH_TOKEN`. The proxy forwards a request only if all of these hold:
+      - it comes from loopback;
+      - it carries the run's stand-in exactly;
+      - its method and path are on the runtime's model path list in `mission_dispatch/egress-policy.json`, which the
+        part PR writes from the pinned runtime's own traffic.
+
+      It then drops every authentication header the runtime sent, adds the real login in the form its kind needs
+      (`x-api-key` for an API key, `Authorization: Bearer` for an OAuth token), and sends the request over TLS to the
+      runtime's listed model host, checking the certificate. It returns the provider's answer unchanged. A request
+      that fails any check is refused with no upstream call. Each request is one line of the egress log (time, method,
+      path, decision, status, bytes), never a header. The cap on bytes and the refusal of non-global addresses
+      (§3h item 3) apply to this route as they do to tunnels.
+   c. **No tunnel to the model host.** Under `"enforce"` the runtime's `CONNECT` list no longer holds its model API
+      host: the endpoint is the only way to the provider. The part PR records any other host the pinned runtime still
+      needs; with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` it is expected to need none.
+   d. **Encodings are refused too.** For every login and stand-in given to the runtime, `collect` refuses a patch or
+      commit message that contains any of:
+      - the value itself;
+      - its base64 (standard and URL-safe, with or without padding, from each of the three byte offsets, so a value
+        embedded in longer encoded text is found too);
+      - its base32;
+      - its hex, in either case;
+      - the value reversed;
+      - the value with spaces, newlines, commas, quotes, plus signs or backslashes between its characters (the text
+        is compared with those characters removed).
+
+      This applies to both runtimes. Under `"observe"` it is recorded and not refused.
+
+      **Clarified in part 1:** the secrets boundary (`secrets_boundary`, run by `collect` on the added content and
+      the message) already refused, in both modes, a known login as written, in base64 (both alphabets, from each
+      byte offset), in hex and percent-encoded. So the amendment's opening statement, that a base64-encoded login
+      would pass, was too broad: those forms were already caught. What was not caught is what this check adds:
+      - the value reversed;
+      - its base32;
+      - the value split by separators;
+      - base64 broken across lines;
+      - and every form of the run's stand-in, which the boundary is now also given as a known value.
+
+      `collect` names every form it finds in the run record. Under `"observe"` the boundary's forms are still
+      refused, as before.
+   e. **Readiness.** Before the agent starts, the dispatcher sends one minimal request (a token count) through the
+      endpoint and records the status. Under `"enforce"` a failure fails the job with that status, before any agent
+      runs, so a login the provider will not accept through the endpoint is found at once and not mid-run.
+
+      **Clarified in part 1:** the request is a token count for the job's model, or for the pinned runtime's default
+      (`claude-opus-5-5`) when the plan names none, and only HTTP 200 passes.
+
+   **Clarified in part 1: what the pinned runtime sends.** Claude Code 2.1.305, recorded against a local endpoint
+   with a stand-in, sent only `POST /v1/messages?beta=true`. It carried `Authorization: Bearer <stand-in>` and
+   reached no other host. It honours a path prefix in `ANTHROPIC_BASE_URL`, so the endpoint is
+   `http://127.0.0.1:<port>/model`. The model path list in `egress-policy.json` (`model_endpoints`) is therefore:
+   - `POST /v1/messages`, plus `POST /v1/messages/count_tokens` for readiness;
+   - each with no query or `beta=true`.
+
+   For an OAuth login the proxy also adds `oauth-2025-04-20` to `anthropic-beta`, as Claude Code does for its own
+   OAuth logins. Whether the provider accepts that from the endpoint is limit 22, checked by AST-1.6.
+
+   The proxy serves the endpoint on the same loopback port as its tunnels, and accepts connections from loopback
+   only. A header with a control character in its value, or one given twice, is refused, so nothing can be added to
+   the request sent on.
+   f. **The run record.** `collect` writes where the login was: `proxy` (a Claude Code run under `"enforce"`),
+      `runtime` (a Cursor run, or any run under `"observe"`), plus the readiness status and any encodings found.
+
+   **Live attack tests (AST), on a throwaway repository, each with HITL's OK:**
+   - **AST-1.6, the login is not in the agent.** Under `"enforce"`, a stand-in agent running as `mission-agent`
+     searches everything it can reach for the real login and its encodings, and writes what it finds into its change:
+     - its environment;
+     - every `/proc/<pid>/environ` and `cmdline` it can read;
+     - its home;
+     - the job root it is given.
+
+     Pass: it finds none of them, and `collect` accepts the change. Then a real Claude Code A2 run completes through
+     the endpoint, and its log shows model requests through the endpoint only.
+   - **AST-1.7, an encoded login.** A stand-in writes the run's stand-in login into its change four ways: base64,
+     hex, reversed, and one character per line. A Cursor job with a test `CURSOR_API_KEY` does the same with that key.
+     Pass: `collect` refuses each under `"enforce"`, naming the encoding; under `"observe"` each is recorded and not
+     refused.
+   - **AST-1.8, the endpoint is not a way out.** A stand-in running as `mission-agent` sends to the endpoint:
+     - a path not on the list;
+     - a request without the stand-in, or with another value;
+     - a request naming another host (`Host:` and an absolute URL).
+
+     It also tries a `CONNECT` to the model host. Pass: each is refused and logged, nothing is forwarded, and no log
+     line holds a header value.
 
 ### 3j. Input quarantine (Amendment 014)
 
@@ -671,6 +786,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 - **Pinned.** Actions are pinned by commit SHA. Both runtimes are pinned by exact version and SHA-256.
 - **Model logins stay in the agent job.** A change or message containing one is refused, and the uploaded log is
   scrubbed. Agents have no shell and cannot read outside the checkout, so they do not see the value in the first place.
+  Under `"model_login": "enforce"` (§3i item 6), a Claude Code runtime does not hold its login at all: the egress
+  proxy adds it to each model request, and the runtime has a stand-in. Encodings of a login are refused too.
 - **Bound runs cannot widen themselves (Amendment 011).** The binding library is ordinary code that missions may
   change, so the dispatcher treats its output as a request inside a fixed ceiling, and writes the one MCP command
   itself. The gateway and the library run from the default branch's tooling, never from the checkout the agent edits.
@@ -702,6 +819,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 
 1. **The runtime needs its model login.** The login is in the runtime's process environment. The agent can't read it,
    and a change containing it is refused. A leak would need a runtime bug. Use a dedicated, spend-limited key.
+   **Amendment 017:** under `"model_login": "enforce"`, a Claude Code runtime holds only a stand-in and the egress
+   proxy holds the login (§3i item 6). A Cursor runtime still holds its own (limit 19).
 2. **A2 builds without running the checks.** A3 sees the results on the commit it reviews, and a FAIL sends the
    findings back to A2 for the next round.
 3. **The checks job's network.** Under `"enforce"` (this repository, §3h) the account running the checks has no
@@ -751,6 +870,19 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     narrowed paths are written as allow rules for the record, and `collect` and `publish` refuse any change outside
     `build_scope` (§3c). Narrowing applies to Claude Code, which runs in `dontAsk` mode and so denies any write no
     rule allows. AST-2.4 uses a Claude Code A2.
+19. **The Cursor CLI keeps its login (Amendment 017).** It has no documented way to send its model requests through a
+    local endpoint, and its traffic is TLS end to end inside the tunnel, so the proxy cannot add the login. Its login
+    stays in its environment under both modes. What holds is its sandbox (read-only git as its only shell, reads in
+    the checkout only, secrets denied) and the encodings check. Re-check when the pin changes.
+20. **The login can be used, not taken (Amendment 017).** The endpoint still spends the login on whatever model
+    requests the agent makes; that is its job. A dedicated, spend-limited login is still what bounds the cost.
+21. **The encodings list is finite (Amendment 017).** A transformation not on the list (a cipher with a key the agent
+    makes up) is not found. Under `"enforce"` a Claude Code runtime has only the stand-in to encode; the list matters
+    for Cursor runs and for `"observe"`.
+22. **The provider must accept the login through the endpoint (Amendment 017).** An API key is sent as `x-api-key`
+    whatever the client. Whether an OAuth login made for Claude Code is accepted when sent this way is checked by the
+    part PR and by AST-1.6; readiness (§3i item 6e) finds out on the first job. If it is not accepted, the login in the
+    `mission-runtime` environment becomes an API key (a credentials register change by HITL).
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -831,3 +963,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 78 | Enforced permissions; an App-token step without a literal `repositories:`, or with a `permission-*` its row does not list | The credentials check fails |
 | 79 | Observed permissions; any of vectors 72, 73, 75, 77, 78 | Findings printed and the run's log records what enforcement would refuse; nothing refused |
 | 80 | `"permissions"` set to an unknown value | The job fails |
+| 81 | Enforced model login; a Claude Code job | The runtime's environment holds a stand-in, not the login; the proxy reads the login file and deletes it; model requests go through the endpoint |
+| 82 | Enforced model login; a request to the endpoint without the run's stand-in, or with a path not on the list, or naming another host | Refused, logged with no header value, nothing forwarded |
+| 83 | Enforced model login; the runtime tries `CONNECT` to its model host | Refused: the host is not on its `CONNECT` list |
+| 84 | Enforced model login; a patch or message holding a login or stand-in in base64, base32, hex, reversed, or split by separators | Refused in `collect`, naming the encoding |
+| 85 | Enforced model login; the readiness request fails | The job fails before any agent starts, with the status |
+| 86 | `"model_login": "enforce"` with `"blast_radius": "observe"` | The job fails before any agent starts |
+| 87 | Observed model login; any of vectors 84 or 85 | Recorded in the run record; nothing refused; the runtime keeps its login |
+| 88 | `"model_login"` set to an unknown value | The job fails |
