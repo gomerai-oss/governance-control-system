@@ -321,6 +321,9 @@ def grant_lines(base: Path, head: Path, tooling: str = TOOLING, workflows: str =
                 lines.append(f"seat {seat} adds resource {res}")
     for where, perms in new["workflows"].items():
         before = old["workflows"].get(where, {})
+        if "(repositories)" in before and "(repositories)" not in perms:
+            lines.append(f"{where} drops repositories: (was {before['(repositories)']!r}), so the token reaches "
+                         "every repository the App is installed on")
         for perm, level in perms.items():
             if perm == "(repositories)":
                 if before.get(perm) != level:
@@ -395,9 +398,10 @@ def grant_findings(table: Mapping, workflows: Mapping[str, str]) -> List[str]:
                 if index >= len(rows):
                     findings.append(f"{where} has no row in the permissions table")
                     continue
-                if perms.get("(repositories)") != THIS_REPOSITORY:
+                named = perms.get("(repositories)")
+                if named != THIS_REPOSITORY:
                     findings.append(f"{where} must name repositories: {THIS_REPOSITORY} (this repository only), "
-                                    f"not {perms.get('(repositories)')!r}")
+                                    + (f"not {named!r}" if named is not None else "and names none"))
                 findings += _over(perms, rows[index], where)
                 continue
             job = job_part[4:]

@@ -54,7 +54,8 @@ credentials check refuses a widening of them under `"permissions": "enforce"`. N
 permission or resource: the plan's keys are a closed set (`model.py`), and a `build_scope` that covers a grant file is
 refused as `AUTHORITY`. Because a seat's write grant now follows the plan's `build_scope` (MISSION-DISPATCH-001 §3k
 item 2), the scope HITL approves is also the agent's write grant. The comment in which the router asks HITL for
-`/mission approve <sha>` says so: "A2 may write: <patterns>". An unknown `"permissions"` value stops the router.
+`/mission approve <sha>` says so: "A2 may write: <patterns>". An unknown `"permissions"` value stops the router. **Switched on**
+in this repository on 2026-11-05, after AST-2.1 to 2.5 passed.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
