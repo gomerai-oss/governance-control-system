@@ -37,7 +37,7 @@ from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast, login, permissions, quarantine
+from . import binding, blast, login, permissions, quarantine, registry, supply_chain
 from .runtimes import BINARIES
 from .dispatch import (
     REFUSAL_MAX_CHARS,
@@ -250,6 +250,27 @@ def _login_mode(config: dict) -> str:
     return value
 
 
+def cmd_registry_check(args) -> int:
+    """§3l item 2 (ring 4): the downloaded runtime package against its registry's signature, before it is installed.
+    Under ``"supply_chain": "enforce"`` a failure stops the install; under ``"observe"`` it is a warning."""
+    try:
+        value = supply_chain.mode(load_config())
+    except supply_chain.SupplyChainError as exc:
+        raise DispatchError(str(exc)) from None
+    table_path = Path(__file__).resolve().parents[1] / supply_chain.PINS_TABLE  # the tooling tree's, never the checkout's
+    try:
+        _, row = registry.pins_row(args.runtime, table_path)
+        found = registry.verify(Path(args.package), row)
+    except (registry.RegistryError, supply_chain.SupplyChainError, OSError) as exc:
+        if value == supply_chain.ENFORCE:
+            raise DispatchError(f"{args.runtime}: the registry signature check failed: {exc}") from None
+        _log(f"::warning::{args.runtime}: the registry signature check failed: {exc}; observe: installing anyway")
+        return 0
+    _log(f"{args.runtime}: {found['package']}@{found['version']} verified against the registry's signature "
+         f"(key {found['keyid']}, {found['integrity']} integrity; mode={value})")
+    return 0
+
+
 def cmd_run(args) -> int:
     job = _job()
     config = load_config()
@@ -376,6 +397,9 @@ def main(argv=None) -> int:
     sub.choices["checks"].add_argument("--run-as", help="unprivileged account to run the checks as")
     sub.choices["prepare"].add_argument("--checks-report")
     sub.add_parser("blast-mode")
+    check = sub.add_parser("registry-check")
+    check.add_argument("--runtime", required=True)
+    check.add_argument("--package", required=True)
     for name in ("prepare", "run"):
         sub.choices[name].add_argument("--run-as", default="", help="the agent's own account (blast radius, §3h)")
     sub.choices["run"].add_argument("--runtime-dir", default="", help="where the pinned runtimes are installed")
@@ -387,7 +411,7 @@ def main(argv=None) -> int:
     sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
     args = parser.parse_args(argv)
-    steps = {"blast-mode": cmd_blast_mode, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
+    steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land}
     try:
         return steps[args.step](args)

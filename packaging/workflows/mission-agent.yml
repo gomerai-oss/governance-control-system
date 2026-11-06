@@ -223,7 +223,7 @@ jobs:
           name: checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/checks
 
-      - name: Install Claude Code (pinned by SHA-256)
+      - name: Install Claude Code (pinned by SHA-256, checked against the registry's signature)
         if: steps.due.outputs.due == 'true' && matrix.job.runtime == 'claude-code'
         env:
           BIN: ${{ steps.blast.outputs.bin }}
@@ -231,6 +231,9 @@ jobs:
           pkg="$RUNNER_TEMP/claude-code.tgz"
           curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-${CLAUDE_CODE_VERSION}.tgz" -o "$pkg"
           echo "${CLAUDE_CODE_SHA256}  $pkg" | sha256sum --check --strict
+          # MISSION-DISPATCH-001 §3l item 2 (ring 4): the npm registry's signature, against the key in pins.json.
+          # Under "supply_chain": "enforce" a failure stops here, before anything is installed.
+          python3 -B -m mission_dispatch registry-check --runtime claude-code --package "$pkg"
           if [ -n "$BIN" ]; then  # enforce: root-owned, outside the runner's home
             sudo tar -xzf "$pkg" -C "$BIN" --strip-components=1 --no-same-owner package/claude
             "$BIN/claude" --version
