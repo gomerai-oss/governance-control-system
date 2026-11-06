@@ -1,0 +1,58 @@
+{
+ "schema": "workflow-pins-v1",
+ "spec": "MISSION-DISPATCH-001 \u00a73l items 1 to 3 (ring 4, Amendment 018)",
+ "actions": {
+  "actions/cache": {
+   "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
+   "tag": "v4.3.0"
+  },
+  "actions/checkout": {
+   "sha": "34e114876b0b11c390a56381ad16ebd13914f8d5",
+   "tag": "v4.3.1"
+  },
+  "actions/create-github-app-token": {
+   "sha": "67018539274d69449ef7c02e8e71183d1719ab42",
+   "tag": "v2.1.4"
+  },
+  "actions/download-artifact": {
+   "sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+   "tag": "v4.3.0"
+  },
+  "actions/upload-artifact": {
+   "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+   "tag": "v4.6.2"
+  }
+ },
+ "runtimes": {
+  "claude-code": {
+   "version": "2.1.305",
+   "sha256": "6d123d2953b9623e5f3e399f9984dd137dcad992aab2f810c0eac0040cae894a",
+   "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-{version}.tgz",
+   "registry": {
+    "package": "@anthropic-ai/claude-code-linux-x64",
+    "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+    "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY6Ya7W++7aUPzvMTrezH6Ycx3c+HOKYCcNGybJZSCJq/fd7Qa8uuAKtdIkUQtQiEKERhAmE5lMMJhP8OkDOa2g=="
+   },
+   "attestation": "none published",
+   "provenance": {
+    "version": "2.1.305",
+    "checked": "2026-11-06",
+    "how": "npm registry ECDSA P-256 signature over name@version:integrity verified with openssl against the pinned key; the tarball matches dist.integrity (sha512) and the SHA-256 pin; no npm provenance attestation is published",
+    "by": "Claude Code while drafting the ring 4 spec (#1260), for HITL's review of this table"
+   }
+  },
+  "cursor-cli": {
+   "version": "2026.10.19-6bbf2c4",
+   "sha256": "cf80cc18d8b33bf33e762353977ca1868cfc45290c92c0ffdcef83bb8b37b44f",
+   "url": "https://downloads.cursor.com/lab/{version}/linux/x64/agent-cli-package.tar.gz",
+   "registry": null,
+   "attestation": "none published",
+   "provenance": {
+    "version": "2026.10.19-6bbf2c4",
+    "checked": "2026-11-02",
+    "how": "SHA-256 recorded when the version was pinned, and the CLI's sandbox rules verified live on it (AST-5.3); the publisher does not sign the package (known limit 23)",
+    "by": "recorded at the ring 5 pin; not re-checked by a signature"
+   }
+  }
+ }
+}

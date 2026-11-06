@@ -69,6 +69,17 @@ common encodings of every login and stand-in. The Cursor CLI has no documented w
 a local endpoint, so it keeps its login (known limit 19). The mode is set by `"model_login"` in `config.json` (§3i
 item 6).
 
+**Amendment 018 (2026-11-06, HITL direction: ring 4 of the six-ring security system, with MISSION-ROUTER-001
+Amendment 016):** supply chain and provenance. Ring 4 was published as documents only (`RING-4-SUPPLY-CHAIN-CONTROL-SPEC-001`,
+gates G-R4-01 to 06), and enforcement was deferred. This amendment enforces it for the mission pipeline:
+- every action and runtime the mission workflows run is held to a pins table only HITL can change;
+- a runtime's package is checked against its publisher's registry signature as well as its SHA-256;
+- a changed pin is listed by name for HITL;
+- no part of the pipeline calls a change "proven" on the strength of commit author names: proof is checked against
+  GitHub's own record (§3l).
+
+The mode is set by `"supply_chain"` in `config.json`.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -723,6 +734,146 @@ check is its wall.
    AST-2.4 tests a model's behaviour, so it is re-run when a runtime pin changes. The structural rules (items 2 and 4
    and the §3c scope check) hold whatever the model does.
 
+### 3l. Supply chain and provenance (Amendment 018)
+
+**Threat.** The pipeline runs code it did not write:
+- the GitHub Actions its workflows `uses:`;
+- the two runtimes it downloads;
+- the Python interpreter and system tools on the runner.
+
+Each is pinned today by its maker's own identifier: a commit SHA for an action, and a version and SHA-256 for a
+runtime. But no check holds the pins in place, so a PR could replace `@<sha>` with `@v4` or a new action unseen. No
+check confirms that a pinned runtime is what its registry published under that name, so a wrong SHA-256 typed into a
+pin change would be trusted. And one place reports provenance from text anyone can write: the gateway's `trace` tool
+(§3b) tells an agent a change came from a "proven" mission after a git-only walk (`evidence_graph.walk` without its
+GitHub verifier). That walk reads identities from commit author names and e-mails. Policy CI checks `main` against
+GitHub's record (`evidence_graph check --github`), but the agent is told before any such check. A history forged to
+look like a mission would be reported as one.
+
+**Mode.** `"supply_chain"` in `config.json`:
+- `"observe"` (the default when the key is absent) prints and records each finding without refusing it;
+- `"enforce"` refuses it;
+- any other value fails the job, and stops the router.
+
+HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass.
+
+1. **The pins table.** A new `credentials_check/pins.json` (SPEC-002 `AUTHORITY`, with the rest of `credentials_check/`)
+   lists:
+   - every action the workflows may run, by `owner/repo` (and path), with its full commit SHA and the release tag it
+     was taken from;
+   - each runtime: `claude-code` and `cursor-cli`, each with its version, the SHA-256 of its package, and the URL
+     template it is downloaded from.
+
+   It is written from today's workflows exactly. The credentials check prints a `PIN` finding for each of these:
+   - a `uses:` that is not `owner/repo[/path]@<40 hex>` (a tag, a branch, a short SHA);
+   - an action or SHA not in the table;
+   - a `docker://` image, or a local `./` action in a mission workflow;
+   - a runtime pin in a mission workflow (`CLAUDE_CODE_VERSION`, `CLAUDE_CODE_SHA256`, `CURSOR_CLI_VERSION`,
+     `CURSOR_CLI_SHA256`) that differs from its row;
+   - a download in a mission workflow that is not checked by `sha256sum --check` before use;
+   - a step in a mission workflow that installs anything else: `pip`, `npm`, `apt-get`, or a fetched script piped
+     to a shell.
+
+   The mission workflows are `mission-agent.yml`, `mission-router.yml` and `credentials-check.yml`. The table holds
+   every workflow in `.github/workflows/`, so the first three findings apply to all of them. The two `apt-get install
+   gh` steps in the VRT workflows are listed as findings by the part PR, which proposes their removal; HITL decides.
+   Under `"enforce"` each finding fails the check.
+
+   **Clarified in part 1:**
+   - **What was already held.** A unit test already failed on any `uses:` not pinned by a full commit SHA
+     (`test_router_spec002`, `test_every_workflow_action_is_pinned_to_a_commit`, stress test F8), so the threat's
+     "nothing holds the pins in place" was too broad for that one rule. What nothing held was the rest: which action
+     and which SHA, the runtime pins against a record, the install and download rules, and a change being listed.
+   - **The output.** The credentials check prints the findings as `PIN …` lines, then `pin_findings=<n> mode=<m>`.
+     It prints the changes of item 3 as `PIN-CHANGE …` lines, then `pin_changes=<n>`, so a change is never read as
+     a finding.
+2. **A runtime is checked against its registry's signature.** SHA-256 pins the bytes. It does not prove the bytes are
+   what the publisher released, if a wrong value was typed into a pin change. So the `agent` job also checks the npm
+   registry's signature before it installs Claude Code: the registry signs `<name>@<version>:<integrity>` for every
+   package, with a key it publishes. The key is pinned in `pins.json` (key id and public key), so the job needs nothing
+   it did not have. The job reads the version's `dist.integrity` and `dist.signatures` from the registry, checks the
+   signature with `openssl` against the pinned key, and checks that the downloaded package matches `dist.integrity`.
+   Under `"enforce"` a failure stops the install, before any agent runs.
+
+   **Checked while drafting (2026-11-06, the pinned 2.1.305):**
+   - The registry's ECDSA P-256 signature over `@anthropic-ai/claude-code-linux-x64@2.1.305:<integrity>` verifies with
+     `openssl dgst -sha256 -verify` against key `SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U`, and a changed
+     message fails.
+   - The tarball matches both its `dist.integrity` (sha512) and the workflow's SHA-256 pin.
+   - The package has no npm provenance attestation, so the row records `"attestation": "none published"`. Should one
+     appear, the row records its source repository and workflow.
+
+   npm has rotated its signing key once before (the earlier key expired 2025-01-29). A rotation is a `pins.json`
+   change, shown as a `PIN` line like any other.
+
+   The Cursor CLI's package is not signed by its publisher; it keeps the SHA-256 pin only (limit 23).
+
+   **Clarified in part 1:** the check is `python3 -m mission_dispatch registry-check --runtime claude-code --package
+   <file>`, run in the install step right after `sha256sum --check` and before anything is unpacked. It reads the key
+   from the tooling tree's `pins.json`, never the checkout's. Under `"observe"` a failure is a warning, and the
+   install goes on.
+3. **A pin change is listed, with what it owes.** On a PR, the credentials check prints a `PIN` line for each changed
+   row of `pins.json` and each changed pin in a workflow, compared against the PR's base, like ring 2's `GRANT`
+   lines. For a runtime it also lists the behavioural tests to re-run before the change is merged:
+   - AST-2.4 and AST-3.4 for Claude Code;
+   - AST-3.3 for Cursor;
+   - AST-1.6 for Claude Code, because the endpoint's routes were recorded from the pinned version.
+
+   A runtime row must also carry a `provenance` record naming the version, the date, how it was checked (registry
+   signature, attestation, release notes read) and who checked it. A runtime pin change whose `provenance.version` is
+   not the new version is a finding.
+4. **Proof is checked against GitHub's own record.** No part of the pipeline reports a change as a proven mission on
+   the strength of commit author names or e-mails.
+   - **`prepare`.** It already holds a read-only token, so it checks each landing in the checkout's first-parent
+     history against GitHub's record (`evidence_graph.github_record`, rules G1 to G4). It writes the result,
+     read-only, beside the binding record. At most 500 landings are checked; any beyond that count as not checked.
+   - **The gateway's `trace`** reports a landing as `"proven": true` only when that record passed it. Otherwise it
+     reports `"proven": false` with the reason (`"github_record": "finding: …"` or `"not checked"`). The git-only
+     rules stay in the answer as `"git_rules"`, so the agent can see both.
+   - **Under `"observe"`** `trace` keeps today's answer and adds the GitHub result beside it.
+   - **The rule for new code.** Any part of the pipeline that reports provenance reads GitHub's record, never commit
+     author names alone. Rules that use names (`evidence_graph.chain`) only narrow what GitHub's record is asked.
+5. **The tooling has no third-party dependencies.** The tooling the dispatcher and router run from is the Python
+   standard library plus this repository's own modules. A test walks the import closure of every module the
+   workflows run and fails on any other import, which keeps G-R4-01's intake gate from ever being needed for the
+   pipeline's own code. The interpreter itself is the runner's (limit 24), and the run record writes down its version.
+
+   **Clarified in part 1:**
+   - **The test's scope** is the import closure of the three mission workflows, which is the tooling the dispatcher
+     and router run from: 39 modules today, all of them clean.
+   - **One other workflow is outside it.** A repository-maintenance workflow runs a script that imports `yaml`
+     (PyYAML) from the runner image's own Python. It is not one of the mission workflows. It is listed in the part PR
+     for HITL, like the VRT `apt-get` steps.
+   - **The run record** gives the interpreter as `runner.python`.
+6. **Sources are classified as RING-4-SUPPLY-CHAIN-CONTROL-SPEC-001 §7 requires.**
+   - `FIRST_PARTY_SOT`: this repository's code.
+   - `VENDOR_PINNED`: the actions and runtimes in `pins.json`.
+   - `UNKNOWN`: anything else, refused (item 1).
+
+   G-R4-04 already holds: a plan's keys are a closed set, and no issue, PR or comment text reaches `pins.json` or a
+   workflow, which are `AUTHORITY`.
+7. **Live attack tests (AST), on a throwaway repository, each with HITL's OK:**
+   - **AST-4.1, unpinned actions.** Three PRs:
+     - `actions/checkout@v4` in place of its SHA;
+     - an action pinned by SHA but not in the table;
+     - a `docker://` step.
+
+     Pass: the credentials check fails each, naming the line.
+   - **AST-4.2, a changed runtime pin (live).** Four cases:
+     - A PR moves the Claude Code pin to another real version with its correct SHA-256 but no provenance record.
+       Pass: a `PIN` finding.
+     - With the record added: a `PIN` line listing the tests owed, and a job installs it.
+     - A pin with a wrong SHA-256. Pass: `sha256sum --check` stops the install, and no agent runs.
+     - A pinned registry key that does not match. Pass: the signature check stops the install, and no agent runs.
+   - **AST-4.3, forged authorship.** A commit pushed by hand to the throwaway repository's default branch has the bot's
+     login as its author name and a landing's subject (`Mission <ID>: …`), with no PR behind it. Pass:
+     - the gateway's `trace` reports it `"proven": false`, with GitHub's finding;
+     - policy CI's `evidence_graph check --github` reports it too.
+   - **AST-4.4, a third-party import.** A PR adds `import requests` to a module the dispatcher runs. Pass: the import
+     test fails, naming the module.
+   - **AST-4.5, a pin change is listed.** A PR bumps an action to a newer SHA, with its row in `pins.json`. Pass: a
+     `PIN` line for it, and no finding.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -892,6 +1043,17 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     whatever the client. Whether an OAuth login made for Claude Code is accepted when sent this way is checked by the
     part PR and by AST-1.6; readiness (§3i item 6e) finds out on the first job. If it is not accepted, the login in the
     `mission-runtime` environment becomes an API key (a credentials register change by HITL).
+23. **The Cursor CLI's package is not signed by its publisher (Amendment 018).** It is downloaded from Cursor's site,
+    pinned by version and SHA-256 only. A wrong SHA-256 typed into a pin change would be trusted, so its `provenance`
+    record (§3l item 3) is HITL's own check.
+24. **The runner is GitHub's (Amendment 018).** The `ubuntu-latest` image, its Python, git, `openssl` and `sudo` are
+    neither pinned nor checked by the pipeline. They are trusted as part of the GitHub-hosted machine (§3h item 6),
+    and the run record writes down the interpreter's version.
+25. **A pinned SHA trusts the action's repository (Amendment 018).** A commit SHA pins content, but GitHub Actions has
+    no publisher signature to check. A malicious commit that HITL pins is run. The `PIN` line and HITL's review of it
+    are the gate.
+26. **Proof checks are bounded (Amendment 018).** `prepare` checks at most 500 landings against GitHub's record per
+    job. An older landing is reported `"not checked"`, never `"proven"`.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -980,3 +1142,12 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 86 | `"model_login": "enforce"` with `"blast_radius": "observe"` | The job fails before any agent starts |
 | 87 | Observed model login; any of vectors 84 or 85 | Recorded in the run record; nothing refused; the runtime keeps its login |
 | 88 | `"model_login"` set to an unknown value | The job fails |
+| 89 | Enforced supply chain; a `uses:` by tag, branch or short SHA, an action or SHA not in `pins.json`, or a `docker://` step | The credentials check fails, naming the line |
+| 90 | Enforced supply chain; a mission workflow's runtime pin differs from its `pins.json` row | The credentials check fails |
+| 91 | Enforced supply chain; a mission workflow step installs with `pip`, `npm` or `apt-get`, pipes a fetched script to a shell, or downloads without `sha256sum --check` | The credentials check fails |
+| 92 | Enforced supply chain; the Claude Code package's registry signature does not verify against the pinned key, or the package does not match `dist.integrity` | The install stops; no agent runs |
+| 93 | A PR changes a pin | A `PIN` line for it; for a runtime, the tests owed; a runtime row whose `provenance.version` is not the new version is a finding |
+| 94 | A first-parent commit whose author name is the bot and whose subject reads like a landing, with no merged stage PR behind it | `trace` reports `"proven": false` with GitHub's finding (enforce); policy CI's check reports it |
+| 95 | A module the workflows run imports something outside the standard library and this repository | The import test fails |
+| 96 | Observed supply chain; any of vectors 89 to 94 | Findings printed and recorded; nothing refused; `trace` adds GitHub's result beside today's answer |
+| 97 | `"supply_chain"` set to an unknown value | The job fails |

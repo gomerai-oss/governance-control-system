@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import secrets
 import subprocess
@@ -1040,6 +1041,7 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
     if egress:
         result["egress"] = egress
     result["login"] = {**login.summary(login.read_state(root)), "mode": login_mode, "encodings_found": encoded}
+    result["runner"] = {"python": platform.python_version()}  # the runner's own interpreter (§3l item 5, limit 24)
     (out_dir / RESULT_FILE).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
 

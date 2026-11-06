@@ -19,6 +19,11 @@ line per widening from the base (item 3), then ``grants=<count>``. Grant lines n
 ``PERMISSION <text>`` line per workflow or App-token permission ``credentials_check/grants.json`` does not allow
 (item 4), then ``permission_findings=<count> mode=<mode>``, failing the check only under ``"enforce"``. The lists are
 also written to the step summary when ``GITHUB_STEP_SUMMARY`` is set.
+
+And ring 4's (MISSION-DISPATCH-001 §3l): one ``PIN <text>`` finding per action, runtime pin, download or install the
+pins table ``credentials_check/pins.json`` does not allow (items 1 and 3), then ``pin_findings=<count> mode=<mode>``,
+failing the check only under ``"supply_chain": "enforce"``; and, with ``--base``, one ``PIN-CHANGE <text>`` line per
+changed pin (item 3), then ``pin_changes=<count>``, which never fail the check.
 """
 
 from __future__ import annotations
@@ -27,12 +32,12 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from mission_router.accounts import identity_mode
 from mission_router.router import load_config
 from mission_router import substrate
-from mission_dispatch import permissions
+from mission_dispatch import permissions, supply_chain
 
 from .check import RegisterError, check, read_workflows
 
@@ -69,6 +74,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if table_path.is_file() else [f"no permissions table at {args.tooling}/{permissions.GRANTS_TABLE}"])
         grants = (permissions.grant_lines(Path(args.base), root, args.tooling, args.workflows or ".github/workflows")
                   if args.base else [])
+        supply_mode = supply_chain.mode(config)
+        pins_path = root / args.tooling / supply_chain.PINS_TABLE
+        on_pins = (supply_chain.pin_findings(supply_chain.read_pins(pins_path), workflows)
+                   if pins_path.is_file() else [f"no pins table at {args.tooling}/{supply_chain.PINS_TABLE}"])
+        pin_changes = (supply_chain.pin_lines(Path(args.base), root, args.tooling, args.workflows or ".github/workflows")
+                       if args.base else [])
     except (OSError, ValueError, RegisterError, UnicodeDecodeError) as exc:
         print(f"credentials_check: {exc}", file=sys.stderr)
         return 2
@@ -88,16 +99,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     for line in grants:
         print(f"GRANT {line}")
     print(f"grants={len(grants)} base={'given' if args.base else 'none'}")
+    for finding in on_pins:
+        print(f"PIN {finding}")
+    print(f"pin_findings={len(on_pins)} mode={supply_mode}")
+    for line in pin_changes:
+        print(f"PIN-CHANGE {line}")
+    print(f"pin_changes={len(pin_changes)} base={'given' if args.base else 'none'}")
     for finding in findings:
         print(f"FINDING {finding}")
     print(f"findings={len(findings)} mode={mode}")
-    _summary(on_descriptions, permissions_mode, grants, bool(args.base), on_table)
+    _summary(on_descriptions, permissions_mode, grants, bool(args.base), on_table, on_pins, supply_mode, pin_changes)
     return 1 if ((findings and mode == "enforce") or (on_substrate and substrate_mode == "enforce")
-                 or ((on_descriptions or on_table) and permissions_mode == "enforce")) else 0
+                 or ((on_descriptions or on_table) and permissions_mode == "enforce")
+                 or (on_pins and supply_mode == "enforce")) else 0
 
 
 def _summary(descriptions: List[str], permissions_mode: str, grants: List[str], based: bool,
-             table: List[str]) -> None:
+             table: List[str], pins: Sequence[str] = (), supply_mode: str = "observe",
+             pin_changes: Sequence[str] = ()) -> None:
     """Ring 2's lists in the check run's summary (MISSION-DISPATCH-001 §3k items 1, 3 and 4)."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
@@ -111,6 +130,13 @@ def _summary(descriptions: List[str], permissions_mode: str, grants: List[str], 
         out.append("No base tree was given, so widenings were not compared.")
     else:
         out += [f"- {g}" for g in grants] or ["This change widens no grant."]
+    out += ["", f"### Pinned actions and runtimes ({supply_mode})", ""]
+    out += [f"- {p}" for p in pins] or ["Every action and runtime is pinned and in the table."]
+    out += ["", "### Pin changes", ""]
+    if not based:
+        out.append("No base tree was given, so pins were not compared.")
+    else:
+        out += [f"- {p}" for p in pin_changes] or ["This change moves no pin."]
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(out) + "\n")

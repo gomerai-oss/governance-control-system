@@ -60,6 +60,12 @@ in this repository on 2026-11-05, after AST-2.1 to 2.5 passed.
 reads `"model_login"` from `config.json` with the other modes, and an unknown value stops it. The router holds no model
 login and is otherwise unchanged; the login moves out of the agent's process inside the Mission Agent's `agent` job
 (MISSION-DISPATCH-001 §3i item 6). **Switched on** in this repository on 2026-11-06, after AST-1.6 to 1.8 passed.
+**Amendment 016 (2026-11-06, HITL direction: ring 4, with MISSION-DISPATCH-001 Amendment 018):** the router's own
+workflow (`mission-router.yml`) is held to the same pins table, `credentials_check/pins.json`. Every action it runs must
+be pinned by full commit SHA and listed (MISSION-DISPATCH-001 §3l item 1). The router reads `"supply_chain"` from
+`config.json` with the other modes, and an unknown value stops it. The router's merge decisions already rest on GitHub's
+own record, not on commit author names: the PR's author and merger from the API, and the recorded push (§5a, Amendment
+011). This amendment states that as a rule for any provenance the router reports.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -667,3 +673,5 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 112 | The router asks HITL to approve a plan | Its comment lists "A2 may write:" with the `build_scope` patterns |
 | 113 | `"permissions"` set to an unknown value | The router stops |
 | 114 | `"model_login"` set to an unknown value | The router stops |
+| 115 | Enforced supply chain; a PR adds an unpinned or unlisted action to `mission-router.yml` | The credentials check fails |
+| 116 | `"supply_chain"` set to an unknown value | The router stops |
