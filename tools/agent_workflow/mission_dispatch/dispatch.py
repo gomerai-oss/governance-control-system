@@ -78,9 +78,10 @@ from mission_router.gate import INSTRUCTION_FAMILIES, classify_or_raise
 from router_spec002.policy import load_tables, normalize_path
 from mission_router.state import AWAIT_A2, AWAIT_A3, PAUSED, MissionState
 
-from . import binding, blast, quarantine
+from . import binding, blast, login, quarantine
 from .runtimes import (
     BINARIES,
+    CLAUDE_CODE,
     CURSOR_CLI,
     DELETIONS_FILE,
     INBOX_DIR,
@@ -469,7 +470,14 @@ def run_canary(root: Path) -> str:
 
 def known_secrets(root: Path, environ: Mapping[str, str]) -> List[str]:
     canary = run_canary(root)
-    return secret_values(environ) + ([canary] if canary else [])
+    standin = login.standin_of(root)
+    return secret_values(environ) + ([standin] if standin else []) + ([canary] if canary else [])
+
+
+def login_values(root: Path, environ: Mapping[str, str]) -> List[str]:
+    """Every login and stand-in given to this run's runtime (§3c, §3i item 6)."""
+    standin = login.standin_of(root)
+    return secret_values(environ) + ([standin] if standin else [])
 
 
 # ------------------------------------------------------------------ the task
@@ -857,10 +865,40 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
     return checkout
 
 
+def model_login_plan(job: Job, environ: Mapping[str, str], login_mode: str, blast_mode: str,
+                     policy: Path = blast.POLICY_FILE) -> Dict[str, Any]:
+    """Where this run's model login goes (§3i item 6): the state ``login.json`` records, plus the endpoint and the
+    proxy's login when the proxy serves one. Raises when ``"enforce"`` cannot be met."""
+    if login_mode not in login.MODES:
+        raise DispatchError(f"unknown model-login mode {login_mode!r}")
+    if login_mode == login.ENFORCE and blast_mode != blast.ENFORCE:
+        raise DispatchError("model_login is enforced but blast_radius is not: the agent and the proxy would share an "
+                            "account, so the login cannot be kept from the agent")
+    state: Dict[str, Any] = {"mode": login_mode, "placement": "runtime", "kind": "", "readiness": None}
+    found = login.credential(environ) if job.runtime == CLAUDE_CODE else None
+    if found is None:
+        return {"state": state, "endpoint": None, "proxy_login": None}
+    from egress.proxy import PolicyError, load_model_endpoints  # the tooling tree's copy, as the proxy itself
+    try:
+        endpoint = load_model_endpoints(policy.read_text(encoding="utf-8")).get(job.runtime)
+    except (OSError, PolicyError) as exc:
+        raise DispatchError(f"the egress policy cannot be read for the model endpoint: {exc}") from None
+    if endpoint is None:
+        if login_mode == login.ENFORCE:
+            raise DispatchError(f"model_login is enforced but the egress policy has no model endpoint for {job.runtime}")
+        return {"state": state, "endpoint": None, "proxy_login": None}
+    kind, value = found
+    standin = login.new_standin()
+    state.update({"kind": kind, "standin": standin,
+                  "placement": "proxy" if login_mode == login.ENFORCE else "runtime"})
+    return {"state": state, "endpoint": endpoint, "proxy_login": {"kind": kind, "login": value, "standin": standin}}
+
+
 def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, timeout: float = DEFAULT_TIMEOUT,
               binaries: Mapping[str, str] = BINARIES, now: Optional[datetime] = None,
               binding_mode: str = binding.OFF, blast_mode: str = blast.OBSERVE, run_as: Optional[str] = None,
-              egress: Optional["blast.AgentEgress"] = None) -> Path:
+              egress: Optional["blast.AgentEgress"] = None, login_mode: str = login.OBSERVE,
+              log: Callable[[str], None] = _stderr) -> Path:
     """Start the runtime in the prepared checkout with no GitHub credential. Returns the log path.
 
     The runtime's way out is the egress proxy (§3h). With ``run_as`` (required under enforce) it runs as that
@@ -882,11 +920,35 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
     canary = run_canary(root)
     if canary:
         env[CANARY_ENV] = canary
+    plan = model_login_plan(job, environ, login_mode, blast_mode)
+    state, endpoint, proxy_login = plan["state"], plan["endpoint"], plan["proxy_login"]
     try:
-        egress = egress or blast.AgentEgress(job.runtime, blast_mode, root, run_as)
+        egress = egress or blast.AgentEgress(job.runtime, blast_mode, root, run_as, model_login=proxy_login,
+                                             exclusive=state["placement"] == "proxy")
         for name in blast.NO_PROXY_ENV:
             env.pop(name, None)
         env.update(egress.start())
+        serving = endpoint is not None and getattr(egress, "model_login", None) and getattr(egress, "port", 0)
+        if serving:
+            state["readiness"] = login.readiness(egress.port, state["standin"], endpoint.readiness_route,
+                                                 job.model or endpoint.readiness_model)
+            if not state["readiness"]["ok"]:
+                if login_mode == login.ENFORCE:
+                    login.write_state(root, state)
+                    raise blast.BlastError("the model login is not accepted through the endpoint "
+                                           f"({state['readiness']['reason']}); no agent was started")
+                log(f"::warning::model login: the endpoint's readiness request failed "
+                    f"({state['readiness']['reason']}); observe: the runtime keeps its login")
+        elif endpoint is not None and login_mode == login.ENFORCE:
+            raise blast.BlastError("model_login is enforced but the egress proxy serves no model endpoint")
+        if state["placement"] == "proxy":
+            for name in login.CLAUDE_LOGIN_ENV:
+                env.pop(name, None)
+            env[login.BASE_URL_ENV] = f"http://127.0.0.1:{egress.port}/model"
+            env[login.STANDIN_ENV] = state["standin"]
+        login.write_state(root, state)
+        log(f"model login: {state['placement']} (mode={login_mode}"
+            + (f", readiness {state['readiness']['reason']}" if state["readiness"] else "") + ")")
         if run_as:
             env = blast.account_env(env, run_as, environ.get("HOME", ""))
             mine = (checkout.tree, checkout.git_dir, binding.binding_dir(root) / binding.EVIDENCE_DIR)
@@ -926,7 +988,8 @@ def _staged(checkout: Checkout, base: str, git: Mapping[str, str]) -> Tuple[List
 
 
 def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
-            quarantine_mode: str = quarantine.OBSERVE, log: Callable[[str], None] = _stderr) -> dict:
+            quarantine_mode: str = quarantine.OBSERVE, log: Callable[[str], None] = _stderr,
+            login_mode: str = login.OBSERVE) -> dict:
     """Check the agent's change and write it to ``out_dir`` as a patch plus a message."""
     checkout = Checkout(root)
     git = git_env(environ)
@@ -950,8 +1013,15 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
     if len(patch.encode("utf-8")) > PATCH_MAX_BYTES:
         raise DispatchError(f"the change is larger than {PATCH_MAX_BYTES} bytes")
     message = read_message(raw, job, verdict)
-    if leaks(patch, secret_values(environ)) or leaks(message, secret_values(environ)):
+    values = login_values(root, environ)
+    if leaks(patch, values) or leaks(message, values):
         raise DispatchError("the change contains the runtime's model login; refusing to hand it on")
+    encoded = login.encodings_found(patch + "\n" + message, values)
+    if encoded:
+        reason = "the change contains the runtime's model login encoded (" + ", ".join(encoded) + ")"
+        if login_mode == login.ENFORCE:
+            raise DispatchError(reason + "; refusing to hand it on")
+        log(f"::warning::{reason}; observe: not refused")
     out_dir.mkdir(parents=True, exist_ok=True)
     admitted = boundary.admit_output(added_content(checkout, job.base_sha, git), {"message": message},
                                      known_secrets(root, environ))
@@ -969,6 +1039,7 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
     egress = blast.keep_egress(root, out_dir)
     if egress:
         result["egress"] = egress
+    result["login"] = {**login.summary(login.read_state(root)), "mode": login_mode, "encodings_found": encoded}
     (out_dir / RESULT_FILE).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
 

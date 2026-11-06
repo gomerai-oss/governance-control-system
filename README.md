@@ -70,6 +70,10 @@ and its merge, signed so it can be checked later. Its code is in `tools/agent_wo
   workflow's `permissions` or an App-token step, the credentials check flags it until the table says the same, and
   will refuse it once you set `"permissions": "enforce"` in `config.json`. Widen the table only on purpose: each
   PR's check run also lists every grant it widens (`GRANT` lines).
+- **Model login.** With `"model_login": "enforce"` (which needs `"blast_radius": "enforce"`), a Claude Code agent
+  never holds its model login. The egress proxy keeps it and adds it to each model request at a loopback endpoint,
+  and the agent gets a stand-in that is worthless outside the job. The Cursor CLI keeps its own login. The template
+  ships `"observe"`, which records whether the login would work through the endpoint without changing the run.
 
 **Running cost.** The router runs every 5 minutes and the Mission Agent every 10, whether or not a mission is running.
 In a public repository Actions minutes are free. In a private one each run is billed as at least one minute, which can

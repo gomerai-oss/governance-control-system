@@ -56,6 +56,10 @@ refused as `AUTHORITY`. Because a seat's write grant now follows the plan's `bui
 item 2), the scope HITL approves is also the agent's write grant. The comment in which the router asks HITL for
 `/mission approve <sha>` says so: "A2 may write: <patterns>". An unknown `"permissions"` value stops the router. **Switched on**
 in this repository on 2026-11-05, after AST-2.1 to 2.5 passed.
+**Amendment 015 (2026-11-05, HITL direction: ring 1 amendment, with MISSION-DISPATCH-001 Amendment 017):** the router
+reads `"model_login"` from `config.json` with the other modes, and an unknown value stops it. The router holds no model
+login and is otherwise unchanged; the login moves out of the agent's process inside the Mission Agent's `agent` job
+(MISSION-DISPATCH-001 §3i item 6).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -662,3 +666,4 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 111 | A plan carrying a key such as `tools`, `permissions` or `resources` | Refused: unknown keys |
 | 112 | The router asks HITL to approve a plan | Its comment lists "A2 may write:" with the `build_scope` patterns |
 | 113 | `"permissions"` set to an unknown value | The router stops |
+| 114 | `"model_login"` set to an unknown value | The router stops |

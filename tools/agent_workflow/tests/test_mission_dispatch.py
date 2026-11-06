@@ -58,6 +58,19 @@ from mission_router.model import (failures_since_retry, parse_manifest, verdict_
 from mission_router.state import AWAIT_A1, AWAIT_A2, AWAIT_A3, PAUSED, MissionState
 
 MID = "M-DEMO-001"
+
+# A Claude Code run with a model login sends one readiness request through the egress proxy (§3i item 6e). No unit
+# test may reach the network, so the request is stubbed for the whole module; tests/test_model_login.py tests it.
+_READINESS = mock.patch("mission_dispatch.login.readiness",
+                        return_value={"ok": True, "status": 200, "reason": "accepted"})
+
+
+def setUpModule():
+    _READINESS.start()
+
+
+def tearDownModule():
+    _READINESS.stop()
 BOT = "github-actions[bot]"
 HITL = {"hitl-user"}
 A2B, A3B = "agent-a2[bot]", "agent-a3[bot]"
@@ -1428,7 +1441,9 @@ class AgentEgressTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_agent(self, **kw):
-        with mock.patch("mission_dispatch.dispatch.Checkout") as checkout:
+        ready = {"ok": True, "status": 200, "reason": "accepted"}
+        with mock.patch("mission_dispatch.dispatch.Checkout") as checkout, \
+                mock.patch("mission_dispatch.login.readiness", return_value=ready):  # no network in unit tests
             checkout.return_value = SimpleNamespace(tree=self.work / "checkout", git_dir=self.work / "git",
                                                     empty=self.work / "empty")
             return run_agent(self.job, self.work, self.env, kw.pop("home", self.root), timeout=60, **kw)
