@@ -37,7 +37,7 @@ from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast, login, permissions, quarantine, registry, supply_chain
+from . import binding, blast, login, permissions, provenance, quarantine, registry, supply_chain
 from .runtimes import BINARIES
 from .dispatch import (
     REFUSAL_MAX_CHARS,
@@ -209,13 +209,59 @@ def _quarantine_mode(config: dict) -> str:
     return value
 
 
+def _supply_mode(config: dict) -> str:
+    """``"supply_chain"`` (§3l, ring 4); an unknown value fails the job."""
+    try:
+        value = supply_chain.mode(config)
+    except supply_chain.SupplyChainError as exc:
+        raise DispatchError(str(exc)) from None
+    _log(f"supply chain: {value}")
+    return value
+
+
+def _landing_verifier(config: dict, repo: str, token: str):
+    """GitHub's record of a landing (rules G1-G4), with every login checked by account ID, as policy CI checks it."""
+    from evidence_graph.github_record import verifier
+    from mission_router.accounts import AccountGuard, GuardedGitHub, expected_accounts, identity_mode
+    registry_path = Path(__file__).resolve().parents[3] / config["identity_registry"]
+    guard = AccountGuard(identity_mode(config), _log)
+    guard.expect(expected_accounts(config, registry_path.read_text(encoding="utf-8")
+                                   if registry_path.is_file() else None))
+    return verifier(GuardedGitHub(GitHub(token, repo), guard))
+
+
+def cmd_provenance_fetch(args) -> int:
+    """The plan job (§3l item 4): hand policy CI's newest verified evidence graph to this run's agent jobs. A
+    failure is a warning: every landing is then "not checked", never "proven"."""
+    config = load_config()
+    try:
+        source = provenance.fetch(GitHub(_env("GITHUB_TOKEN"), args.repo), _env("GITHUB_TOKEN"),
+                                  config["default_branch"], Path(args.out))
+    except (provenance.ProvenanceError, GitHubError, OSError, ValueError) as exc:
+        _log(f"::warning::provenance: {str(exc)[:400]}")
+        return 0
+    _log(f"provenance: policy CI run {source['run_id']} at {source['run_head'][:12]} "
+         f"(graph {source['graph_digest'][:12]}, artifact sha256 {source['artifact_sha256'][:12]})")
+    return 0
+
+
 def cmd_prepare(args) -> int:
     job = _job()
     config = load_config()
     _quarantine_mode(config)
-    prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), _env("GITHUB_TOKEN"), os.environ, _home(args),
+    token = _env("GITHUB_TOKEN")
+    binding_mode = _binding_mode(config)
+    verify = None
+    if binding_mode == binding.ENFORCE:
+        try:
+            verify = _landing_verifier(config, args.repo, token)
+        except (OSError, ValueError) as exc:
+            _log(f"::warning::provenance: no direct check of GitHub's record ({exc})")
+    prepare(job, Path(args.root), CLONE_URL.format(repo=args.repo), token, os.environ, _home(args),
             config["default_branch"], Path(args.checks_report) if args.checks_report else None,
-            binding_mode=_binding_mode(config), permissions_mode=_permissions_mode(config))
+            binding_mode=binding_mode, permissions_mode=_permissions_mode(config),
+            supply_mode=_supply_mode(config), verify=verify, log=_log,
+            provenance_dir=Path(args.provenance) if args.provenance else None)
     _log(f"{job.key}: checkout ready at {job.base_sha}")
     return 0
 
@@ -396,6 +442,10 @@ def main(argv=None) -> int:
     sub.choices["checks"].add_argument("--timeout", type=float, default=900.0)
     sub.choices["checks"].add_argument("--run-as", help="unprivileged account to run the checks as")
     sub.choices["prepare"].add_argument("--checks-report")
+    sub.choices["prepare"].add_argument("--provenance", default="", help="policy CI's graph, handed over by plan")
+    fetch = sub.add_parser("provenance-fetch")
+    fetch.add_argument("--repo", required=True)
+    fetch.add_argument("--out", required=True)
     sub.add_parser("blast-mode")
     check = sub.add_parser("registry-check")
     check.add_argument("--runtime", required=True)
@@ -411,7 +461,7 @@ def main(argv=None) -> int:
     sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
     args = parser.parse_args(argv)
-    steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
+    steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land}
     try:
         return steps[args.step](args)

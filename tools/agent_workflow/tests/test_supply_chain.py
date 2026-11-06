@@ -164,6 +164,12 @@ class PinChangeTests(unittest.TestCase):  # vector 93; AST-4.5
     def test_no_change_no_line(self):
         self.assertEqual(self.lines(), [])
 
+    def test_a_new_table_adds_rows_and_owes_nothing(self):
+        (self.base / "tools" / "agent_workflow" / sc.PINS_TABLE).unlink()
+        lines = self.lines()
+        self.assertIn("pins.json adds runtime claude-code at 2.1.305", lines)
+        self.assertFalse(any("re-run before merging" in line for line in lines), lines)
+
     def test_a_moved_action_and_a_changed_runtime_are_listed_with_what_they_owe(self):
         path = self.head / "tools" / "agent_workflow" / sc.PINS_TABLE
         doc = json.loads(path.read_text())

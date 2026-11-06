@@ -833,6 +833,32 @@ HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass.
    - **Under `"observe"`** `trace` keeps today's answer and adds the GitHub result beside it.
    - **The rule for new code.** Any part of the pipeline that reports provenance reads GitHub's record, never commit
      author names alone. Rules that use names (`evidence_graph.chain`) only narrow what GitHub's record is asked.
+
+   **Clarified in part 2 (HITL, 2026-11-06): where `prepare` gets GitHub's record.** Checking it directly was
+   measured at about 11 API calls and 4.6 seconds per landing: this repository's 15 landings took 168 calls and 69
+   seconds. The cost grows with every mission, and the workflow token allows about 1,000 calls an hour, so checking
+   up to 500 landings in every job was not workable. HITL chose to reuse what policy CI already does.
+   - **Policy CI.** On every push to the default branch, `policy-ci.yml` checks every landing against GitHub's
+     record (`evidence_graph check --github`) and uploads the graph as the `evidence-graph` artifact.
+   - **The `plan` job** may read Actions. It takes the newest such artifact: from a completed `push` run of
+     `.github/workflows/policy-ci.yml` on the default branch, in this repository. It re-checks the graph's schema,
+     its own digest, and that its head is the run's head. It hands the graph to this run's agent jobs as the
+     `provenance` artifact, with its source (run id and head, artifact id, the zip's SHA-256, the graph's digest).
+   - **The token stays in the API.** The artifact link is asked for without following its redirect, and the
+     redirect, which must be `https`, is followed without the token. So the token never leaves the GitHub API.
+   - **The `agent` job** therefore needs no new permission.
+   - **`prepare`**, for a bound job, re-checks the handed graph and writes `binding/provenance.json`, read-only.
+     For each landing in the checkout's first-parent history it records one of:
+     - `passed` or `finding: <rule> <detail>`, from the graph;
+     - a direct check, for at most 10 landings the graph does not hold;
+     - `not checked`, beyond that, or when GitHub could not be read, or when the landing fails the git rule R1 (which
+       GitHub's record is never asked about).
+
+     A record that cannot be written is a warning, never a failure.
+   - **The gateway's `trace`** gives each landing `"github_record"` and `"git_rules"`. Its text line ends
+     `github-record <passed|finding|not-checked>`. Under `"enforce"`, `"proven"` is true only when both pass, and an
+     unproven line also ends `UNPROVEN github-record`.
+   - **Measured on this repository's history:** 15 landings, all `passed`, from one graph, and 0 checked directly.
 5. **The tooling has no third-party dependencies.** The tooling the dispatcher and router run from is the Python
    standard library plus this repository's own modules. A test walks the import closure of every module the
    workflows run and fails on any other import, which keeps G-R4-01's intake gate from ever being needed for the
@@ -1052,8 +1078,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 25. **A pinned SHA trusts the action's repository (Amendment 018).** A commit SHA pins content, but GitHub Actions has
     no publisher signature to check. A malicious commit that HITL pins is run. The `PIN` line and HITL's review of it
     are the gate.
-26. **Proof checks are bounded (Amendment 018).** `prepare` checks at most 500 landings against GitHub's record per
-    job. An older landing is reported `"not checked"`, never `"proven"`.
+26. **Proof checks are bounded (Amendment 018).** GitHub's record comes from policy CI's newest graph on the default
+    branch. At most 10 landings the graph does not hold are checked directly per job; any beyond that are reported
+    `"not checked"`, never `"proven"` (clarified in part 2). The graph is only as fresh as policy CI's last push run,
+    and an artifact is kept for at most 90 days, so it is a cache of GitHub's record, not the evidence of record
+    itself (ring 6).
 
 ## 8. Predicted vectors (A3 verifies)
 

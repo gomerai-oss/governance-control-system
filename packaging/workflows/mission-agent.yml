@@ -94,6 +94,24 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m mission_dispatch plan --repo "$GITHUB_REPOSITORY"
 
+      # MISSION-DISPATCH-001 §3l item 4 (ring 4): policy CI's newest evidence graph from a push to the default branch,
+      # every landing checked there against GitHub's own record, handed to this run's agent jobs. A failure is a
+      # warning: trace then reports every landing as "not checked", never "proven".
+      - name: Fetch policy CI's verified evidence graph
+        if: steps.plan.outputs.count != '0'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -B -m mission_dispatch provenance-fetch --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/provenance"
+
+      - name: Hand it to the agent jobs
+        if: steps.plan.outputs.count != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provenance
+          path: ${{ runner.temp }}/provenance
+          if-no-files-found: ignore
+          retention-days: 1
+
   checks:
     name: checks ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
     needs: plan
@@ -223,6 +241,14 @@ jobs:
           name: checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/checks
 
+      - name: Fetch the verified evidence graph (for the gateway's trace, §3l item 4)
+        if: steps.due.outputs.due == 'true'
+        continue-on-error: true  # without it every landing is "not checked", never "proven"
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: provenance
+          path: ${{ runner.temp }}/provenance
+
       - name: Install Claude Code (pinned by SHA-256, checked against the registry's signature)
         if: steps.due.outputs.due == 'true' && matrix.job.runtime == 'claude-code'
         env:
@@ -276,7 +302,7 @@ jobs:
           PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
         run: >-
           python3 -m mission_dispatch prepare --repo "$GITHUB_REPOSITORY"
-          --root "$JOB_ROOT" --checks-report "$RUNNER_TEMP/checks" --run-as "$RUN_AS"
+          --root "$JOB_ROOT" --checks-report "$RUNNER_TEMP/checks" --run-as "$RUN_AS" --provenance "$RUNNER_TEMP/provenance"
 
       - name: Run the agent (no GitHub token)
         if: steps.due.outputs.due == 'true'
