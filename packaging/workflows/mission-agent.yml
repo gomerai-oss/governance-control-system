@@ -142,6 +142,14 @@ jobs:
           SUBSTRATE_RUNNER: ${{ runner.environment }}
         run: python3 -B -m mission_router.substrate
 
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6; the agent never sees it)
+        env:
+          LANE: ${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-checks-$LANE" >> "$GITHUB_ENV"
+
       - name: Is this lane still due?
         id: due
         if: matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
@@ -178,6 +186,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
   agent:
     name: agent ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
     needs: [plan, checks]
@@ -208,6 +225,14 @@ jobs:
         env:
           SUBSTRATE_RUNNER: ${{ runner.environment }}
         run: python3 -B -m mission_router.substrate
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6; the agent never sees it)
+        env:
+          LANE: ${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-agent-$LANE" >> "$GITHUB_ENV"
 
       - name: Is this lane still due?
         id: due
@@ -368,6 +393,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-agent-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
   publish:
     name: publish ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
     needs: [plan, agent]
@@ -398,6 +432,14 @@ jobs:
         env:
           SUBSTRATE_RUNNER: ${{ runner.environment }}
         run: python3 -B -m mission_router.substrate
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6; the agent never sees it)
+        env:
+          LANE: ${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-publish-$LANE" >> "$GITHUB_ENV"
 
       - name: Fetch the agent's change
         id: fetch
@@ -453,6 +495,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-publish-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
   report:
     name: report ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
     needs: [plan, checks, agent, publish]
@@ -483,6 +534,14 @@ jobs:
           SUBSTRATE_RUNNER: ${{ runner.environment }}
         run: python3 -B -m mission_router.substrate
 
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6; the agent never sees it)
+        env:
+          LANE: ${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-report-$LANE" >> "$GITHUB_ENV"
+
       - name: Fetch an out-of-compute record
         continue-on-error: true  # none unless the runtime ran out of compute; the run is then reported as a failure
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -510,6 +569,15 @@ jobs:
         run: >-
           python3 -m mission_dispatch report --repo "$GITHUB_REPOSITORY" --capacity "$RUNNER_TEMP/capacity/capacity.json"
           --refusal "$RUNNER_TEMP/refusal-collect/refusal.txt" --refusal "$RUNNER_TEMP/refusal-publish/refusal.txt"
+
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-report-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
 
   land:
     name: land ${{ matrix.land.stack_id }}

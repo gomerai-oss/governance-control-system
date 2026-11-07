@@ -1164,6 +1164,39 @@ HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
      and recomputing router decisions, come with the producers in part 2.
    - **The mode** is read by `load_config`, so an unknown value stops the router and fails every dispatcher job alike.
 
+   **Clarified in part 2 (the dispatcher's, checks job's, gateway's, egress proxy's and credentials check's records):**
+   - **A chain is one job's.** A workflow run's jobs run on different machines, so each job keeps its own chain,
+     with the id `gh-<run id>-<attempt>-<job>-<mission>-<role>-r<round>` (the credentials check's is
+     `gh-<run id>-<attempt>-credentials`). The seal covers each job's chain (part 4). A job starts its chain in a
+     step of its own: `EVIDENCE_DIR` (`$RUNNER_TEMP/evidence`, created `0700`) and `EVIDENCE_RUN`. Without both,
+     nothing is recorded.
+   - **The agent cannot reach its own records.** `runtimes.agent_env` drops every `EVIDENCE_` variable, and under
+     the blast radius (§3h) the agent's account cannot open the directory.
+   - **What each step records.** A step is recorded after it ends: done, refused (with its refusal), or failed.
+     - `prepare` records the binding and provenance records by digest.
+     - `run` records the agent log and the egress log by digest.
+     - `collect` records the patch, the message, the secrets-boundary record, the gateway's log and the egress log
+       by digest. It then writes one `gateway.tool` record per gateway decision or refusal, and one
+       `dispatch.egress` record per egress decision, each holding its log line's digest, up to 2,000 per log; past
+       that, one record gives the count and the whole log's digest.
+     - `publish` is recorded as the agent's App, with its PR number and its commit's digest.
+     - `report` records its comment's digest.
+     - The checks job writes one `checks.check` per check, with its exit code.
+     - `registry-check` is recorded only when it refuses (`dispatch.refusal`).
+     - `plan`, `due`, `blast-mode` and `provenance-fetch` act on nothing and are not recorded.
+   - **The credentials check** records on pushes to the default branch only: one `credentials.finding` per finding,
+     and one that gives the count of each kind, so a clean check is on record too.
+   - **Until the store exists**, each job's chain is kept as a workflow artifact, `evidence-<job>-<lane>`, for 90
+     days.
+   - **What the verifier now also checks.** `--files DIR` takes a run's downloaded artifacts: every recorded input
+     or output whose name is a file there, found by name, must match its digest. A name found twice is listed, not
+     checked. `--git DIR` requires every record's commit to be in that clone.
+   - **Accounts.** A record's `account_id` is null in part 2. The jobs act as `github-actions` or as an App installation,
+     and the ids are added with the router's records.
+   - **The parts that follow.** Part 3 is the router's records (MISSION-ROUTER-001 Amendment 018), with the
+     verifier recomputing router decisions. Part 4 is the seal job, the evidence key and the evidence store. Part 5 is
+     the independent checker (`evidence-verify.yml`).
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker

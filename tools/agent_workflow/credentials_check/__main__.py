@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 from mission_router.accounts import identity_mode
 from mission_router.router import load_config
@@ -109,9 +110,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"FINDING {finding}")
     print(f"findings={len(findings)} mode={mode}")
     _summary(on_descriptions, permissions_mode, grants, bool(args.base), on_table, on_pins, supply_mode, pin_changes)
+    _record({"FINDING": findings, "SUBSTRATE": on_substrate, "DESCRIPTION": on_descriptions, "PERMISSION": on_table,
+             "PIN": on_pins})
     return 1 if ((findings and mode == "enforce") or (on_substrate and substrate_mode == "enforce")
                  or ((on_descriptions or on_table) and permissions_mode == "enforce")
                  or (on_pins and supply_mode == "enforce")) else 0
+
+
+def _record(found: Mapping[str, Sequence[str]]) -> None:
+    """Ring 6 (MISSION-DISPATCH-001 §3m item 1): on the default branch, one ``credentials.finding`` record per finding,
+    and one that says how many of each there were, so a clean check is on record too. Only when the job set a chain
+    (``EVIDENCE_DIR``, ``EVIDENCE_RUN``); a record that cannot be written is a warning."""
+    from evidence import producer
+    recorder = producer.Recorder.from_env(os.environ)
+    if not recorder.enabled:
+        return
+    sha = os.environ.get("GITHUB_SHA", "")
+    base = dict(actor="credentials-check", account_id=None, action="credentials.finding",
+                commit=sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None,
+                authority_kind="spec_rule", authority_ref="MISSION-DISPATCH-001 sections 3i, 3h, 3k, 3l")
+    for kind, items in found.items():
+        for item in items:
+            recorder.record(result="done", reason=f"{kind} {item}", outputs={"finding": producer.text_digest(item)},
+                            **base)
+    recorder.record(result="done", reason=", ".join(f"{k.lower()}={len(v)}" for k, v in found.items()), **base)
 
 
 def _summary(descriptions: List[str], permissions_mode: str, grants: List[str], based: bool,
