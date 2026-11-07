@@ -1989,9 +1989,9 @@ class RefusalRecordTests(unittest.TestCase):
             with mock.patch.object(cli, "collect", side_effect=DispatchError("tools/demo/CLAUDE.md is AGENT_POLICY")), \
                     mock.patch.dict(os.environ, {"JOB": json.dumps(job.to_dict())}), mock.patch("sys.stderr"):
                 self.assertEqual(cli.main(["collect", "--root", tmp, "--out", tmp, "--refusal", str(target)]), 1)
-            self.assertEqual(target.read_text(), "tools/demo/CLAUDE.md is AGENT_POLICY\n")
+            self.assertEqual(target.read_text(), "collect: tools/demo/CLAUDE.md is AGENT_POLICY\n")  # §3j item 10
             self.assertEqual(cli.read_refusals([str(target), str(Path(tmp) / "none.txt")]),
-                             ["tools/demo/CLAUDE.md is AGENT_POLICY"])
+                             ["collect: tools/demo/CLAUDE.md is AGENT_POLICY"])
 
 class QuarantineWorkflowTests(unittest.TestCase):
     """The workflow hands the checks record to publish and each refusal to report (§3j items 2 and 3)."""

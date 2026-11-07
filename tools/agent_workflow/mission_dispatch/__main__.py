@@ -456,7 +456,7 @@ def main(argv=None) -> int:
     sub.choices["collect"].add_argument("--out", required=True)
     sub.choices["publish"].add_argument("--artifact", required=True)
     sub.choices["publish"].add_argument("--checks", default="", help="the checks job's results (A3 PASS, §3j item 3)")
-    for name in ("collect", "publish"):
+    for name in ("prepare", "run", "registry-check", "collect", "publish"):  # §3j item 10: every refusing step
         sub.choices[name].add_argument("--refusal", default="", help="where to record why this step refused")
     sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
@@ -468,7 +468,7 @@ def main(argv=None) -> int:
     except DispatchError as exc:
         print(f"::error::{str(exc).splitlines()[0][:500]}", file=sys.stderr)
         if getattr(args, "refusal", None) and isinstance(args.refusal, str):
-            write_refusal(args.refusal, str(exc))
+            write_refusal(args.refusal, f"{args.step}: {exc}")  # the step is named in the report (§3j item 10)
         return 1
 
 

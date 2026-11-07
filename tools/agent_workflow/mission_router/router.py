@@ -216,6 +216,13 @@ def write_grant_line(manifest: Optional[Manifest]) -> str:
             + "\n\n")
 
 
+def check_summary(reasons, title: str) -> str:
+    """A ``route-handoff-block`` check-run summary: one line per reason, each through the quarantine for GitHub, as
+    the router's comments are (MISSION-ROUTER-001 Amendment 017, MISSION-DISPATCH-001 §3j item 8). A reason that
+    quotes agent-chosen text (a path, a branch) cannot notify anyone, read as a command, or carry hidden characters."""
+    return "\n".join(f"- {quarantined(r)}" for r in reasons) or title
+
+
 class MissionRouter:
     def __init__(self, gh: GitHub, config: dict, classify: Callable[[str], str], dry_run: bool = False,
                  log: Callable[[str], None] = print, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
@@ -983,7 +990,7 @@ class MissionRouter:
             outcome = {MERGE: "success", REJECT: "failure"}.get(decision.action, "pending")
             title = {MERGE: f"Mission {ref.mission_id}: A3 PASS cleared every routing check",
                      REJECT: f"Mission {ref.mission_id}: rejected by the router"}.get(decision.action, f"Mission {ref.mission_id}: held")
-            self._publish_check(head_sha, outcome, title, "\n".join(f"- {r}" for r in decision.reasons) or title)
+            self._publish_check(head_sha, outcome, title, check_summary(decision.reasons, title))
 
         if decision.action == WAIT:
             if decision.reasons and not raw.get("draft"):
@@ -1173,7 +1180,7 @@ class MissionRouter:
         outcome = {MERGE: "success", REJECT: "failure"}.get(decision.action, "pending")
         title = {MERGE: f"Stack {sid}: every mission passed A3",
                  REJECT: f"Stack {sid}: rejected by the router"}.get(decision.action, f"Stack {sid}: held")
-        self._publish_check(head_sha, outcome, title, "\n".join(f"- {r}" for r in decision.reasons) or title)
+        self._publish_check(head_sha, outcome, title, check_summary(decision.reasons, title))
         digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
         if decision.action == WAIT:
             self._comment_once(number, f"wait:{head_sha[:12]}:{digest}", "The mission router is holding this landing PR:\n\n"
@@ -1230,7 +1237,7 @@ class MissionRouter:
         outcome = {MERGE: "success", REJECT: "failure"}.get(decision.action, "pending")
         title = {MERGE: "L1 capture: appends DRAFT entries to the capture queue",
                  REJECT: "L1 capture: rejected by the router"}.get(decision.action, "L1 capture: held")
-        self._publish_check(head_sha, outcome, title, "\n".join(f"- {r}" for r in decision.reasons) or title)
+        self._publish_check(head_sha, outcome, title, check_summary(decision.reasons, title))
         digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
         if decision.action == WAIT:
             if not raw.get("draft"):
