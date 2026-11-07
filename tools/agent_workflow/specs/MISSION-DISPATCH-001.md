@@ -755,7 +755,20 @@ look like a mission would be reported as one.
 - `"enforce"` refuses it;
 - any other value fails the job, and stops the router.
 
-HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass.
+HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass. **Switched on:** this repository's `config.json` sets
+`"enforce"` (ring 4 switch-on, 2026-11-06). AST-4.1, 4.2, 4.4 and 4.5 passed live on the throwaway repository.
+- **AST-4.2** ran the install step, copied exactly into an install-only workflow, against four cases: a wrong
+  SHA-256, a wrong pinned registry key, a pin change without a provenance record, and an install of Claude Code
+  2.1.318 with its record.
+- **AST-4.3 was not run live** (HITL's decision). A forged landing on the throwaway repository would have meant
+  writing commits under the names of real accounts, which was not done. Its rule is covered by unit tests with
+  fictitious identities:
+  - `test_evidence_graph`'s GitHub-record tests (G1 to G4 against a fake GitHub);
+  - `test_provenance`;
+  - the gateway's `TraceTests` (under `"enforce"`, a landing with a GitHub finding or no GitHub result is
+    `"proven": false`).
+
+  What those tests do not show is a forgery against GitHub itself.
 
 1. **The pins table.** A new `credentials_check/pins.json` (SPEC-002 `AUTHORITY`, with the rest of `credentials_check/`)
    lists:

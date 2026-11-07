@@ -83,7 +83,8 @@ and its merge, signed so it can be checked later. Its code is in `tools/agent_wo
 
   Each PR's check run lists every pin it changes (`PIN-CHANGE`), with the live tests a runtime change owes. Before
   Claude Code is installed, the npm registry's signature is checked against the pinned key. The template ships
-  `"supply_chain": "observe"`. If you add workflows of your own, add their actions to the table first.
+  `"supply_chain": "enforce"`, so an unlisted action or a failed signature stops the check or the install. If you add
+  workflows of your own, add their actions to the table first, or set `"observe"` until you have.
 - **Provenance from GitHub's record.** The gateway's `trace` tool tells an agent which mission made a file. It takes
   each landing's proof from GitHub's own record of its pull requests (who opened, approved and merged them), never
   from commit author names. The dispatcher checks that record directly for the newest 10 landings in a job's
