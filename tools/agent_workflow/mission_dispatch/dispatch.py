@@ -1103,7 +1103,9 @@ def publish(job: Job, survey: Survey, artifact: Path, root: Path, clone_url: str
     try:
         if job.role == "A2":  # §3j item 4: listed for HITL in the PR body; never refuses by itself
             steering = quarantine.scan_change(added_lines(checkout, job.base_sha, git))
-        commit = checkout.commit(message, git, allow_empty=not changes)
+        # §3j item 7: what git and GitHub keep is the neutralised message; the PR body quarantines it separately.
+        committed = quarantine.commit_message(job.mission_id, job.role, job.round, job.agent, message)
+        commit = checkout.commit(committed, git, allow_empty=not changes)
         checkout.push(job.branch, git_env(environ, agent_token))
     except GitError as exc:
         raise DispatchError(f"publishing failed: {exc}") from None
@@ -1211,11 +1213,24 @@ def _runs_as(job: Job) -> str:
     return f"runtime `{job.runtime}`" + (f", model `{job.model}`" if job.model else "")
 
 
+REFUSING_STEPS = ("prepare", "run", "registry-check", "collect", "publish")  # each may write a --refusal record
+
+
+def _refused_line(record: str) -> str:
+    """``<step>: <reason>`` (§3j item 10) as "Refused in `<step>`: …"; an older record without a step as before."""
+    step, sep, rest = record.partition(": ")
+    if sep and step in REFUSING_STEPS:
+        return f"Refused in `{step}`: {quarantine.inline(rest, REFUSAL_MAX_CHARS)}"
+    return f"Refused: {quarantine.inline(record, REFUSAL_MAX_CHARS)}"
+
+
 def failure_comment(job: Job, reason: str, run_url: str, refusals: Sequence[str] = ()) -> str:
     """``refusals`` are the reasons the collect or publish step gave (its ``--refusal`` record), so the record names
     what was refused (vectors 67, 68). They may quote agent output, so they pass the quarantine."""
-    refused = "".join(f"\n\nRefused: {quarantine.inline(r, REFUSAL_MAX_CHARS)}" for r in refusals if r.strip())
-    return (f"**Mission Agent: {job.role} round {job.round} did not finish.** {reason}.{refused}\n\n"
+    refused = "".join(f"\n\n{_refused_line(r)}" for r in refusals if r.strip())
+    # §3j item 10 (Amendment 019): with no step's record, say so; the run log shows which step failed.
+    none = "" if refused else "\n\nNo step recorded a refusal; the run log shows which step failed."
+    return (f"**Mission Agent: {job.role} round {job.round} did not finish.** {reason}.{refused}{none}\n\n"
             f"Agent `{job.agent}` (`{job.login}`), {_runs_as(job)}, from `{job.base_sha}`."
             + (f" Run log: {run_url}" if run_url else "") + "\n\n"
             f"The next run starts it again. After {MAX_AGENT_ATTEMPTS} failures in a row the stage is recorded as blocked; "

@@ -259,7 +259,8 @@ jobs:
           echo "${CLAUDE_CODE_SHA256}  $pkg" | sha256sum --check --strict
           # MISSION-DISPATCH-001 §3l item 2 (ring 4): the npm registry's signature, against the key in pins.json.
           # Under "supply_chain": "enforce" a failure stops here, before anything is installed.
-          python3 -B -m mission_dispatch registry-check --runtime claude-code --package "$pkg"
+          python3 -B -m mission_dispatch registry-check --runtime claude-code --package "$pkg" \
+            --refusal "$RUNNER_TEMP/refusal/refusal.txt"
           if [ -n "$BIN" ]; then  # enforce: root-owned, outside the runner's home
             sudo tar -xzf "$pkg" -C "$BIN" --strip-components=1 --no-same-owner package/claude
             "$BIN/claude" --version
@@ -303,6 +304,7 @@ jobs:
         run: >-
           python3 -m mission_dispatch prepare --repo "$GITHUB_REPOSITORY"
           --root "$JOB_ROOT" --checks-report "$RUNNER_TEMP/checks" --run-as "$RUN_AS" --provenance "$RUNNER_TEMP/provenance"
+          --refusal "$RUNNER_TEMP/refusal/refusal.txt"
 
       - name: Run the agent (no GitHub token)
         if: steps.due.outputs.due == 'true'
@@ -316,7 +318,7 @@ jobs:
           BIN: ${{ steps.blast.outputs.bin }}
         run: >-
           python3 -m mission_dispatch run --root "$JOB_ROOT" --timeout 3600
-          --run-as "$RUN_AS" --runtime-dir "$BIN"
+          --run-as "$RUN_AS" --runtime-dir "$BIN" --refusal "$RUNNER_TEMP/refusal/refusal.txt"
 
       - name: Check and collect the change (no GitHub token; refuses one containing the model login)
         if: steps.due.outputs.due == 'true'

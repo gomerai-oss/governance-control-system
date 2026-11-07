@@ -130,7 +130,30 @@ _PATTERNS: Sequence[Tuple[str, "re.Pattern[str]"]] = (
         r"<\|[a-z_]{2,20}\|>|\[/?(?:INST|SYS)\]|<</?SYS>>"
         r"|</?(?:system|instructions?|assistant|user|human|developer|im_start|im_end)\s*>"
         r"|^\W{0,4}(?:system|assistant|human|developer)\s*:", _FLAGS)),
-    ("/mission command", re.compile(r"^[\s>*+#-]*/mission\b", _FLAGS)),
+    ("/mission command", re.compile(r"(?:^|(?<=[\s>*+#(\[-]))/mission\b", _FLAGS)),  # anywhere (§3j item 6)
+    # §3j item 6 (Amendment 019): a request to do what no plan asks of a pipeline agent. Listed, never refused.
+    ("out-of-plan request", re.compile(
+        # change the pipeline's own files
+        r"\b(?:edit|change|modify|update|patch|rewrite|replace|remove|delete|disable|add\s+(?:an?\s+)?(?:new\s+)?"
+        r"(?:step|job|line|entry|row)s?\s+(?:to|in))\b[^.\n]{0,60}(?:\.github/workflows|\bworkflows?/[\w.-]+\.ya?ml"
+        r"|\bworkflow file\b|\bcredentials[_ -]check\b|credentials-register|\bgrants\.json\b|\bpins\.json\b"
+        r"|\bconfig\.json\b|identity-registry|\bclaude\.md\b|\bagents\.md\b|\.cursor/|\.claude/|\.mcp\.json\b)"
+        # reveal a credential, or read .env
+        r"|\b(?:print|echo|log|dump|write|copy|paste|export|send|post|output|show|reveal|leak|cat)\b[^.\n]{0,60}"
+        r"(?:\b(?:tokens?|secrets?|passwords?|passphrases?|api[_ -]?keys?|private[_ -]?keys?|credentials?|logins?)\b"
+        r"|\b[A-Z][A-Z0-9_]*_(?:TOKEN|KEY|SECRET)\b|\benv(?:ironment)?(?:\s+variables?)?\b)"
+        r"|\b(?:read|open|cat|copy|load|add|take|use|put|paste)\b[^.\n]{0,30}(?<![\w-])\.env\b|\benv\s*\|\s*sort\b|\bprintenv\b"
+        # weaken a test or a check
+        r"|\b(?:delete|remove|skip|disable|comment\s+out|turn\s+off|bypass|xfail|silence)\b[^.\n]{0,40}"
+        r"\b(?:tests?|checks?|credentials\s+check|quarantine|branch\s+protection|assertions?|linters?|ci)\b"
+        # go around the router
+        r"|\b(?:push|commit)\b[^.\n]{0,40}\b(?:directly|straight)\b[^.\n]{0,20}\b(?:main|master|default\s+branch)\b"
+        r"|\bforce[- ]push\b|\bgit\s+push\s+(?:-f|--force)\b"
+        r"|\b(?:merge|approve)\b[^.\n]{0,20}\b(?:this|the|your|my)\s+(?:own\s+)?(?:pr|pull\s+request|change|build)\b"
+        # act outside the repository (CAPTURE-2026-004)
+        r"|\b(?:send|post|publish|tweet|e-?mail|text|message|dm|pay|book|purchase|buy|order|transfer)\b(?!\s*/)[^.\n]{0,50}"
+        r"\b(?:messages?|e-?mails?|sms|slack|teams|discord|whatsapp|imessage|notes\s+app|spotify|notebooklm"
+        r"|calendar|payments?|bookings?|flights?|hotels?|external\s+(?:app|service)|social\s+media)\b", _FLAGS)),
 )
 
 
@@ -202,6 +225,23 @@ def inline(text: str, limit: int = 600) -> str:
     if len(one) > limit:
         one = one[:limit - 1] + "…"
     return neutralise(one)
+
+
+# ------------------------------------------------------------------ the commit message (§3j item 7)
+# Trailers git and GitHub read as a claim that an account had a part in the change. Prefixed, they no longer parse.
+_TRAILER = re.compile(r"(?mi)^([ \t]*)((?:co-authored-by|signed-off-by|reviewed-by|approved-by|acked-by|tested-by"
+                      r"|reported-by)[ \t]*:)")
+
+
+def commit_message(mission_id: str, role: str, round_n: int, agent: str, message: str) -> str:
+    """The commit message ``publish`` commits for an agent (Amendment 019): the dispatcher's own subject, then the
+    agent's message as its body, with hidden characters removed, ``@`` mentions and issue-closing references broken,
+    ``/mission`` lines and attribution trailers prefixed. No agent commit can read like a router merge, notify anyone,
+    close an issue, or name a co-author."""
+    cleaned, _ = clean(message)
+    body = _TRAILER.sub(lambda m: m.group(1) + COMMAND_PREFIX + m.group(2), neutralise(cleaned)).strip("\n")
+    subject = f"Mission {mission_id}: {role} round {round_n} ({agent})"
+    return subject + ("\n\n" + body if body.strip() else "") + "\n"
 
 
 # ------------------------------------------------------------------ the quarantine

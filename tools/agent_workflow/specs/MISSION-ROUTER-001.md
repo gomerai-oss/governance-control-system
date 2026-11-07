@@ -67,6 +67,10 @@ be pinned by full commit SHA and listed (MISSION-DISPATCH-001 §3l item 1). The 
 own record, not on commit author names: the PR's author and merger from the API, and the recorded push (§5a, Amendment
 011). This amendment states that as a rule for any provenance the router reports. **Switched on** in this repository
 on 2026-11-06 (AST-4.1, 4.2, 4.4 and 4.5 passed; AST-4.3 is covered by unit tests, MISSION-DISPATCH-001 §3l).
+**Amendment 017 (2026-11-06, HITL direction: ring 3 follow-ups, with MISSION-DISPATCH-001 Amendment 019):** the
+`route-handoff-block` check-run summary passes the input quarantine for GitHub, reason by reason, as the router's
+comments already do (Amendment 012). A reason that quotes a path, a branch or other agent-chosen text can no longer
+notify anyone, read as a `/mission` command, or carry hidden characters into the check run.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -676,3 +680,4 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 114 | `"model_login"` set to an unknown value | The router stops |
 | 115 | Enforced supply chain; a PR adds an unpinned or unlisted action to `mission-router.yml` | The credentials check fails |
 | 116 | `"supply_chain"` set to an unknown value | The router stops |
+| 117 | A refused stage PR whose reasons quote a path with an `@` mention, a `/mission` line or a bidirectional override | The `route-handoff-block` summary shows the reason quarantined: no live mention or command, hidden characters removed |
