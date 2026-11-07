@@ -240,6 +240,8 @@ def argv_for(runtime: str, checkout: Path, prompt: str, home: Path, binaries: Ma
 def agent_env(base: Mapping[str, str], checkout: Path, git_dir: Path, empty_dir: Path) -> Dict[str, str]:
     """The runtime's environment: no GitHub or other credentials, git pinned to the job's own git dir."""
     env = {k: v for k, v in base.items() if (k in KEEP_ENV and v) or not _SECRET_ENV.search(k)}
+    for name in [k for k in env if k.startswith("EVIDENCE_")]:  # §3m: the agent never learns where its records are
+        del env[name]
     env.update({
         "GIT_DIR": str(git_dir.resolve()),
         "GIT_WORK_TREE": str(checkout.resolve()),

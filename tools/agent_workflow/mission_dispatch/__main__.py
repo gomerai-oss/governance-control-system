@@ -38,9 +38,15 @@ from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
 from . import binding, blast, login, permissions, provenance, quarantine, registry, supply_chain
+from evidence import producer as evidence_producer
 from .runtimes import BINARIES
 from .dispatch import (
+    BOUNDARY_OUT,
+    CHECKS_JSON,
+    MESSAGE_OUT,
+    PATCH_FILE,
     REFUSAL_MAX_CHARS,
+    RESULT_FILE,
     DispatchError,
     key_problems,
     busy_lanes,
@@ -377,6 +383,7 @@ def cmd_publish(args) -> int:
         _log(f"{job.key}: not published: {result['reason']}")
     else:
         _log(f"{job.key}: opened PR #{result['pr_number']} into {result['base']} as {job.login}: {result['pr_url']}")
+        _NOTE.update(pr=result["pr_number"], commit=result["commit"])
     return 0
 
 
@@ -408,7 +415,9 @@ def cmd_report(args) -> int:
     if issue is None:
         raise DispatchError(f"{job.mission_id} has no tracking issue to report on")
     run_url = os.environ.get("RUN_URL", "")
-    gh.comment(int(issue["number"]), failure_comment(job, reason, run_url, read_refusals(args.refusal or [])))
+    text = failure_comment(job, reason, run_url, read_refusals(args.refusal or []))
+    _NOTE.update(comment=evidence_producer.text_digest(text))
+    gh.comment(int(issue["number"]), text)
     _log(f"{job.key}: reported on #{issue['number']}: " + reason)
     return 0
 
@@ -428,6 +437,76 @@ def write_refusal(path: str, reason: str) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(reason[:REFUSAL_MAX_CHARS] + "\n", encoding="utf-8")
+
+
+# What a step learned that its record carries (§3m item 1): publish's PR and commit, report's comment digest.
+_NOTE: dict = {}
+STEP_ACTIONS = {"prepare": "dispatch.prepare", "run": "dispatch.run", "collect": "dispatch.collect",
+                "publish": "dispatch.publish", "report": "dispatch.report", "registry-check": "dispatch.refusal"}
+DISPATCH_ACTOR, CHECKS_ACTOR, GATEWAY_ACTOR, EGRESS_ACTOR = "mission-dispatch", "mission-checks", "mcp-gateway", "egress-proxy"
+
+
+def record_step(recorder, args, result: str, reason: str) -> None:
+    """This step's records (§3m item 1, ring 6 part 2): one for the step, with the digests of what it wrote; under
+    ``checks``, one per check; after ``collect``, one per gateway decision and per egress decision. Never fails
+    the step (``"evidence": "observe"``)."""
+    step = args.step
+    if not recorder.enabled or (step not in STEP_ACTIONS and step != "checks"):
+        return
+    if step == "registry-check" and result == "done":
+        return  # only its refusal is recorded; a passed check shows in prepare's run
+    try:
+        job = _job()
+    except DispatchError:
+        return
+    base = dict(mission=job.mission_id, round_n=job.round, commit=job.build_sha or job.base_sha,
+                authority_kind="plan", authority_ref=f"{job.mission_id} {job.role} round {job.round}")
+    root = Path(getattr(args, "root", "") or ".")
+    if step == "checks":
+        path = Path(args.out) / CHECKS_JSON
+        try:
+            results = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+        except ValueError:
+            results = []
+        for r in results if isinstance(results, list) else []:
+            if not isinstance(r, dict):
+                continue
+            code = r.get("exit_code")
+            recorder.record(actor=CHECKS_ACTOR, account_id=None, action="checks.check",
+                            result="done" if r.get("passed") else "failed",
+                            reason=f"check {r.get('index')}: exit {code if code is not None else 'not run'}",
+                            outputs={"command": evidence_producer.text_digest(str(r.get("command", ""))),
+                                     "output": evidence_producer.text_digest(str(r.get("output_tail", "")))},
+                            **base)
+        return
+    outputs = {}
+    if step == "prepare":
+        outputs = evidence_producer.file_digests(root / binding.BINDING_DIR,
+                                                 [binding.BINDING_FILE, provenance.RECORD_FILE])
+    elif step == "run":
+        outputs = evidence_producer.file_digests(root, ["agent.log", blast.EGRESS_LOG])
+    elif step == "collect":
+        out = Path(args.out)
+        outputs = evidence_producer.file_digests(out, [PATCH_FILE, MESSAGE_OUT, BOUNDARY_OUT, RESULT_FILE,
+                                                       f"{binding.OUT_DIR}/{binding.BINDING_FILE}",
+                                                       f"{binding.OUT_DIR}/gateway-evidence.jsonl", blast.EGRESS_LOG])
+    elif step == "publish":
+        outputs = {"commit": evidence_producer.text_digest(str(_NOTE["commit"]))} if _NOTE.get("commit") else {}
+    elif step == "report" and _NOTE.get("comment"):
+        outputs = {"comment": _NOTE["comment"]}
+    actor = job.login if step == "publish" and job.login else DISPATCH_ACTOR
+    pr = _NOTE.get("pr") if step == "publish" else None
+    recorder.record(actor=actor, account_id=None, action=STEP_ACTIONS[step], result=result,
+                    reason=reason or result, outputs=outputs, pr=pr or None, **base)
+    if step == "collect":
+        out = Path(args.out)
+        gateway_log = out / binding.OUT_DIR / "gateway-evidence.jsonl"
+        logs = [gateway_log] if gateway_log.is_file() else sorted((binding.binding_dir(root) / binding.EVIDENCE_DIR)
+                                                                   .glob("*.jsonl"))
+        for log in logs:
+            recorder.from_log(log, "gateway.tool", GATEWAY_ACTOR, evidence_producer.gateway_result, base)
+        egress_log = out / blast.EGRESS_LOG if (out / blast.EGRESS_LOG).is_file() else root / blast.EGRESS_LOG
+        recorder.from_log(egress_log, "dispatch.egress", EGRESS_ACTOR, evidence_producer.egress_result, base)
 
 
 def main(argv=None) -> int:
@@ -463,13 +542,21 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land}
+    recorder = evidence_producer.Recorder.from_env(os.environ)
+    _NOTE.clear()
     try:
-        return steps[args.step](args)
+        code = steps[args.step](args)
     except DispatchError as exc:
         print(f"::error::{str(exc).splitlines()[0][:500]}", file=sys.stderr)
         if getattr(args, "refusal", None) and isinstance(args.refusal, str):
             write_refusal(args.refusal, f"{args.step}: {exc}")  # the step is named in the report (§3j item 10)
+        record_step(recorder, args, "refused", f"{args.step}: {exc}")
         return 1
+    except Exception as exc:
+        record_step(recorder, args, "failed", f"{args.step}: {type(exc).__name__}")
+        raise
+    record_step(recorder, args, "done" if code == 0 else "failed", "")
+    return code
 
 
 if __name__ == "__main__":

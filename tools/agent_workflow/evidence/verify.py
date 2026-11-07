@@ -5,15 +5,17 @@ A store holds one directory per run, ``runs/<run>/``, with the run's ``records.j
 pinned evidence keys (its run, record count and head). It then checks every withdrawal names a record that exists,
 by its digest. It stops on the first broken link, bad seal or mismatch, naming it.
 
-Checking the recorded digests against what git, GitHub and the store hold, and recomputing router decisions, are
-added when those records have producers (§3m item 5; part 2).
+With ``files``, every input or output whose name is a file under that directory (a run's downloaded artifacts, found
+by name) must match its digest; a name found twice is listed, not checked. With ``git``, every record's commit must be in that repository. Recomputing the router's decisions
+comes with the router's records (part 3).
 """
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from evidence import EvidenceError
 from evidence import chain as chain_mod
@@ -33,6 +35,9 @@ class Report:
     records: int = 0
     unsealed: List[str] = field(default_factory=list)
     withdrawn: Dict[str, str] = field(default_factory=dict)  # withdrawn record id -> the withdrawal's id
+    files_checked: int = 0
+    commits_checked: int = 0
+    ambiguous_files: List[str] = field(default_factory=list)
     failure: Optional[str] = None
 
     @property
@@ -84,9 +89,51 @@ def verify_run(directory: Path, run: str, keys: Mapping[str, str]) -> tuple:
     return records, True
 
 
+def file_index(files: Path) -> Tuple[Dict[str, Path], List[str]]:
+    """The files under ``files`` (a run's downloaded artifacts), by name. A name found more than once is checked
+    against none of them, and is listed instead."""
+    index: Dict[str, Path] = {}
+    twice = set()
+    for path in sorted(Path(files).rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            if path.name in index:
+                twice.add(path.name)
+            index[path.name] = path
+    for name in twice:
+        del index[name]
+    return index, sorted(twice)
+
+
+def _check_content(records, index: Optional[Dict[str, Path]], git: Optional[Path], report: "Report",
+                   seen: set) -> None:
+    """The recorded digests against what is still held (§3m item 5): files, and commits in git."""
+    from evidence.producer import file_digest  # producer imports this module
+    for rec in records:
+        for side in ("inputs", "outputs"):
+            for name, want in rec[side].items():
+                path = (index or {}).get(name)
+                if path is None:
+                    continue
+                if file_digest(path) != want:
+                    raise Refused(f"record {rec['id']}: {name} does not match its recorded digest")
+                report.files_checked += 1
+        sha = rec["subject"]["commit"]
+        if git is not None and sha and sha not in seen:
+            done = subprocess.run(["git", "-C", str(git), "cat-file", "-e", f"{sha}^{{commit}}"],
+                                  capture_output=True)
+            if done.returncode != 0:
+                raise Refused(f"record {rec['id']}: commit {sha[:12]} is not in the repository")
+            seen.add(sha)
+            report.commits_checked += 1
+
+
 def verify_store(store: Path, keys: Mapping[str, str], run: Optional[str] = None,
-                 require_seal: bool = False) -> Report:
+                 require_seal: bool = False, files: Optional[Path] = None, git: Optional[Path] = None) -> Report:
     report = Report()
+    seen: set = set()
+    index = None
+    if files is not None:
+        index, report.ambiguous_files = file_index(files)
     base = Path(store) / RUNS
     names = [run] if run else sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
     known: Dict[str, str] = {}  # record id -> digest, for the runs read
@@ -94,6 +141,7 @@ def verify_store(store: Path, keys: Mapping[str, str], run: Optional[str] = None
     try:
         for name in names:
             records, sealed = verify_run(base / name, name, keys)
+            _check_content(records, index, git, report, seen)
             report.runs += 1
             report.records += len(records)
             if not sealed:
