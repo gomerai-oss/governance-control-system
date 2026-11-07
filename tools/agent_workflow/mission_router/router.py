@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
                    evaluate_capture, evaluate_landing, instruction_build_findings, instruction_plan_findings)
 from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
+import evidence
 from mission_dispatch import login, permissions, quarantine, supply_chain
 from mission_dispatch.quarantine import inline as quarantined  # §5, Amendment 012: agent text the router posts
 from .github import GitHub, GitHubError
@@ -178,6 +179,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     permissions.mode(config)  # ring 2 (MISSION-DISPATCH-001 §3k): likewise (vectors 80, 113)
     login.mode(config)  # ring 1 amendment (MISSION-DISPATCH-001 §3i item 6): likewise (vectors 88, 114)
     supply_chain.mode(config)  # ring 4 (MISSION-DISPATCH-001 §3l): likewise (vectors 97, 116)
+    evidence.mode(config)  # ring 6 (MISSION-DISPATCH-001 §3m): likewise (vectors 111, 119)
     config_accounts(config)
     if not isinstance(config.get("credentials_register", ""), str):
         raise ValueError("config.json: credentials_register must name a file")

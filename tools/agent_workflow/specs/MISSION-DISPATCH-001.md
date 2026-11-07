@@ -89,6 +89,17 @@ in the input quarantine (§3j), found by its live tests and later rings. They ar
 
 None of the four refuses anything; each changes only what text says, so no new mode is added.
 
+**Amendment 020 (2026-11-07, HITL direction: ring 6 of the six-ring security system, with MISSION-ROUTER-001
+Amendment 018):** durable, tamper-evident evidence. Ring 6 was published as documents only
+(`RING-6-EVIDENCE-RECOVERY-SPEC-001`, gates G-R6-01 to 05). This amendment builds it:
+- every action the pipeline takes becomes one record of a single, generic, append-only kind;
+- each run's records are chained by digest and sealed with a signature;
+- the sealed records are kept in a store of their own for years, not days;
+- a record is withdrawn by a later record, never deleted;
+- a verifier, run by a checker that is not the builder, replays the chain.
+
+The mode is set by `"evidence"` in `config.json` (§3m).
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1022,6 +1033,137 @@ HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass. **Switched on:** t
    - **AST-4.5, a pin change is listed.** A PR bumps an action to a newer SHA, with its row in `pins.json`. Pass: a
      `PIN` line for it, and no finding.
 
+### 3m. Durable evidence (Amendment 020)
+
+**Threat.** What the pipeline can show for its own work today, and how long it lasts:
+- **A run's own record.** The patch, the agent's message, the binding record, the gateway's decisions, the egress
+  log, the secrets-boundary record and the agent log are workflow artifacts, kept 7 days. Refusal records are kept 1
+  day.
+- **Policy CI's evidence graph** is kept 90 days.
+- **What GitHub keeps.** Router decisions exist only as PR comments and check runs, and HITL's commands only as
+  comments. Both last until a repository admin deletes them.
+- **No seal, and no replay.** Nothing is chained or signed, so a deleted or edited record cannot be detected. Nothing
+  re-checks a past run.
+
+So a run cannot be shown to an auditor once its artifacts expire, and a quiet edit of what remains leaves no mark. Two
+queued captures add more actions to record later:
+- an app-control harness's calls (`Q-L1-APP-CONTROL-HARNESS-GOVERNANC-001`, CAPTURE-2026-004);
+- an agent memory's reads, corrections, promotions and deletions (`Q-L1-AGENT-MEMORY-COMPONENTS-001-001`,
+  CAPTURE-2026-005).
+
+**Mode.** `"evidence"` in `config.json`:
+- `"observe"` (the default when the key is absent): items 1 to 5 run, and a missing or unsealed record is reported,
+  never refused;
+- `"enforce"`: item 6 also applies;
+- any other value fails the job, and stops the router.
+
+HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
+
+1. **One record for every action** (`evidence-record-v1`, a new `evidence/` package, standard library only). A record
+   has a closed set of fields:
+   - its id, and the time it was written;
+   - the **actor**: the identity that acted, with its GitHub account ID where it has one (ring 1);
+   - the **action**: a name from a closed list, with a class (`read`, `write`, `send`, `decide`, `refuse`,
+     `withdraw`);
+   - the **subject**: the mission, round, run, PR and commit it concerns;
+   - its **inputs** and **outputs**, each as a SHA-256 digest of the canonical bytes, never the content (a record
+     never holds a secret or agent text);
+   - the **result**: done, refused, or failed, with a short reason that passes the quarantine (§3j);
+   - the **authority** it acted under: the plan, the HITL command, or the spec rule;
+   - the digest of the record before it in its chain (item 2).
+
+   The actions recorded today:
+   - the router: each decision on a stage PR, merge, refusal, approval request, landing, halt and retry, and each
+     HITL command it acts on, by account ID;
+   - the dispatcher: `prepare` (with the binding record and the provenance record), `run`, the egress decisions,
+     `collect` (with the secrets-boundary record), `publish`, `report`, and every refusal;
+   - the gateway: each tool decision;
+   - the checks job: each check's exit code;
+   - the credentials check: its findings on `main`.
+
+   The list is closed and versioned. A new action, such as a harness call (app, action, arguments by digest, result)
+   or a memory operation (read, changed, promoted, deleted), is added by a spec amendment, never at run time.
+2. **Each run's records are chained and sealed.**
+   - **The chain.** Every record carries the digest of the one before it in its run, so a removed or changed record
+     breaks the chain.
+   - **The seal.** At the end of each run, a **seal** step signs the chain's head with the pipeline's evidence key,
+     as an EPAP signed envelope (`epap.signing`, Ed25519). It covers the run, the head digest, the record count and
+     the digests of the run's artifacts.
+   - **Where the seal step runs.** It is its own job, with no agent content and no other credential, like `publish`.
+     The key is held in its own GitHub environment (`evidence-seal`, deployable from the default branch only),
+     listed in the credentials register (§3i), and used by no other job.
+   - **A landing's pack.** For each landing, the seal step also writes an EPAP pack (`epap.writer`): an in-toto layout
+     and links, and SLSA v1 provenance. That is the export form the dual-regime attestation capture names
+     (`Q-L1-EPAP-DUAL-REGIME-ATTESTATION--001`).
+3. **The records are kept in a store of their own, for years.**
+   - **The store.** Sealed records and packs are written to a dedicated evidence repository (`evidence_store` in
+     `config.json`), by its own GitHub App. That App can write only there, and no agent App is installed there.
+   - **What the store's protection allows.** Its default branch takes new files only: no force-push, no deletion.
+     The App can only add.
+   - **Retention.** `evidence_retention_years` defaults to **6**, the longest of the record-keeping periods in the
+     compliance targets HITL has set for the mature GCS.
+   - **An optional WORM copy.** A repository can also declare one in `config.json` (`evidence_worm`): object storage
+     with a retention lock, for regimes that require write-once media. It is the adopter's, and is listed in the
+     credentials register as `outside:<where>`.
+4. **A record is withdrawn, never deleted.** A wrong record, or one that must no longer be relied on, is withdrawn by a
+   later record of class `withdraw`. That record names the record withdrawn, the reason, and who withdrew it, by HITL
+   direction only. The withdrawn record stays in the chain and the store. A rebuild after a withdrawal (for example of
+   a bad memory promotion, later) is new records that cite the withdrawal.
+5. **A verifier replays the chain** (`python3 -m evidence verify`). For a run, a mission or a date range, it checks:
+   - every record's schema;
+   - every chain link;
+   - every seal, against the pinned evidence key's public half;
+   - that every input and output digest that names a commit, PR or artifact matches what git, GitHub and the store
+     hold;
+   - for router decisions, that recomputing the decision from the recorded inputs gives the recorded result.
+
+   It refuses on the first broken link, bad seal or mismatch, naming it.
+6. **Under `"enforce"`, the router merges nothing it cannot show.** A stage PR is merged only when its run's records
+   are sealed and in the store. A run that ends with no seal, or a store that cannot be written, holds the stage
+   (it is never merged unrecorded) and reports why. The router's own decisions are recorded before the merge they
+   allow (MISSION-ROUTER-001 Amendment 018).
+7. **The checker is not the builder** (G-R6-02). The verifier runs:
+   - on every push to the default branch, in a workflow of its own (`evidence-verify.yml`) with a read-only token;
+   - weekly over the whole store.
+
+   Its result is a check run and a record. A verification failure opens an issue for HITL. A PR that changes ring 6's
+   own code or the evidence key's pin needs an independent review recorded on the PR: by someone other than its
+   author, or an A3 seat when it comes from a mission. HITL's hand merge alone does not count as that review.
+8. **Live attack tests (AST), on a throwaway repository and a throwaway evidence store, each with HITL's OK:**
+   - **AST-6.1, an edited record.** One byte of a stored record is changed. Pass: `evidence verify` refuses, naming
+     the record and the broken link.
+   - **AST-6.2, a removed record.** A record is removed from a run (the store refuses the deletion, so the test
+     removes it from a copy). Pass: the verifier names the gap.
+   - **AST-6.3, a forged seal.** A run sealed with a key that is not the pinned evidence key. Pass: the verifier
+     refuses, and the router holds the stage under enforce.
+   - **AST-6.4, past the artifacts.** A run older than its 7-day artifacts. Pass: the verifier still verifies it from
+     the store alone.
+   - **AST-6.5, a withdrawal.** HITL withdraws a record. Pass: the chain still verifies, the withdrawn record is marked,
+     and nothing is deleted.
+   - **AST-6.6, nothing merged unrecorded.** Under enforce, the seal job is made to fail. Pass: the router holds the
+     stage and reports why. Nothing is merged.
+
+   **Clarified in part 1 (the `evidence/` package, the verifier and the mode; no producer yet):**
+   - **Record ids, order and the run's start.** A record's id is `<run>/<seq>`, with `seq` counting from 0 in its run.
+     The first record's `prev` is the digest of `{"schema": "evidence-record-v1", "run": <run>}`, so a record cannot
+     be moved into another run. The fields are `schema`, `id`, `seq`, `time`, `actor` (`name`, `account_id`),
+     `action`, `class`, `subject` (`mission`, `round`, `run`, `pr`, `commit`), `inputs`, `outputs`, `result`,
+     `reason`, `authority` (`kind`: `plan`, `hitl_command` or `spec_rule`; `ref`), `prev`, and, on a withdrawal only,
+     `withdraws` (`id`, `digest`). A record's digest is the SHA-256 of its canonical bytes (`epap.signing`), and its
+     stored line is exactly those bytes. A line that is not is refused.
+   - **The closed list** is `evidence.record.ACTIONS`, each action with one class. A withdrawal's authority must be a
+     HITL command.
+   - **The store's layout** is `runs/<run>/records.jsonl`, plus `runs/<run>/seal.json` once sealed.
+   - **The seal and the keys.** A seal's signed part is `evidence-seal-v1`: `run`, `head`, `count`, `artifacts`, `time`.
+     A key id is the SHA-256 of the 32-byte public key. The pinned public halves are `evidence/key.json`
+     (`evidence-keys-v1`), empty until the seal job's key is created in part 3.
+   - **What the verifier checks in part 1.** Schema, chain links, seals (signature, run, count and head), and that
+     every withdrawal names a record that is in the store as recorded. The seal's count and head are what catch a
+     removed or edited **last** record. An unsealed run can lose its last record unnoticed, so `--sealed` refuses an
+     unsealed run, and the router does so under enforce (item 6). Checking digests against git, GitHub and the store,
+     and recomputing router decisions, come with the producers in part 2.
+   - **The mode** is read by `load_config`, so an unknown value stops the router and fails every dispatcher job alike.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -1211,6 +1353,19 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     outside `build_scope` (§3c).
 28. **Neutralising changes the message HITL reads in git (Amendment 019).** The commit shows the cleaned text. The
     agent's message as written is kept with the run's artifacts (`message.txt`), for 7 days (limit 4).
+29. **An owner of the evidence store can still destroy it (Amendment 020).** The store's protection stops its App,
+    and anyone without admin rights. An organization owner can still change the protection or delete the repository.
+    The seals make such a change detectable, not impossible. The optional WORM copy (§3m item 3) is what makes it
+    impossible within its retention.
+30. **The evidence key is one key (Amendment 020).** Whoever holds it can seal a false record. It is held like an App
+    key: in one environment, listed in the register, rotated by the register's steps, and its public half is pinned.
+    A key change is a `PIN` line (§3l) and a HITL hand merge.
+31. **Time is the runner's clock (Amendment 020).** A record's time is the runner's, not a trusted timestamp. The
+    chain fixes the order within a run. The store's commit history, and the WORM copy's own times, fix it across runs.
+32. **Records hold digests, not content (Amendment 020).** The verifier can show that the content has not changed only
+    while the content is still held: in git, GitHub or the store. Content kept only in a 7-day artifact can be shown
+    to have existed, by its digest, but not shown again after the artifact expires, unless the run's artifacts are
+    also copied to the store (§3m item 2 lists their digests; copying them is a later choice, because of size).
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -1312,3 +1467,13 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 99 | An agent's commit message with hidden characters, `@` mentions, a `/mission` line, attribution trailers, or a subject that reads like a router merge | The committed message has the dispatcher's subject, no hidden characters, broken mentions, a prefixed command line and prefixed trailers |
 | 100 | A job refused in `prepare`, `run` or the install step's registry check | The failure comment names the step and the reason, quarantined |
 | 101 | A job that failed with no refusal recorded | The failure comment says no refusal was recorded and links the run |
+| 102 | Any pipeline action (router decision, dispatcher step, gateway decision, check exit code, refusal) | One `evidence-record-v1` record, chained to the one before it in its run; it holds digests, never content |
+| 103 | A run ends | The seal job signs the chain's head with the evidence key and writes records, seal and (for a landing) the EPAP pack to the evidence store |
+| 104 | A stored record is changed, or removed from a run | `evidence verify` refuses, naming the record and the broken link |
+| 105 | A seal made with a key other than the pinned evidence key | The verifier refuses; under enforce the router holds the stage |
+| 106 | Enforced evidence; a run with no seal, or a store that cannot be written | The router holds the stage and reports why; nothing is merged unrecorded |
+| 107 | HITL withdraws a record | A `withdraw` record cites it; the chain still verifies; nothing is deleted |
+| 108 | A run older than its 7-day artifacts | The verifier verifies it from the store alone |
+| 109 | A PR changes ring 6's code or the evidence key's pin with no independent review recorded | The verifier's check reports it; HITL's hand merge alone is not that review |
+| 110 | Observed evidence; any of vectors 104 to 106 | Reported, recorded, nothing refused |
+| 111 | `"evidence"` set to an unknown value | The job fails |

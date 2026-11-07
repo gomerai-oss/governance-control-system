@@ -25,6 +25,7 @@
       {"prefix": "tools/agent_workflow/secrets_boundary/"},
       {"prefix": "tools/agent_workflow/evidence_graph/"},
       {"prefix": "tools/agent_workflow/egress/"},
+      {"prefix": "tools/agent_workflow/evidence/"},
       {"basename": "IDENTITY-REGISTRY.md"},
       {"basename": "CREDENTIALS-REGISTER.md"},
       {"basename": "SUBSTRATE-DECLARATION.md"},
