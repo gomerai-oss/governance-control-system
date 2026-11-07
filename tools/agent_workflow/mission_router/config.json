@@ -11,7 +11,7 @@
   "substrate": "enforce",
   "permissions": "enforce",
   "model_login": "enforce",
-  "supply_chain": "observe",
+  "supply_chain": "enforce",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {

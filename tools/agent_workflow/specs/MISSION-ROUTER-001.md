@@ -65,7 +65,8 @@ workflow (`mission-router.yml`) is held to the same pins table, `credentials_che
 be pinned by full commit SHA and listed (MISSION-DISPATCH-001 §3l item 1). The router reads `"supply_chain"` from
 `config.json` with the other modes, and an unknown value stops it. The router's merge decisions already rest on GitHub's
 own record, not on commit author names: the PR's author and merger from the API, and the recorded push (§5a, Amendment
-011). This amendment states that as a rule for any provenance the router reports.
+011). This amendment states that as a rule for any provenance the router reports. **Switched on** in this repository
+on 2026-11-06 (AST-4.1, 4.2, 4.4 and 4.5 passed; AST-4.3 is covered by unit tests, MISSION-DISPATCH-001 §3l).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL

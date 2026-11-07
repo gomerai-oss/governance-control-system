@@ -48,9 +48,9 @@ class ModeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "supply_chain must be one of"):
                 load_config(path)
 
-    def test_this_repository_observes(self):
+    def test_this_repository_enforces(self):  # switched on after AST-4.1 to 4.5 (2026-11-06)
         config = json.loads((AW / "mission_router" / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(config.get("supply_chain"), "observe")
+        self.assertEqual(config.get("supply_chain"), "enforce")
 
 
 class TableTests(unittest.TestCase):
