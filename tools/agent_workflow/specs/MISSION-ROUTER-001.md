@@ -71,6 +71,13 @@ on 2026-11-06 (AST-4.1, 4.2, 4.4 and 4.5 passed; AST-4.3 is covered by unit test
 `route-handoff-block` check-run summary passes the input quarantine for GitHub, reason by reason, as the router's
 comments already do (Amendment 012). A reason that quotes a path, a branch or other agent-chosen text can no longer
 notify anyone, read as a `/mission` command, or carry hidden characters into the check run.
+**Amendment 018 (2026-11-07, HITL direction: ring 6, with MISSION-DISPATCH-001 Amendment 020):** the router records
+every decision as an `evidence-record-v1` record before the act it allows. That covers:
+- each merge, refusal, approval request, landing, halt and retry;
+- each HITL command it acts on, by the commenter's account ID.
+
+Under `"evidence": "enforce"` it merges a stage PR only when that stage's run is sealed and stored, and otherwise holds
+the stage and says why (MISSION-DISPATCH-001 §3m item 6). An unknown `"evidence"` value stops the router.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -681,3 +688,5 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 115 | Enforced supply chain; a PR adds an unpinned or unlisted action to `mission-router.yml` | The credentials check fails |
 | 116 | `"supply_chain"` set to an unknown value | The router stops |
 | 117 | A refused stage PR whose reasons quote a path with an `@` mention, a `/mission` line or a bidirectional override | The `route-handoff-block` summary shows the reason quarantined: no live mention or command, hidden characters removed |
+| 118 | Enforced evidence; a stage PR whose run has no seal in the evidence store | Held, not merged; the router says why |
+| 119 | `"evidence"` set to an unknown value | The router stops |

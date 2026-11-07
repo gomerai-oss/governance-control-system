@@ -12,6 +12,7 @@
   "permissions": "enforce",
   "model_login": "enforce",
   "supply_chain": "enforce",
+  "evidence": "observe",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {
