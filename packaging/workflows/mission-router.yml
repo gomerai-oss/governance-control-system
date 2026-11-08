@@ -70,6 +70,12 @@ jobs:
           PYTHONPATH: tools/agent_workflow
         run: python3 -B -m mission_router.substrate
 
+      - name: Start this sweep's evidence chain (MISSION-ROUTER-001 Amendment 018, ring 6)
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-router" >> "$GITHUB_ENV"
+
       - name: Sweep missions
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -77,3 +83,12 @@ jobs:
           PYTHONPATH: tools/agent_workflow
           DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
         run: python3 -m mission_router --repo "$GITHUB_REPOSITORY" $DRY_RUN
+
+      - name: Keep this sweep's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-router
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90

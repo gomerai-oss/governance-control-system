@@ -6,8 +6,11 @@ pinned evidence keys (its run, record count and head). It then checks every with
 by its digest. It stops on the first broken link, bad seal or mismatch, naming it.
 
 With ``files``, every input or output whose name is a file under that directory (a run's downloaded artifacts, found
-by name) must match its digest; a name found twice is listed, not checked. With ``git``, every record's commit must be in that repository. Recomputing the router's decisions
-comes with the router's records (part 3).
+by name) must match its digest; a name found twice is listed, not checked. With ``git``, every record's commit must
+be in that repository.
+
+The router's decisions are replayed by their order (``replay_router``): every merge follows, in its chain, the
+decision that allowed it. A decision's inputs are recorded by digest only, so the decision itself is not recomputed.
 """
 
 from __future__ import annotations
@@ -45,6 +48,23 @@ class Report:
         return self.failure is None
 
 
+MERGE_ACTIONS = ("router.merge", "router.landing")
+
+
+def replay_router(records) -> None:
+    """The router's order (MISSION-ROUTER-001 Amendment 018): every merge it made follows, in its chain, the decision
+    that allowed it, for the same PR at the same commit. Raises ``Refused`` naming the first that does not."""
+    cleared = set()
+    for rec in records:
+        subject = rec["subject"]
+        key = (subject["pr"], subject["commit"])
+        if rec["action"] == "router.decision" and rec["result"] == "done" and rec["reason"].startswith("merge:"):
+            cleared.add(key)
+        elif rec["action"] in MERGE_ACTIONS and rec["result"] == "done" and key not in cleared:
+            raise Refused(f"record {rec['id']}: {rec['action']} of PR #{subject['pr']} at "
+                          f"{str(subject['commit'])[:12]} has no recorded decision before it")
+
+
 def verify_run(directory: Path, run: str, keys: Mapping[str, str]) -> tuple:
     """``(records, sealed)`` for one run; raises ``Refused`` naming the first problem."""
     path = Path(directory) / chain_mod.RECORDS
@@ -68,6 +88,7 @@ def verify_run(directory: Path, run: str, keys: Mapping[str, str]) -> tuple:
             before = f"{run}/{n - 1}" if n else "the run's start"
             raise Refused(f"run {run}: the chain is broken at record {where}: {before} was changed or removed")
         expected = rec_mod.digest(rec)
+    replay_router(records)
     seal_path = Path(directory) / seal_mod.SEAL
     if not seal_path.is_file():
         return records, False

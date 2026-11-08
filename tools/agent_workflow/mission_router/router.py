@@ -19,7 +19,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
                    evaluate_capture, evaluate_landing, instruction_build_findings, instruction_plan_findings)
 from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
+import os
+
 import evidence
+from evidence import producer as evidence_producer
 from mission_dispatch import login, permissions, quarantine, supply_chain
 from mission_dispatch.quarantine import inline as quarantined  # §5, Amendment 012: agent text the router posts
 from .github import GitHub, GitHubError
@@ -30,6 +33,9 @@ from .model import (
     MAX_AGENT_ATTEMPTS,
     MAX_ROUNDS_CEILING,
     MISSION_ID_RE,
+    _HALT_RE,
+    _RESUME_RE,
+    _RETRY_RE,
     iso,
     STACK_ID_RE,
     Manifest,
@@ -61,6 +67,9 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 MARKER = "<!-- mission-router:{} -->"
 _REOPENED_MARK = "<!-- mission-router:stack:reopened:"
 _MARKER_RE = re.compile(r"<!-- mission-router:([A-Za-z0-9:._-]+) -->")
+# The action a router comment records (Amendment 018), by its marker key's first part.
+COMMENT_ACTIONS = {"approval": "router.approval_request", "reject": "router.refusal", "refused": "router.refusal",
+                   "wait": "router.decision", "waiting": "router.decision"}
 _APPROVE_RE = re.compile(r"(?m)^\s*/mission approve ([0-9a-f]{40})\s*$")
 _CANCEL_RE = re.compile(r"(?m)^\s*/mission cancel\s*$")
 _TRACKING_RE = re.compile(r"<!-- mission-router:tracking-issue:([1-9][0-9]*) -->")
@@ -227,7 +236,8 @@ def check_summary(reasons, title: str) -> str:
 
 class MissionRouter:
     def __init__(self, gh: GitHub, config: dict, classify: Callable[[str], str], dry_run: bool = False,
-                 log: Callable[[str], None] = print, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
+                 log: Callable[[str], None] = print, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 recorder=None) -> None:
         # Every record GitHub returns passes the account-ID check before any rule reads it (Amendment 011).
         self.identity_mode = identity_mode(config)
         self.quarantine_mode = quarantine.mode(config)  # Amendment 012
@@ -261,6 +271,9 @@ class MissionRouter:
         self.dry_run = dry_run
         self.log = log
         self._comments: Dict[int, list] = {}
+        # Ring 6 (Amendment 018): every act is recorded before it is made; without a chain nothing is recorded.
+        self.evidence = recorder if recorder is not None else evidence_producer.Recorder.from_env(
+            os.environ, warn=lambda m: self.log(f"::warning::{m}"))
 
     # ------------------------------------------------------------------ sweep
     def sweep(self) -> Dict[str, MissionState]:
@@ -892,12 +905,14 @@ class MissionRouter:
                 and not self._stack_landed(manifest.stack_id, target):
             # The stack branch starts at the target branch; passed missions of the stack collect on it.
             head = self.gh.branch_head(target)
-            self._write(f"create {landing} at {head}", lambda: self.gh.create_branch(landing, head))
+            self._write(f"create {landing} at {head}", lambda: self.gh.create_branch(landing, head),
+                        "router.branch", mission=ref.mission_id, pr=raw["number"], commit=head)
         if actual is None:
             source = landing if self.gh.branch_head(landing) is not None else target
             base = self.gh.compare(source, raw["head"]["sha"]).get("merge_base_commit", {}).get("sha")
             if base:
-                self._write(f"create {branch} at {base}", lambda: self.gh.create_branch(branch, base))
+                self._write(f"create {branch} at {base}", lambda: self.gh.create_branch(branch, base),
+                            "router.branch", mission=ref.mission_id, pr=raw["number"], commit=base)
                 actual = base
         elif manifest is not None and manifest.depends_on:
             # CHAINED: once every dependency has passed, move a still-empty integration branch up to the
@@ -906,10 +921,12 @@ class MissionRouter:
             if len(landed) == len(manifest.depends_on) and not all(self._contains(actual, sha) for sha in landed):
                 if int(self.gh.compare(landing, actual).get("ahead_by", 1)) == 0:
                     head = self.gh.branch_head(landing)
-                    self._write(f"fast-forward {branch} to {head}", lambda: self.gh.update_ref(branch, head))
+                    self._write(f"fast-forward {branch} to {head}", lambda: self.gh.update_ref(branch, head),
+                                "router.branch", mission=ref.mission_id, pr=raw["number"], commit=head)
                     actual = head
         if raw["base"]["ref"] in (self.main, target) and actual is not None:
-            self._write(f"retarget PR #{raw['number']} to {branch}", lambda: self.gh.retarget(raw["number"], branch))
+            self._write(f"retarget PR #{raw['number']} to {branch}", lambda: self.gh.retarget(raw["number"], branch),
+                        "router.branch", mission=ref.mission_id, pr=raw["number"], commit=raw["head"]["sha"])
             raw = {**raw, "base": {**raw["base"], "ref": branch}}
         ctx.integration_actual = actual
         return raw
@@ -1036,10 +1053,12 @@ class MissionRouter:
         base = raw["base"]["ref"]
         title = f"Mission {ref.mission_id}: merge {ref.role}" + (f" round {ref.round}" if ref.round else "") + \
                 (f" ({decision.verdict})" if decision.verdict else "")
+        self._record_decision(number, head_sha, base, decision, ref.mission_id, ref.round)
         try:
             if base in self.targets:
                 self._approve_once(number, head_sha)
-            result = self._write(f"merge PR #{number} at {head_sha}", lambda: self.gh.merge(number, head_sha, title))
+            result = self._write(f"merge PR #{number} at {head_sha}", lambda: self.gh.merge(number, head_sha, title),
+                                 "router.merge", mission=ref.mission_id, round_n=ref.round, pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
                 self._comment_once(number, f"waiting:{head_sha[:12]}",
@@ -1058,13 +1077,16 @@ class MissionRouter:
             if (newest.get("status"), newest.get("conclusion"), (newest.get("output") or {}).get("title")) == (status, conclusion, title):
                 return
         self._write(f"set {CHECK_NAME} on {sha[:12]} to {outcome}",
-                    lambda: self.gh.create_check_run(CHECK_NAME, sha, status, conclusion, title, summary))
+                    lambda: self.gh.create_check_run(CHECK_NAME, sha, status, conclusion, title, summary),
+                    "router.refusal" if outcome == "failure" else "router.decision", commit=sha,
+                    outputs={"summary": evidence_producer.text_digest(summary)})
 
     def _approve_once(self, number: int, sha: str) -> None:
         for review in self.gh.paginate(f"/pulls/{number}/reviews", limit=500):
             if (review.get("user") or {}).get("login") == self.bot and review.get("state") == "APPROVED" and review.get("commit_id") == sha:
                 return
-        self._write(f"approve PR #{number}", lambda: self.gh.approve(number, sha, "Mission router: every routing check passed for this commit."))
+        self._write(f"approve PR #{number}", lambda: self.gh.approve(number, sha, "Mission router: every routing check passed for this commit."),
+                    "router.decision", pr=number, commit=sha)
 
     def _refuse_stage(self, raw: dict, ref: StageRef, decision: Decision) -> None:
         """A refused PR for the A2/A3 stage the mission waits on counts as a failed agent run (Amendment 003).
@@ -1086,15 +1108,23 @@ class MissionRouter:
                            f"PR #{raw['number']} at `{head[:12]}`. The stage branch is deleted so the agent runs again "
                            f"with these reasons. After {MAX_AGENT_ATTEMPTS} failures in a row the stage is recorded as "
                            "blocked for HITL review.\n\n" + FAILED_MARKER.format(role=ref.role, round=ref.round))
-        self._write(f"delete refused branch {branch}", lambda: self.gh.delete_branch(branch))
+        self._write(f"delete refused branch {branch}", lambda: self.gh.delete_branch(branch), "router.refusal",
+                    mission=ref.mission_id, round_n=ref.round, pr=raw["number"], commit=head)
 
-    def _comment_once(self, number: int, key: str, body: str) -> bool:
-        """Post ``body`` once per ``key``; True when this call posted it."""
+    def _comment_once(self, number: int, key: str, body: str, action: Optional[str] = None, before=None,
+                      mission: Optional[str] = None) -> bool:
+        """Post ``body`` once per ``key``; True when this call posted it. ``before`` runs just before it is posted
+        (the HITL commands the comment acts on are recorded there)."""
         for comment in self._pr_comments(number):
             if (comment.get("user") or {}).get("login") == self.bot and MARKER.format(key) in (comment.get("body") or ""):
                 return False
         text = f"{body}\n\n{MARKER.format(key)}"
-        self._write(f"comment on #{number} [{key}]", lambda: self.gh.comment(number, text))
+        if before is not None and not self.dry_run:
+            action = before() or action
+        kind = key.split(":", 1)[0]
+        action = action or COMMENT_ACTIONS.get(kind, "router.comment")
+        self._write(f"comment on #{number} [{key}]", lambda: self.gh.comment(number, text), action, pr=number,
+                    mission=mission, outputs={"comment": evidence_producer.text_digest(text)})
         self._pr_comments(number).append({"user": {"login": self.bot}, "body": text})
         return True
 
@@ -1116,19 +1146,82 @@ class MissionRouter:
             return
         try:
             self._write(f"start {AGENT_WORKFLOW} for {state.mission_id} {role}",
-                        lambda: self.gh.dispatch_workflow(AGENT_WORKFLOW, self.main))
+                        lambda: self.gh.dispatch_workflow(AGENT_WORKFLOW, self.main), "router.dispatch",
+                        mission=state.mission_id, round_n=state.round)
         except GitHubError as exc:
             self.log(f"{state.mission_id}: could not start {AGENT_WORKFLOW}; its schedule will pick it up: {exc}")
 
     def _add_labels(self, number: int, labels: List[str]) -> None:
-        self._write(f"label #{number} {labels}", lambda: self.gh.request("POST", f"/issues/{number}/labels", {"labels": labels}))
+        self._write(f"label #{number} {labels}", lambda: self.gh.request("POST", f"/issues/{number}/labels", {"labels": labels}),
+                    "router.label", pr=number)
 
-    def _write(self, what: str, fn):
+    def _record(self, action: str, reason: str, *, actor: Optional[str] = None, account: Optional[int] = None,
+                authority: Tuple[str, str] = ("spec_rule", "MISSION-ROUTER-001"), result: str = "done",
+                mission: Optional[str] = None, round_n: Optional[int] = None, pr: Optional[int] = None,
+                commit: Optional[str] = None, inputs: Optional[dict] = None, outputs: Optional[dict] = None) -> None:
+        """One record in this sweep's chain (MISSION-DISPATCH-001 §3m item 1). The router's own records name the bot
+        with its configured account ID; a HITL command's names the commenter with the ID GitHub gave."""
+        if self.dry_run or not self.evidence.enabled:
+            return
+        name = actor or self.bot
+        self.evidence.record(actor=name, account_id=account if actor else self._accounts.get(self.bot.casefold()),
+                             action=action, result=result, reason=reason, authority_kind=authority[0],
+                             authority_ref=authority[1], mission=mission, round_n=round_n, pr=pr,
+                             commit=commit if commit and len(commit) == 40 else None,
+                             inputs=inputs or {}, outputs=outputs or {})
+
+    def _write(self, what: str, fn, action: str = "router.issue", **subject):
+        """Make one write to GitHub, recorded first (Amendment 018). A write GitHub refuses is recorded again as
+        failed."""
         if self.dry_run:
             self.log(f"    [dry-run] would {what}")
             return None
         self.log(f"    {what}")
-        return fn()
+        self._record(action, what, **subject)
+        try:
+            return fn()
+        except GitHubError as exc:
+            self._record(action, f"{what}: GitHub refused it ({exc.status})", result="failed", **subject)
+            raise
+
+    def _record_decision(self, number: int, head_sha: str, base: str, decision, mission: Optional[str] = None,
+                         round_n: Optional[int] = None) -> None:
+        """The decision that allows a merge, recorded before the approval and the merge (Amendment 018), with the
+        HITL approvals of this exact commit it acted on."""
+        for comment in self._pr_comments(number):
+            user = comment.get("user") or {}
+            body = comment.get("body") or ""
+            login = str(user.get("login", ""))
+            if user.get("type") == "User" and login.casefold() in self.hitl and head_sha in _APPROVE_RE.findall(body):
+                self._record("router.hitl_command", f"HITL command: /mission approve {head_sha}", actor=login,
+                             account=user.get("id") if isinstance(user.get("id"), int) else None,
+                             authority=("hitl_command", f"comment {comment.get('id')} on #{number}"),
+                             mission=mission, round_n=round_n, pr=number, commit=head_sha,
+                             outputs={"comment": evidence_producer.text_digest(body)})
+        self._record("router.decision", f"merge: {decision.summary}", mission=mission, round_n=round_n, pr=number,
+                     commit=head_sha, inputs={"head": evidence_producer.text_digest(head_sha),
+                                              "base": evidence_producer.text_digest(base)},
+                     outputs={"reasons": evidence_producer.text_digest("\n".join(decision.reasons))})
+
+    def _record_commands(self, number: int, mission: str, stage: str) -> Tuple[bool, ...]:
+        """The HITL commands on a tracking issue the router acts on as it posts a stage change: each recorded with
+        the commenter's account ID. Returns (retry seen, halt seen)."""
+        seen = {"retry": False, "halt": False, "resume": False, "cancel": False}
+        for comment in self._pr_comments(number):
+            user = comment.get("user") or {}
+            login = str(user.get("login", ""))
+            body = comment.get("body") or ""
+            if user.get("type") != "User" or login.casefold() not in self.hitl:
+                continue
+            for word, pattern in (("retry", _RETRY_RE), ("halt", _HALT_RE), ("resume", _RESUME_RE),
+                                  ("cancel", _CANCEL_RE)):
+                if pattern.search(body):
+                    seen[word] = True
+                    self._record("router.hitl_command", f"HITL command: /mission {word}", actor=login,
+                                 account=user.get("id") if isinstance(user.get("id"), int) else None,
+                                 authority=("hitl_command", f"comment {comment.get('id')} on #{number}"),
+                                 mission=mission, outputs={"comment": evidence_producer.text_digest(body)})
+        return seen["retry"], seen["halt"]
 
     # ------------------------------------------------------- stacks: landing
     def _sweep_stacks(self) -> None:
@@ -1199,10 +1292,12 @@ class MissionRouter:
                                + f"\n\nTo approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```")
             self._add_labels(number, ["agent:needs-hitl"])
             return False
+        self._record_decision(number, head_sha, raw["base"]["ref"], decision)
         try:
             self._approve_once(number, head_sha)
             result = self._write(f"merge landing PR #{number} at {head_sha}",
-                                 lambda: self.gh.merge(number, head_sha, f"Stack {sid}: land {len(status.members)} missions"))
+                                 lambda: self.gh.merge(number, head_sha, f"Stack {sid}: land {len(status.members)} missions"),
+                                 "router.landing", pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
                 self._comment_once(number, f"waiting:{head_sha[:12]}",
@@ -1253,10 +1348,12 @@ class MissionRouter:
                                "pushed by HITL. Push a fix to this branch; anything else goes through a mission.")
             self._add_labels(number, ["agent:blocked"])
             return False
+        self._record_decision(number, head_sha, self.main, decision)
         try:
             self._approve_once(number, head_sha)
             result = self._write(f"merge capture PR #{number} at {head_sha}",
-                                 lambda: self.gh.merge(number, head_sha, f"L1 capture: merge PR #{number}"))
+                                 lambda: self.gh.merge(number, head_sha, f"L1 capture: merge PR #{number}"),
+                                 "router.merge", pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
                 self._comment_once(number, f"waiting:{head_sha[:12]}",
@@ -1314,7 +1411,8 @@ class MissionRouter:
                 self._write(f"update stack issue #{number}", lambda: self.gh.request("PATCH", f"/issues/{number}", {"body": body}))
             if sorted(l["name"] for l in issue.get("labels") or []) != sorted(labels):
                 self._write(f"set labels on #{number} to {labels}",
-                            lambda: self.gh.request("PUT", f"/issues/{number}/labels", {"labels": labels}))
+                            lambda: self.gh.request("PUT", f"/issues/{number}/labels", {"labels": labels}),
+                            "router.label")
             want = "closed" if status.status == STACK_LANDED else "open"
             if issue.get("state") != want:
                 self._write(f"{want} stack issue #{number}", lambda: self.gh.request("PATCH", f"/issues/{number}", {"state": want}))
@@ -1341,7 +1439,7 @@ class MissionRouter:
                                   "the router then lands the whole stack."):
                 try:
                     self._write(f"start {AGENT_WORKFLOW} to land stack {status.stack_id}",
-                                lambda: self.gh.dispatch_workflow(AGENT_WORKFLOW, self.main))
+                                lambda: self.gh.dispatch_workflow(AGENT_WORKFLOW, self.main), "router.dispatch")
                 except GitHubError as exc:
                     self.log(f"stack {status.stack_id}: could not start {AGENT_WORKFLOW}; its schedule will pick it up: {exc}")
 
@@ -1361,7 +1459,8 @@ class MissionRouter:
             return
         if issue is None:
             created = self._write(f"open tracking issue for {state.mission_id}",
-                                  lambda: self.gh.request("POST", "/issues", {"title": f"[mission] {state.mission_id}", "body": body, "labels": labels}))
+                                  lambda: self.gh.request("POST", "/issues", {"title": f"[mission] {state.mission_id}", "body": body, "labels": labels}),
+                                  mission=state.mission_id)
             number = created["number"] if created else None
             if created:
                 self._tracking[state.mission_id] = created
@@ -1369,17 +1468,25 @@ class MissionRouter:
         else:
             number = issue["number"]
             if issue.get("body") != body:
-                self._write(f"update issue #{number}", lambda: self.gh.request("PATCH", f"/issues/{number}", {"body": body}))
+                self._write(f"update issue #{number}", lambda: self.gh.request("PATCH", f"/issues/{number}", {"body": body}),
+                            mission=state.mission_id, pr=number)
             current = sorted(l["name"] for l in issue.get("labels") or [])
             if current != sorted(labels):
-                self._write(f"set labels on #{number} to {labels}", lambda: self.gh.request("PUT", f"/issues/{number}/labels", {"labels": labels}))
+                self._write(f"set labels on #{number} to {labels}", lambda: self.gh.request("PUT", f"/issues/{number}/labels", {"labels": labels}),
+                            "router.label", mission=state.mission_id, pr=number)
             want_state = "closed" if closed else "open"
             if issue.get("state") != want_state:
-                self._write(f"{want_state} issue #{number}", lambda: self.gh.request("PATCH", f"/issues/{number}", {"state": want_state}))
+                self._write(f"{want_state} issue #{number}", lambda: self.gh.request("PATCH", f"/issues/{number}", {"state": want_state}),
+                            mission=state.mission_id, pr=number)
         if number is not None:
+            def commands():
+                retry, halt = self._record_commands(number, state.mission_id, state.stage)
+                return "router.halt" if state.stage == PAUSED else ("router.retry" if retry and state.stage in
+                                                                     (AWAIT_A2, AWAIT_A3) else None)
             if self._comment_once(number, f"stage:{state.stage}:{state.round}",
                                   render_stage_comment(state, manifest, self.identities(), landing,
-                                                       target if target != self.main else "")):
+                                                       target if target != self.main else ""),
+                                  before=commands, mission=state.mission_id):
                 self._start_agent(state, manifest)
 
 
