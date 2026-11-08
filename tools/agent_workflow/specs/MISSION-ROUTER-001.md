@@ -77,7 +77,9 @@ every decision as an `evidence-record-v1` record before the act it allows. That 
 - each HITL command it acts on, by the commenter's account ID.
 
 Under `"evidence": "enforce"` it merges a stage PR only when that stage's run is sealed and stored, and otherwise holds
-the stage and says why (MISSION-DISPATCH-001 §3m item 6). An unknown `"evidence"` value stops the router.
+the stage and says why (MISSION-DISPATCH-001 §3m item 6). An unknown `"evidence"` value stops the router. *Clarified in part 3:* every write goes
+through `_write`, which records it first. Each merge is preceded by its `router.decision` and the HITL approvals it
+acted on, and the verifier replays that order (MISSION-DISPATCH-001 §3m, "Clarified in part 3").
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL

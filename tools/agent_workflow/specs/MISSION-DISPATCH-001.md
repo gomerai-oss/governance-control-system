@@ -1197,6 +1197,34 @@ HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
      verifier recomputing router decisions. Part 4 is the seal job, the evidence key and the evidence store. Part 5 is
      the independent checker (`evidence-verify.yml`).
 
+   **Clarified in part 3 (the router's records, MISSION-ROUTER-001 Amendment 018):**
+   - **Every write is recorded first.** Every write the router makes to GitHub goes through one place (`_write`),
+     which records it before making it. A write GitHub refuses is recorded again, as failed. A sweep is one chain,
+     `gh-<run id>-<attempt>-router`, kept as the `evidence-router` artifact until the store exists. A dry run
+     records nothing.
+   - **The closed list gains five router actions**, so that every write has one: `router.branch` (create,
+     fast-forward or retarget an integration or stack branch: write), `router.comment` (any other comment: send),
+     `router.dispatch` (start the agent workflow: send), `router.issue` (open, edit, close a tracking or stack issue:
+     write) and `router.label` (write). The other router actions keep their meaning:
+     - a failing check run, a rejection comment and a refused branch's deletion are `router.refusal`;
+     - an approval request is `router.approval_request`;
+     - a hold, a passing check run and the router's approving review are `router.decision`;
+     - a landing PR's merge is `router.landing`.
+   - **Each merge's decision comes first.** Before each merge, the router records a `router.decision` whose reason
+     starts `merge:`, for that PR at that commit, with the digests of the head, the base and the decision's
+     reasons. Before that, it records each HITL `/mission approve` of that exact commit as `router.hitl_command`.
+   - **HITL commands.** When the router posts a stage change on a tracking issue, it first records each HITL
+     `/mission retry`, `halt`, `resume` or `cancel` on that issue as `router.hitl_command`. That record names the
+     commenter by the account ID GitHub gives, and its authority is the comment. A stage comment for a halt is
+     `router.halt`, and one that follows a retry is `router.retry`. A command's reason reads
+     `HITL command: /mission <word>`, so no record's reason starts with `/mission`.
+   - **Accounts.** The router's own records carry `bot_account_id` from `config.json` where it is set.
+   - **Replay, not recomputation.** A decision's inputs are recorded by digest only, so the verifier cannot recompute
+     the decision. Instead, it replays the router's order (`replay_router`): every `router.merge` or `router.landing`
+     must follow, in its chain, a `router.decision` "merge:" record for the same PR at the same commit. A merge with
+     none is refused, naming it. Recomputing a decision needs its inputs' content, which only the store can keep
+     (limit 32).
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker

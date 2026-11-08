@@ -36,6 +36,11 @@ ACTIONS: Mapping[str, str] = {
     "router.halt": "decide",
     "router.retry": "decide",
     "router.hitl_command": "read",
+    "router.branch": "write",
+    "router.comment": "send",
+    "router.dispatch": "send",
+    "router.issue": "write",
+    "router.label": "write",
     # the dispatcher
     "dispatch.prepare": "write",
     "dispatch.run": "write",

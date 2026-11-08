@@ -47,7 +47,8 @@ class Store:
     def run(self, name, n=3):
         c = chain.Chain(self.root / verify.RUNS / name, name)
         for action in ("router.decision", "router.merge", "router.landing")[:n]:
-            c.append(time="2026-11-07T12:00:00Z", **entry(action))
+            extra = {"reason": "merge: every routing check passed"} if action == "router.decision" else {}
+            c.append(time="2026-11-07T12:00:00Z", **entry(action, **extra))
         return c
 
     def seal(self, c, seed=None):
