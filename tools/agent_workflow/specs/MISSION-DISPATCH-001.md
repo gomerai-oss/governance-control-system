@@ -1225,6 +1225,43 @@ HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
      none is refused, naming it. Recomputing a decision needs its inputs' content, which only the store can keep
      (limit 32).
 
+   **Clarified in part 4 (the seal job, the evidence key, the evidence store and item 6):**
+   - **The seal workflow.** `evidence-seal.yml` runs when a Mission Agent, Mission Router or Credentials Check run
+     ends. Its `seal` job runs in the `evidence-seal` environment, deployable from the default branch only, with
+     three credentials: the evidence key (`EVIDENCE_SEAL_KEY`), the evidence App's key (`EVIDENCE_APP_PRIVATE_KEY`)
+     and the App's id. Its own token can only read the ended run's artifacts.
+     - It fetches the run's `evidence-*` artifacts and checks each chain (`verify.verify_run`).
+     - It signs each chain's head, and adds the records and the seal to the store
+       (`runs/<run>/records.jsonl`, `runs/<run>/seal.json`).
+     - A chain that does not verify is neither sealed nor stored, and the job fails. A seal's `artifacts` is empty,
+       because the records already hold the artifacts' digests.
+     - The key must be a pinned one (`key.json`): a seal no verifier would accept is never made.
+     - Nothing runs until `config.json` names the store (`evidence_store`, `owner/name`).
+   - **The mark job.** It holds no secret. Its token can set check runs and read PRs. When every chain of the run
+     was sealed, it sets the `evidence-sealed` check on the head of each PR the run published (the run's
+     `dispatch.publish` records).
+   - **Item 6 is that check.** Under `"evidence": "enforce"`, the router merges an A2 or A3 stage PR only when
+     `evidence-sealed` passed on its head, set by `github-actions` as its own check is. Otherwise it holds the PR and
+     says why (router vector 118). So the router needs no credential for the store. Two kinds of PR are not held:
+     the plan PR, which no dispatcher run opens, and a landing PR, whose `land` job records nothing yet. Under
+     observe the router only logs that a PR is unsealed. The router's own chain for a sweep is sealed after that
+     sweep, so the merge it records cannot wait for its own seal.
+   - **The store gains files only.** A file is added through the contents API without a `sha`, which GitHub refuses
+     when the file exists. A re-run that would store the same bytes is a no-op, and different bytes are refused. The
+     store's branch protection (no force-push, no deletion) keeps its history, but cannot stop a later commit
+     from changing a file. So `evidence verify --store-history`, run on a clone of the store, refuses any file under
+     `runs/` that was changed after it was added.
+   - **The evidence key.** `python3 -m evidence keygen --repo <repository> --env evidence-seal` makes a key in HITL's
+     own terminal. It sets the seed as the environment secret through `gh secret set` on standard input, never
+     prints or writes it, and prints the public half to pin in `key.json` by a HITL hand-merged PR. A new key keeps
+     the old one listed, so earlier seals still verify.
+   - **The App token for the store.** It names the store, not this repository. The workflow permissions table
+     (ring 2, §3k item 4) now lets a row name one other repository, from a closed list
+     (`steps.store.outputs.name`), and checks the token against it. `evidence-seal.yml` is listed with the mission
+     workflows, so its permissions and pins are checked as theirs are.
+   - **Not built here.** The WORM copy (item 3, `evidence_worm`) and the EPAP pack for each landing (item 2) are
+     built in a later part. Part 5 is the independent checker (`evidence-verify.yml`, item 7).
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker

@@ -28,6 +28,16 @@
       "top level": {"contents": "read"},
       "jobs": {},
       "app_tokens": {}
+    },
+    "evidence-seal.yml": {
+      "top level": {},
+      "jobs": {
+        "seal": {"actions": "read"},
+        "mark": {"checks": "write", "pull-requests": "read"}
+      },
+      "app_tokens": {
+        "seal": [{"contents": "write", "(repositories)": "${{ steps.store.outputs.name }}"}]
+      }
     }
   }
 }
