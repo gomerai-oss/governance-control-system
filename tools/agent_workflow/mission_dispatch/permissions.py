@@ -39,11 +39,14 @@ CATALOG = "mcp_gateway/tools.json"  # under the tooling tree
 MATRIX = "tool_selection/matrix.json"
 SEATS = "tool_selection/seats.json"
 REGISTRY = "tool_selection/runtime_registry.json"
-WORKFLOWS = ("mission-agent.yml", "mission-router.yml", "credentials-check.yml")
+WORKFLOWS = ("mission-agent.yml", "mission-router.yml", "credentials-check.yml", "evidence-seal.yml")
 APP_TOKEN_ACTION = "actions/create-github-app-token@"
 GRANTS_TABLE = "credentials_check/grants.json"  # under the tooling tree (AUTHORITY with the rest of credentials_check/)
 GRANTS_SCHEMA = "workflow-grants-v1"
 THIS_REPOSITORY = "${{ steps.repo.outputs.name }}"  # the only repositories: an App-token step may name
+# ... unless its table row names another, from this closed list (ring 6: the evidence store, written by its own App).
+REPOSITORIES_KEY = "(repositories)"
+OTHER_REPOSITORIES = ("${{ steps.store.outputs.name }}",)
 
 
 class PermissionsError(ValueError):
@@ -350,9 +353,12 @@ def read_grants_table(path: Path) -> dict:
               and all(isinstance(v, dict) for v in row["jobs"].values()) and isinstance(row["app_tokens"], dict)
               and all(isinstance(v, list) and all(isinstance(t, dict) for t in v) for v in row["app_tokens"].values()))
         levels = [lvl for block in ([row["top level"]] + list(row["jobs"].values())
-                                    + [t for v in row["app_tokens"].values() for t in v]) for lvl in block.values()] \
-            if ok else []
-        if not ok or not all(lvl in ("read", "write") for lvl in levels):
+                                    + [t for v in row["app_tokens"].values() for t in v])
+                  for key, lvl in block.items() if key != REPOSITORIES_KEY] if ok else []
+        named = [t[REPOSITORIES_KEY] for v in (row["app_tokens"].values() if ok else ()) for t in v
+                 if REPOSITORIES_KEY in t]
+        if not ok or not all(lvl in ("read", "write") for lvl in levels) \
+                or not all(isinstance(n, str) and n in OTHER_REPOSITORIES for n in named):
             raise PermissionsError(f"the permissions table's row for {name} is malformed")
     return doc
 
@@ -399,8 +405,10 @@ def grant_findings(table: Mapping, workflows: Mapping[str, str]) -> List[str]:
                     findings.append(f"{where} has no row in the permissions table")
                     continue
                 named = perms.get("(repositories)")
-                if named != THIS_REPOSITORY:
-                    findings.append(f"{where} must name repositories: {THIS_REPOSITORY} (this repository only), "
+                allowed = rows[index].get(REPOSITORIES_KEY, THIS_REPOSITORY)
+                if named != allowed:
+                    findings.append(f"{where} must name repositories: {allowed} "
+                                    + ("(this repository only), " if allowed == THIS_REPOSITORY else "(its row's), ")
                                     + (f"not {named!r}" if named is not None else "and names none"))
                 findings += _over(perms, rows[index], where)
                 continue

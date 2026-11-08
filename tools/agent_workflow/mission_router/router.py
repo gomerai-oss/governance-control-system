@@ -67,6 +67,7 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 MARKER = "<!-- mission-router:{} -->"
 _REOPENED_MARK = "<!-- mission-router:stack:reopened:"
 _MARKER_RE = re.compile(r"<!-- mission-router:([A-Za-z0-9:._-]+) -->")
+SEALED_CHECK = "evidence-sealed"  # set by the seal job (MISSION-DISPATCH-001 §3m item 6)
 # The action a router comment records (Amendment 018), by its marker key's first part.
 COMMENT_ACTIONS = {"approval": "router.approval_request", "reject": "router.refusal", "refused": "router.refusal",
                    "wait": "router.decision", "waiting": "router.decision"}
@@ -190,6 +191,9 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     supply_chain.mode(config)  # ring 4 (MISSION-DISPATCH-001 §3l): likewise (vectors 97, 116)
     evidence.mode(config)  # ring 6 (MISSION-DISPATCH-001 §3m): likewise (vectors 111, 119)
     config_accounts(config)
+    store = config.get("evidence_store")
+    if store is not None and not (isinstance(store, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", store)):
+        raise ValueError("config.json: evidence_store must be owner/name")
     if not isinstance(config.get("credentials_register", ""), str):
         raise ValueError("config.json: credentials_register must name a file")
     issues = config.get("tracking_issues", {})
@@ -241,6 +245,7 @@ class MissionRouter:
         # Every record GitHub returns passes the account-ID check before any rule reads it (Amendment 011).
         self.identity_mode = identity_mode(config)
         self.quarantine_mode = quarantine.mode(config)  # Amendment 012
+        self.evidence_mode = evidence.mode(config)  # Amendment 018
         self.guard = AccountGuard(self.identity_mode, lambda message: self.log(message))
         self.gh = GuardedGitHub(gh, self.guard)
         self._accounts = config_accounts(config)
@@ -1002,7 +1007,7 @@ class MissionRouter:
         ref = parse_stage_branch(raw["head"]["ref"])
         if ref.role == "A1" and ctx.state.stage == AWAIT_A1 and not raw.get("draft"):
             raw = self._prepare_a1(raw, ctx, self._head_manifest(raw))
-        decision = self.decide(raw, ctx)
+        decision = self._evidence_hold(self.decide(raw, ctx), ref, head_sha)
         self.log(f"  PR #{number} {ref.role} r{ref.round}: {decision.action} {decision.summary}".rstrip())
         if raw["base"]["ref"] in self.targets:
             # Published before the merge below, which branch protection holds until the check passes.
@@ -1067,6 +1072,25 @@ class MissionRouter:
                 return False
             raise
         return bool(result)
+
+    def _sealed(self, sha: str) -> bool:
+        """Whether the seal job set ``evidence-sealed`` on ``sha``: every chain of the run that published it is sealed
+        and in the store (MISSION-DISPATCH-001 §3m item 6)."""
+        return any((r.get("app") or {}).get("slug") == "github-actions" and r.get("status") == "completed"
+                   and r.get("conclusion") == "success" for r in self.gh.check_runs(sha, SEALED_CHECK))
+
+    def _evidence_hold(self, decision: Decision, ref: StageRef, head_sha: str) -> Decision:
+        """Under ``"evidence": "enforce"`` an A2 or A3 stage PR, which a dispatcher run published, is merged only once
+        that run is sealed and stored; until then it is held and says why (router vector 118). Under observe the
+        router only says so in its log."""
+        if decision.action != MERGE or ref.role not in ("A2", "A3") or self._sealed(head_sha):
+            return decision
+        reason = ("the run that published this PR is not sealed and stored yet (MISSION-DISPATCH-001 §3m item 6; "
+                  "the seal job sets the evidence-sealed check)")
+        if self.evidence_mode != evidence.ENFORCE:
+            self.log(f"    evidence (observe): {reason}")
+            return decision
+        return Decision(WAIT, decision.reasons + (reason,), decision.approval_required, decision.verdict)
 
     def _publish_check(self, sha: str, outcome: str, title: str, summary: str) -> None:
         """Set this router's ``route-handoff-block`` result on ``sha``; skipped when it already says the same."""

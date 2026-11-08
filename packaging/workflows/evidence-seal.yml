@@ -1,0 +1,126 @@
+name: Evidence Seal
+
+# Ring 6 (MISSION-DISPATCH-001 §3m items 2, 3 and 6; Amendment 020, part 4): when a Mission Agent, Mission Router
+# or Credentials Check run ends, seal each job's evidence chain from that run with the evidence key, add the records
+# and seals to the evidence store (config.json "evidence_store"), and set the evidence-sealed check on each PR the
+# run published. Under "evidence": "enforce" the router merges an A2 or A3 stage PR only once that check is set.
+#
+# Security model: the seal job holds the evidence key and the evidence App's key, in the evidence-seal environment
+# (deployable from the default branch only), and no other credential: its own token can only read this run's
+# artifacts. It handles records only: digests, never agent content. The mark job holds no secret; its token can set
+# check runs and read PRs. Nothing runs until config.json names the store.
+
+on:
+  workflow_run:
+    workflows: [Mission Agent, Mission Router, Credentials Check]
+    types: [completed]
+
+permissions: {}
+
+env:
+  PYTHONPATH: tooling/tools/agent_workflow
+
+concurrency:
+  group: evidence-seal-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  seal:
+    name: seal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: evidence-seal
+    permissions:
+      actions: read
+    outputs:
+      store: ${{ steps.store.outputs.full }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Name the evidence store (config.json evidence_store; nothing runs without one)
+        id: store
+        run: python3 -B -m evidence store-name >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the run's evidence chains
+        if: steps.store.outputs.full != ''
+        continue-on-error: true  # a run that recorded nothing has no evidence artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: evidence-*
+          path: ${{ runner.temp }}/chains
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Mint the evidence App's token (the evidence store only, contents write only)
+        id: token
+        if: steps.store.outputs.full != ''
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.EVIDENCE_APP_ID }}
+          private-key: ${{ secrets.EVIDENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.store.outputs.name }}
+          permission-contents: write
+
+      - name: Seal each chain and add it to the store
+        if: steps.store.outputs.full != ''
+        env:
+          EVIDENCE_SEAL_KEY: ${{ secrets.EVIDENCE_SEAL_KEY }}
+          STORE_TOKEN: ${{ steps.token.outputs.token }}
+          STORE: ${{ steps.store.outputs.full }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/chains" "$RUNNER_TEMP/sealed"
+          python3 -B -m evidence seal --chains "$RUNNER_TEMP/chains" --store-repo "$STORE" --out "$RUNNER_TEMP/sealed/sealed.json"
+
+      - name: Hand the result to the mark job
+        if: steps.store.outputs.full != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sealed
+          path: ${{ runner.temp }}/sealed/sealed.json
+          if-no-files-found: error
+          retention-days: 1
+
+  mark:
+    name: mark
+    needs: seal
+    if: needs.seal.result == 'success' && needs.seal.outputs.store != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+      pull-requests: read
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Fetch the seal job's result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sealed
+          path: ${{ runner.temp }}/sealed
+
+      - name: Set evidence-sealed on each PR the sealed run published (MISSION-DISPATCH-001 §3m item 6)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STORE: ${{ needs.seal.outputs.store }}
+        run: python3 -B -m evidence mark --repo "$GITHUB_REPOSITORY" --result "$RUNNER_TEMP/sealed/sealed.json" --store-repo "$STORE"
