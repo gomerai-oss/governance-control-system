@@ -62,15 +62,14 @@ def main(argv=None) -> int:
         return 2
     report = verify.verify_store(Path(args.store), keys, args.run, args.sealed,
                                  Path(args.files) if args.files else None, Path(args.git) if args.git else None)
-    if not report.ok:
-        print(f"REFUSED: {report.failure}")
-        return 1
-    if args.store_history:
+    problems = []
+    if args.store_history:  # checked whether or not the chains verify: only it sees a run deleted whole (AST-6.2)
         from evidence import store as store_mod
         problems = store_mod.history_problems(Path(args.store))
-        if problems:
-            print(f"REFUSED: {problems[0]}")
-            return 1
+    if not report.ok or problems:
+        for line in ([report.failure] if not report.ok else []) + problems:
+            print(f"REFUSED: {line}")
+        return 1
     print(f"verified: {report.runs} runs, {report.records} records"
           + (f", {report.files_checked} files" if args.files else "")
           + (f", {report.commits_checked} commits" if args.git else ""))

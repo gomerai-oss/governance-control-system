@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from epap import ed25519
-from evidence import EvidenceError, chain, producer, sealer, seal, store, verify
+from evidence import EvidenceError, chain, producer, record, sealer, seal, store, verify
 from mission_dispatch import permissions
 from mission_router.github import GitHubError
 from mission_router.router import load_config
@@ -312,6 +312,80 @@ class CheckoutTests(unittest.TestCase):
                 with self.subTest(f"{name}: {job}"):
                     self.assertIn(perms.get("contents"), ("read", "write"),
                                   f"{name} job {job} checks out this repository without contents: read")
+
+
+class SwitchOnFixTests(unittest.TestCase):
+    """The three findings of AST-6.1 to 6.6, fixed with the switch-on (2026-11-09)."""
+
+    def run_chain(self, root, run, n=3):
+        rec = producer.Recorder(root, run)
+        out = []
+        for i in range(n):
+            out.append(rec.record(actor="mission-dispatch", account_id=None, action="dispatch.run", result="done",
+                                  authority_kind="plan", authority_ref="p"))
+        return out
+
+    def test_history_findings_show_even_when_a_chain_fails(self):  # AST-6.1, AST-6.2
+        import io
+        from contextlib import redirect_stdout
+        from evidence import __main__ as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.run_chain(repo, "run-a")
+            self.run_chain(repo, "run-b")
+            git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                            cwd=repo, check=True, capture_output=True)
+            git("init", "-q")
+            git("add", "-A")
+            git("commit", "-q", "-m", "stored")
+            path = repo / "runs" / "run-a" / chain.RECORDS
+            lines = path.read_bytes().split(b"\n")
+            path.write_bytes(lines[0] + b"\n" + lines[2] + b"\n")  # run-a loses a record
+            subprocess.run(["rm", "-r", str(repo / "runs" / "run-b")], check=True)  # run-b is deleted whole
+            git("commit", "-q", "-am", "edit")
+            keys = Path(tmp) / "k.json"
+            keys.write_text(json.dumps({"schema": seal.KEYS_SCHEMA, "keys": []}))
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = cli.main(["verify", "--store", str(repo), "--keys", str(keys), "--store-history"])
+            text = out.getvalue()
+            self.assertEqual(code, 1)
+            self.assertIn("a gap in the chain", text)
+            self.assertIn("runs/run-b/records.jsonl was changed after it was stored", text,
+                          "the deleted run is named although another chain failed first")
+
+    def test_a_withdrawal_in_another_run_shows_when_one_run_is_checked(self):  # AST-6.5
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = self.run_chain(root, "run-k")[1]
+            rec = producer.Recorder(root, "run-w")
+            rec.record(actor="hitl-example", account_id=6001, action="evidence.withdraw", result="done",
+                       reason="wrong round", authority_kind="hitl_command", authority_ref="HITL direction",
+                       withdraws={"id": target["id"], "digest": record.digest(target)})
+            rec.record(actor="mission-dispatch", account_id=None, action="dispatch.run", result="done",
+                       authority_kind="plan", authority_ref="p")  # so an edit to the withdrawal breaks a link
+            report = verify.verify_store(root, {}, run="run-k")
+            self.assertTrue(report.ok, report.failure)
+            self.assertEqual(report.withdrawn, {"run-k/1": "run-w/0"})
+            path = root / "runs" / "run-w" / chain.RECORDS
+            path.write_bytes(path.read_bytes().replace(b"wrong round", b"other text!"))
+            self.assertIn("run run-w", verify.verify_store(root, {}, run="run-k").failure or "",
+                          "a withdrawal from a run that does not verify is refused")
+
+    def test_a_key_change_is_a_pin_line(self):  # limit 30
+        from mission_dispatch import supply_chain
+        with tempfile.TemporaryDirectory() as tmp:
+            base, head = Path(tmp) / "base", Path(tmp) / "head"
+            for root, keys in ((base, []), (head, [{"keyid": "a" * 64, "public": "b" * 64}])):
+                (root / "tools/agent_workflow/evidence").mkdir(parents=True)
+                (root / "tools/agent_workflow/evidence/key.json").write_text(
+                    json.dumps({"schema": seal.KEYS_SCHEMA, "keys": keys}))
+            self.assertEqual(supply_chain.evidence_key_lines(base, head, "tools/agent_workflow"),
+                             ["key.json adds evidence key aaaaaaaaaaaaaaaa... (a HITL hand merge; it can seal from the "
+                              "merge on)"])
+            self.assertEqual(supply_chain.evidence_key_lines(head, base, "tools/agent_workflow"),
+                             ["key.json removes evidence key aaaaaaaaaaaaaaaa... (seals made with it no longer verify)"])
+            self.assertEqual(supply_chain.evidence_key_lines(base, base, "tools/agent_workflow"), [])
 
 
 class WorkflowTests(unittest.TestCase):

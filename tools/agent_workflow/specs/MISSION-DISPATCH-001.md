@@ -1057,7 +1057,8 @@ queued captures add more actions to record later:
 - `"enforce"`: item 6 also applies;
 - any other value fails the job, and stops the router.
 
-HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
+HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass. Switched on 2026-11-09 in governance (see "Switched
+on" below).
 
 1. **One record for every action** (`evidence-record-v1`, a new `evidence/` package, standard library only). A record
    has a closed set of fields:
@@ -1264,6 +1265,35 @@ HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
      workflows, so its permissions and pins are checked as theirs are.
    - **Not built here.** The WORM copy (item 3, `evidence_worm`) and the EPAP pack for each landing (item 2) are
      built in a later part. Part 5 is the independent checker (`evidence-verify.yml`, item 7).
+
+   **Switched on (2026-11-09, HITL direction)**, after AST-6.1 to 6.6 passed: governance's `config.json` sets
+   `"evidence": "enforce"`. The tests, all checked from fresh clones:
+   - **AST-6.1:** a one-byte edit to a stored record is refused, naming the broken link, or the seal for a last
+     record.
+   - **AST-6.2:** a force-push and a branch deletion are refused by the store's ruleset. A removed record is named
+     as a gap, or caught by the seal's count. A run deleted whole is named by `--store-history`.
+   - **AST-6.3:** seals by an unpinned key, re-seals by an attacker, and seals claiming the pinned key's id are all
+     refused. The seal job refuses an unpinned key before writing. A personal token cannot create the
+     `evidence-sealed` check run, and a commit status of that name does not count.
+   - **AST-6.4:** the real store verified with no network, no token and no artifacts. Its records are byte-identical
+     to the job's artifact. To be repeated after that artifact expires (2027-02-07).
+   - **AST-6.5:** a HITL withdrawal keeps the chain and marks the record. A withdrawal with the wrong digest, or
+     without HITL authority, is refused.
+   - **AST-6.6:** on a throwaway repository under enforce, with the seal job failing, the router held the A2 stage
+     PR, said why, and merged nothing.
+
+   **Clarified at the switch-on:**
+   - **Enforce needs a store.** `load_config` refuses `"evidence": "enforce"` without `evidence_store`, because
+     nothing could be sealed and every A2 and A3 stage PR would be held for ever. So Core and the GCS template stay
+     on `"observe"` until each has its own store, App and key (§3m item 3).
+   - **`--store-history` findings are printed even when a chain fails.** Only that check sees a run deleted whole
+     (AST-6.2).
+   - **A withdrawal shows when one run is checked.** `evidence verify --run <run>` also finds the withdrawals of its
+     records in other runs, and those runs must verify (AST-6.5).
+   - **A change to `key.json` is a `PIN` line (limit 30).** The credentials check lists each key added, removed or
+     changed against the PR's base.
+   - **A sealed stage PR can wait up to one sweep.** The router's PR trigger covers PRs into the default branch,
+     and stage PRs are picked up by its schedule, so a stage PR waits up to one sweep after its seal (AST-6.6).
 
 ## 4. Failures
 

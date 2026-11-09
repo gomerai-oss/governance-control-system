@@ -198,6 +198,31 @@ def _read(root: Path, tooling: str) -> Optional[dict]:
         return None
 
 
+EVIDENCE_KEYS = "evidence/key.json"
+
+
+def _evidence_keys(root: Path, tooling: str) -> Dict[str, str]:
+    """The pinned evidence keys' public halves by key id; empty when the pin is absent or unreadable."""
+    try:
+        doc = json.loads((Path(root) / tooling / EVIDENCE_KEYS).read_text(encoding="utf-8"))
+        return {str(k["keyid"]): str(k["public"]) for k in doc.get("keys", []) if isinstance(k, dict)}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def evidence_key_lines(base: Path, head: Path, tooling: str) -> List[str]:
+    """A change to the pinned evidence keys (MISSION-DISPATCH-001 §3m, limit 30) is a pin change too: one line per key
+    added or removed. A removed key's seals no longer verify."""
+    before, after = _evidence_keys(base, tooling), _evidence_keys(head, tooling)
+    lines = [f"key.json adds evidence key {kid[:16]}... (a HITL hand merge; it can seal from the merge on)"
+             for kid in sorted(set(after) - set(before))]
+    lines += [f"key.json removes evidence key {kid[:16]}... (seals made with it no longer verify)"
+              for kid in sorted(set(before) - set(after))]
+    lines += [f"key.json changes the public half of evidence key {kid[:16]}..."
+              for kid in sorted(set(before) & set(after)) if before[kid] != after[kid]]
+    return lines
+
+
 def pin_lines(base: Path, head: Path, tooling: str, workflows_rel: str) -> List[str]:
     """One line per pin the head changes from the base: table rows, and action SHAs the workflows run."""
     lines: List[str] = []
@@ -229,6 +254,7 @@ def pin_lines(base: Path, head: Path, tooling: str, workflows_rel: str) -> List[
     for name, refs in sorted(_workflow_pins(head / workflows_rel).items()):
         for ref in sorted(refs - old_wf.get(name, set())):
             lines.append(f"{name} now runs {ref}")
+    lines += evidence_key_lines(base, head, tooling)
     return lines
 
 
