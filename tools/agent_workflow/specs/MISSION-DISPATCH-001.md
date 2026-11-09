@@ -1295,6 +1295,30 @@ on" below).
    - **A sealed stage PR can wait up to one sweep.** The router's PR trigger covers PRs into the default branch,
      and stage PRs are picked up by its schedule, so a stage PR waits up to one sweep after its seal (AST-6.6).
 
+   **Clarified in part 5 (the checker, item 7):**
+   - **The workflow.** `evidence-verify.yml` runs on every push to the default branch, **daily** (not weekly, so a
+     store problem waits a day at most), and by hand. Its `verify` job verifies the whole store, in this order:
+     - every run's chain;
+     - its seal against the pinned keys (an unsealed run is refused);
+     - the store's history (every file added once, never changed);
+     - every record's commit, in this repository's full history and its PR heads (a refused stage branch is deleted,
+       but its commit stays on its PR).
+   - **Its result.** One `evidence.verify` record, a new action (class `decide`) in the closed list. The `report`
+     job, which holds no secret, sets the `evidence-verified` check on the commit. On a refusal it opens the HITL
+     issue "Evidence verification failed" (label `evidence:failed`), or comments on the open one. The checker never
+     changes the store.
+   - **A separate identity.** The checker reads the store as the **evidence reader App** (Contents read only,
+     installed only on the store), which is a different identity from the evidence App that writes it. Its key
+     (`EVIDENCE_READER_PRIVATE_KEY`) and id (`EVIDENCE_READER_APP_ID`) are held in the `evidence-verify`
+     environment, deployable from the default branch only. The checker never holds the evidence key or the writer
+     App's key.
+   - **No loop.** Evidence Seal seals the checker's chain, so the checker does not run on seal runs, which would
+     loop. New seals are verified on the next push or the next day.
+   - **Not built: the independent review of ring 6's own PRs** (item 7's last two sentences; router vector 109;
+     gate G-R6-02, "builder ≠ sole security reviewer"). Who may review or approve governance PRs is HITL's design
+     decision, and it is not made here: the item's mention of an A3 seat is not a commitment. G-R6-02 stays open.
+     Until it is decided, a ring 6 PR has only the builder's self-check and HITL's hand merge.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker

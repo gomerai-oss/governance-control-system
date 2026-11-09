@@ -6,6 +6,8 @@
   ``STORE_TOKEN``;
 - ``mark --repo OWNER/NAME --result FILE --store-repo OWNER/NAME``: the ``evidence-sealed`` checks, with
   ``GITHUB_TOKEN``;
+- ``check --store DIR --git DIR --out FILE`` and ``report --repo OWNER/NAME --result FILE --sha SHA --store-repo
+  OWNER/NAME``: the checker (item 7);
 - ``store-name``: ``config.json``'s ``evidence_store``, for the seal workflow;
 - ``keygen --repo OWNER/NAME --env ENV``: a new evidence key, its seed set as the environment secret by ``gh``, its
   public half printed to pin in ``key.json``.
@@ -47,6 +49,15 @@ def main(argv=None) -> int:
     m.add_argument("--repo", required=True)
     m.add_argument("--result", required=True)
     m.add_argument("--store-repo", required=True)
+    c = sub.add_parser("check", help="the checker: verify the whole store and record the result (item 7)")
+    c.add_argument("--store", required=True)
+    c.add_argument("--git", help="this repository's clone, with full history")
+    c.add_argument("--out", required=True)
+    r = sub.add_parser("report", help="the checker's evidence-verified check and, on a failure, the HITL issue")
+    r.add_argument("--repo", required=True)
+    r.add_argument("--result", required=True)
+    r.add_argument("--sha", required=True)
+    r.add_argument("--store-repo", required=True)
     sub.add_parser("store-name", help="print full=<owner/name> and name=<name> of config.json's evidence_store")
     k = sub.add_parser("keygen", help="make an evidence key; the seed goes to the environment secret only")
     k.add_argument("--repo", required=True)
@@ -92,6 +103,21 @@ def _other(args) -> int:
                   + ("discarded" if args.dry_run else f"set as {sealer.SEAL_KEY_ENV} in environment {args.env}") + "):")
             print(json.dumps(entry, indent=2))
             return 0
+        if args.command == "check":
+            from evidence import checker, producer
+            result = checker.check(Path(args.store), seal_mod.load_keys(), Path(args.git) if args.git else None,
+                                   producer.Recorder.from_env(os.environ))
+            sealer.write_json(args.out, result)
+            print("verified" if result["ok"] else f"REFUSED: {result['failures'][0]}")
+            return 0  # the report job turns a refusal into a failed check and an issue
+        if args.command == "report":
+            from evidence import checker
+            from mission_router.github import GitHub
+            result = json.loads(Path(args.result).read_text(encoding="utf-8"))
+            done = checker.report(result, GitHub(os.environ["GITHUB_TOKEN"], args.repo), args.sha, args.store_repo,
+                                  os.environ.get("RUN_URL", ""))
+            print(done)
+            return 0 if result["ok"] else 1
         if args.command == "store-name":
             from mission_router.router import load_config
             full = load_config().get("evidence_store") or ""

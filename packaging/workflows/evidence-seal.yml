@@ -1,7 +1,7 @@
 name: Evidence Seal
 
-# Ring 6 (MISSION-DISPATCH-001 §3m items 2, 3 and 6; Amendment 020, part 4): when a Mission Agent, Mission Router
-# or Credentials Check run ends, seal each job's evidence chain from that run with the evidence key, add the records
+# Ring 6 (MISSION-DISPATCH-001 §3m items 2, 3 and 6; Amendment 020, part 4): when a Mission Agent, Mission Router,
+# Credentials Check or Evidence Verify run ends, seal each job's evidence chain from that run with the evidence key, add the records
 # and seals to the evidence store (config.json "evidence_store"), and set the evidence-sealed check on each PR the
 # run published. Under "evidence": "enforce" the router merges an A2 or A3 stage PR only once that check is set.
 #
@@ -13,7 +13,7 @@ name: Evidence Seal
 
 on:
   workflow_run:
-    workflows: [Mission Agent, Mission Router, Credentials Check]
+    workflows: [Mission Agent, Mission Router, Credentials Check, Evidence Verify]
     types: [completed]
 
 permissions: {}

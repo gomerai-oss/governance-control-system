@@ -55,6 +55,8 @@ ACTIONS: Mapping[str, str] = {
     "credentials.finding": "decide",
     # withdrawal (§3m item 4)
     "evidence.withdraw": "withdraw",
+    # the checker (§3m item 7): one record per verification of the whole store
+    "evidence.verify": "decide",
 }
 
 FIELDS = frozenset({"schema", "id", "seq", "time", "actor", "action", "class", "subject", "inputs", "outputs",

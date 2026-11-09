@@ -1,0 +1,155 @@
+name: Evidence Verify
+
+# Ring 6 (MISSION-DISPATCH-001 §3m item 7; Amendment 020, part 5): the checker. On every push to the default branch,
+# daily, and by hand, it verifies the whole evidence store (config.json "evidence_store"):
+# - every run's chain, and its seal against the pinned evidence keys;
+# - the store's history: every file added once and never changed;
+# - every record's commit in this repository.
+# The result is the evidence-verified check on the commit and one evidence.verify record, which Evidence Seal seals
+# like any other. A refusal opens an issue for HITL, or comments on the open one. Nothing in the store is changed.
+#
+# Security model: the verify job reads the store with the evidence reader App, a different identity from the evidence
+# App that writes it. It holds that App's key in the evidence-verify environment (deployable from the default branch
+# only), its token narrowed to the store with contents read, and its own token can only read this repository. The
+# report job holds no secret; its token can set check runs and open or comment on issues. Nothing runs until
+# config.json names the store.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  PYTHONPATH: tooling/tools/agent_workflow
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+concurrency:
+  group: evidence-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: evidence-verify
+    permissions:
+      contents: read  # check out this repository, with its whole history, to check the records' commits
+    outputs:
+      store: ${{ steps.store.outputs.full }}
+    steps:
+      - name: Check out the default branch's tooling, with its whole history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Name the evidence store (config.json evidence_store; nothing runs without one)
+        id: store
+        run: python3 -B -m evidence store-name >> "$GITHUB_OUTPUT"
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m item 7)
+        if: steps.store.outputs.full != ''
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-verify" >> "$GITHUB_ENV"
+
+      - name: Mint the evidence reader App's token (the evidence store only, contents read only)
+        id: token
+        if: steps.store.outputs.full != ''
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.EVIDENCE_READER_APP_ID }}
+          private-key: ${{ secrets.EVIDENCE_READER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.store.outputs.name }}
+          permission-contents: read
+
+      - name: Clone the store with its whole history (the token is passed to git in its environment, never in a URL)
+        if: steps.store.outputs.full != ''
+        env:
+          STORE: ${{ steps.store.outputs.full }}
+          STORE_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$STORE_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git clone --quiet "https://github.com/$STORE.git" "$RUNNER_TEMP/store"
+          git -C "$RUNNER_TEMP/store" log --oneline -1
+
+      - name: Fetch this repository's PR heads (a refused stage branch is deleted; its commit stays on its PR)
+        if: steps.store.outputs.full != ''
+        run: git -C tooling fetch --quiet --no-tags origin '+refs/pull/*/head:refs/remotes/pull/*' || true
+
+      - name: Verify the whole store and record the result
+        if: steps.store.outputs.full != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/result"
+          python3 -B -m evidence check --store "$RUNNER_TEMP/store" --git tooling --out "$RUNNER_TEMP/result/result.json"
+
+      - name: Hand the result to the report job
+        if: steps.store.outputs.full != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verify-result
+          path: ${{ runner.temp }}/result/result.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Keep this job's evidence chain (Evidence Seal seals it)
+        if: always() && steps.store.outputs.full != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-verify
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
+  report:
+    name: report
+    needs: verify
+    if: needs.verify.result == 'success' && needs.verify.outputs.store != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read  # check out this repository's tooling
+      checks: write
+      issues: write
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Fetch the verify job's result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verify-result
+          path: ${{ runner.temp }}/result
+
+      - name: Set evidence-verified on this commit; on a refusal, open or update the HITL issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STORE: ${{ needs.verify.outputs.store }}
+        run: python3 -B -m evidence report --repo "$GITHUB_REPOSITORY" --result "$RUNNER_TEMP/result/result.json" --sha "$GITHUB_SHA" --store-repo "$STORE"
