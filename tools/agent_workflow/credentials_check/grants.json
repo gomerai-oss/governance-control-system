@@ -38,6 +38,16 @@
       "app_tokens": {
         "seal": [{"contents": "write", "(repositories)": "${{ steps.store.outputs.name }}"}]
       }
+    },
+    "evidence-verify.yml": {
+      "top level": {},
+      "jobs": {
+        "verify": {"contents": "read"},
+        "report": {"contents": "read", "checks": "write", "issues": "write"}
+      },
+      "app_tokens": {
+        "verify": [{"contents": "read", "(repositories)": "${{ steps.store.outputs.name }}"}]
+      }
     }
   }
 }
