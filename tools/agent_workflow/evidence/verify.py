@@ -148,6 +148,27 @@ def _check_content(records, index: Optional[Dict[str, Path]], git: Optional[Path
             report.commits_checked += 1
 
 
+def _withdrawals_elsewhere(base: Path, runs: set, keys: Mapping[str, str]) -> List[dict]:
+    """The withdrawals in other runs that name a record of ``runs``; each such run must itself verify."""
+    import json
+    found: List[dict] = []
+    for directory in sorted(p for p in base.iterdir() if p.is_dir() and p.name not in runs):
+        path = directory / chain_mod.RECORDS
+        if not path.is_file():
+            continue
+        try:
+            lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        except ValueError:
+            continue
+        named = [r for r in lines if isinstance(r, dict) and r.get("class") == "withdraw"
+                 and str((r.get("withdraws") or {}).get("id", "")).rsplit("/", 1)[0] in runs]
+        if named:
+            records, _ = verify_run(directory, directory.name, keys)
+            found += [r for r in records if r["class"] == "withdraw"
+                      and r["withdraws"]["id"].rsplit("/", 1)[0] in runs]
+    return found
+
+
 def verify_store(store: Path, keys: Mapping[str, str], run: Optional[str] = None,
                  require_seal: bool = False, files: Optional[Path] = None, git: Optional[Path] = None) -> Report:
     report = Report()
@@ -173,6 +194,8 @@ def verify_store(store: Path, keys: Mapping[str, str], run: Optional[str] = None
                 known[rec["id"]] = rec_mod.digest(rec)
                 if rec["class"] == "withdraw":
                     withdrawals.append(rec)
+        if run:  # a record's withdrawal may sit in another run: find those that name this run's records (AST-6.5)
+            withdrawals += _withdrawals_elsewhere(base, set(names), keys)
         for w in withdrawals:
             target = w["withdraws"]
             if target["id"] not in known:

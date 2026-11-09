@@ -291,9 +291,18 @@ class ModeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "evidence must be one of"):
                 load_config(path)
 
-    def test_this_repository_observes(self):  # part 1: nothing is sealed or stored yet
+    def test_this_repository_enforces_exactly_when_it_names_a_store(self):  # switched on 2026-11-09
         config = json.loads((AW / "mission_router" / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(evidence.mode(config), "observe")
+        self.assertEqual(evidence.mode(config), "enforce" if config.get("evidence_store") else "observe")
+
+    def test_enforce_without_a_store_stops_the_router(self):
+        config = json.loads((AW / "mission_router" / "config.json").read_text(encoding="utf-8"))
+        config.pop("evidence_store", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({**config, "evidence": "enforce"}))
+            with self.assertRaisesRegex(ValueError, "needs an evidence_store"):
+                load_config(path)
 
 
 class AuthorityTests(unittest.TestCase):
