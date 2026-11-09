@@ -285,6 +285,35 @@ jobs:
                 permissions.read_grants_table(path)
 
 
+class CheckoutTests(unittest.TestCase):
+    """Every job that checks out this repository can read it. Ring 6's seal and mark jobs first shipped without
+    ``contents: read`` and failed at checkout on every run (2026-11-09); this checks every mission workflow."""
+
+    def test_every_job_that_checks_out_this_repository_can_read_it(self):
+        import re
+        for name in permissions.WORKFLOWS:
+            live = ROOT / ".github" / "workflows" / name
+            path = live if live.is_file() else ROOT / "packaging" / "workflows" / name
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            grants = permissions.workflow_grants(name, text)
+            top = grants.get(f"{name}: top level", {})
+            body = text[text.index("\njobs:\n"):]
+            heads = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", body))
+            for i, head in enumerate(heads):
+                block = body[head.start():heads[i + 1].start() if i + 1 < len(heads) else len(body)]
+                steps = re.split(r"(?m)^      - ", block)
+                checkouts = [st for st in steps if "uses: actions/checkout@" in st and "repository:" not in st]
+                if not checkouts:
+                    continue
+                job = head.group(1)
+                perms = grants.get(f"{name}: job {job}", top)
+                with self.subTest(f"{name}: {job}"):
+                    self.assertIn(perms.get("contents"), ("read", "write"),
+                                  f"{name} job {job} checks out this repository without contents: read")
+
+
 class WorkflowTests(unittest.TestCase):
     def text(self):
         live = ROOT / ".github" / "workflows" / "evidence-seal.yml"
