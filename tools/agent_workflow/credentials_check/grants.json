@@ -32,8 +32,8 @@
     "evidence-seal.yml": {
       "top level": {},
       "jobs": {
-        "seal": {"actions": "read"},
-        "mark": {"checks": "write", "pull-requests": "read"}
+        "seal": {"contents": "read", "actions": "read"},
+        "mark": {"contents": "read", "checks": "write", "pull-requests": "read"}
       },
       "app_tokens": {
         "seal": [{"contents": "write", "(repositories)": "${{ steps.store.outputs.name }}"}]

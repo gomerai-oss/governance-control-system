@@ -6,9 +6,10 @@ name: Evidence Seal
 # run published. Under "evidence": "enforce" the router merges an A2 or A3 stage PR only once that check is set.
 #
 # Security model: the seal job holds the evidence key and the evidence App's key, in the evidence-seal environment
-# (deployable from the default branch only), and no other credential: its own token can only read this run's
-# artifacts. It handles records only: digests, never agent content. The mark job holds no secret; its token can set
-# check runs and read PRs. Nothing runs until config.json names the store.
+# (deployable from the default branch only), and no other credential: its own token can only read this repository
+# and the ended run's artifacts. It handles records only: digests, never agent content. The mark job holds no
+# secret; its token can read this repository, set check runs and read PRs. Nothing runs until config.json names the
+# store.
 
 on:
   workflow_run:
@@ -31,6 +32,7 @@ jobs:
     timeout-minutes: 10
     environment: evidence-seal
     permissions:
+      contents: read  # check out this repository's tooling
       actions: read
     outputs:
       store: ${{ steps.store.outputs.full }}
@@ -98,6 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      contents: read  # check out this repository's tooling
       checks: write
       pull-requests: read
     steps:

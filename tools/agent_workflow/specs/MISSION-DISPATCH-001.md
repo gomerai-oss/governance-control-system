@@ -1255,6 +1255,9 @@ HITL switches to `"enforce"` after AST-6.1 to 6.6 below pass.
      own terminal. It sets the seed as the environment secret through `gh secret set` on standard input, never
      prints or writes it, and prints the public half to pin in `key.json` by a HITL hand-merged PR. A new key keeps
      the old one listed, so earlier seals still verify.
+     Each repository owns its `key.json`, as it owns its `config.json`: the release does not ship it, so a
+     companion or adopter never trusts another repository's seals. Its own pin starts empty: the GCS release ships
+     an empty one (`products/gcs/evidence-key.example.json`), as it ships its example config.
    - **The App token for the store.** It names the store, not this repository. The workflow permissions table
      (ring 2, §3k item 4) now lets a row name one other repository, from a closed list
      (`steps.store.outputs.name`), and checks the token against it. `evidence-seal.yml` is listed with the mission
