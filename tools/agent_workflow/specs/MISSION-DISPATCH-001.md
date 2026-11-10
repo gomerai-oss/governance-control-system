@@ -1355,6 +1355,49 @@ on" below).
      the record: every sealed run survives in the bucket, and each seal still verifies it. While the policy is
      unlocked, a project administrator could still remove it, so limit 29 is only fully closed by the lock.
 
+   **Clarified in the EPAP landing part (item 2, HITL direction 2026-11-10: option 1 now, option 2 deferred):**
+   - **What a landing is.** A `router.landing` record that names its mission. The router now records its merge of an
+     A3 PASS into a landing branch as `router.landing`, as it already did a stack's landing PR. A merge into an
+     integration or stack branch stays `router.merge`.
+   - **The attestation.** When the sweep holding a landing is sealed, the seal job writes one attestation for it:
+     - an in-toto Statement v1 whose subject is the landed commit;
+     - with a SLSA Provenance v1 predicate (build type `urn:evidence:mission-landing:v1`), whose
+       `internalParameters.records` lists every sealed record of that mission, across all its runs, each by id and
+       digest, with its action, result, actor (and account id), role and round. That covers the plan's approval by
+       HITL's account id, each A2 build and A3 review, and each router decision and merge;
+     - in a DSSE envelope (`application/vnd.in-toto+json`), signed with the evidence key.
+
+     It is stored at `packs/<landing record id>.provenance.json`, added once and never changed, like a run, and
+     copied to the WORM bucket. Under enforce, a stage PR merges only once its run is sealed, so a mission's
+     dispatcher records are in the store before its landing.
+   - **Who signs.** The signer is the pipeline's attestor (the seal job, builder id
+     `https://github.com/<repository>/.github/workflows/evidence-seal.yml`), not the actors. The attestation states
+     what the sealed records show; it does not claim that each actor signed its step. This is SLSA's model, in which
+     the build platform signs the provenance.
+   - **The checker** verifies every attestation:
+     - its DSSE signature, against the pinned keys;
+     - its form;
+     - that every record it cites is in the store as recorded;
+     - that its subject is the landing's commit.
+
+     `--store-history` and the WORM check cover `packs/` as they cover `runs/`.
+   - **Deferred: the full EPAP pack (option 2), to the identity work.** That is `epap.writer`'s form: a layout
+     signed by HITL, and one link per step, each signed by its own functionary (the a1 App or HITL, HITL, a2, a3, the
+     router). It needs each actor to hold and use its own signing key, and today the only such key is the evidence
+     key. Signing the actors' links with it would forge their signatures, so the pack is not built until the identity
+     work (ring 1, and HITL's queued A1 hardening) gives each actor its own key.
+   - **Not done here: the SSDF and EU control mapping** that CAPTURE-2026-001 asks for (SSDF practices and SLSA
+     level on the US face; EUCS, C5, SecNumCloud and CRA controls on the EU face). It is documentation, a separate
+     item.
+   - **Limits.**
+     - A stack's landing PR names no single mission, so it is not attested. Its missions' A3 PASS merges into the
+       stack branch are `router.merge`.
+     - Each attestation reads every run in the store that can hold a mission's records (the credentials check's and
+       the checker's runs are skipped). It lists them through the git trees API, which reports truncation (the
+       contents API stops at 1,000 entries silently), and refuses a truncated listing rather than writing a partial
+       attestation. As the store grows this gets slower; an index of runs by mission is the later fix.
+
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker

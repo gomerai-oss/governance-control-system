@@ -59,7 +59,10 @@ class RouterRecordTests(unittest.TestCase):
                      "router.approval_request", "router.hitl_command", "router.comment"):
             self.assertIn(want, actions)
         merges = [r for r in recs if r["action"] == "router.merge" and r["result"] == "done"]
-        self.assertEqual(len(merges), 5, "plan, A2 r1, A3 FAIL, A2 r2, A3 PASS")
+        self.assertEqual(len(merges), 4, "plan, A2 r1, A3 FAIL, A2 r2")
+        (landing,) = [r for r in recs if r["action"] == "router.landing" and r["result"] == "done"]
+        self.assertEqual((landing["subject"]["mission"], landing["subject"]["round"]), (rt.MID, 2),
+                         "the A3 PASS into main is the mission's landing")
         report = verify.verify_store(loop.store, {})
         self.assertTrue(report.ok, report.failure)
         for r in recs:

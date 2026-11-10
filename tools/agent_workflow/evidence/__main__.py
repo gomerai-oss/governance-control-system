@@ -146,10 +146,13 @@ def _other(args) -> int:
             from evidence import worm as worm_mod
             from mission_router.router import load_config
             bucket = worm_mod.from_config(load_config())  # the WORM copy, when declared (item 3)
-            result = sealer.seal_runs(Path(args.chains), seed, seal_mod.load_keys(), store, chain_mod.now(), bucket)
+            result = sealer.seal_runs(Path(args.chains), seed, seal_mod.load_keys(), store, chain_mod.now(), bucket,
+                                      os.environ.get("GITHUB_REPOSITORY", ""))
             sealer.write_json(args.out, result)
             for run in result["sealed"]:
                 print(f"sealed: {run}")
+            for name in result["packs"]:
+                print(f"landing provenance: {name}")
             for r in result["refused"]:
                 print(f"REFUSED: {r['run']}: {r['reason']}")
             return 1 if result["refused"] else 0

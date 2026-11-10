@@ -1070,8 +1070,11 @@ class MissionRouter:
         try:
             if base in self.targets:
                 self._approve_once(number, head_sha)
+            # A merge into a landing branch (an A3 PASS) is the mission's landing: its EPAP provenance is written
+            # when this sweep is sealed (MISSION-DISPATCH-001 §3m item 2).
             result = self._write(f"merge PR #{number} at {head_sha}", lambda: self.gh.merge(number, head_sha, title),
-                                 "router.merge", mission=ref.mission_id, round_n=ref.round, pr=number, commit=head_sha)
+                                 "router.landing" if base in self.targets else "router.merge",
+                                 mission=ref.mission_id, round_n=ref.round, pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
                 self._comment_once(number, f"waiting:{head_sha[:12]}",
