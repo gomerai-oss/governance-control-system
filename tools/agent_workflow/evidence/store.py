@@ -12,11 +12,12 @@ from __future__ import annotations
 import base64
 import subprocess
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 from evidence import EvidenceError
 
 RUNS = "runs"
+PACKS = "packs"  # the landing attestations (§3m item 2): kept like runs, added once and never changed
 
 
 class Store:
@@ -53,10 +54,10 @@ class Store:
 
 
 def history_problems(clone: Path) -> List[str]:
-    """For a clone of the store: every file under ``runs/`` must have been added in one commit and never changed,
+    """For a clone of the store: every file under ``runs/`` and ``packs/`` must have been added in one commit and never changed,
     renamed or deleted since (§3m item 3)."""
     done = subprocess.run(["git", "-C", str(clone), "log", "--format=%x00%H", "--name-status", "--no-renames", "--",
-                           RUNS], capture_output=True, text=True)
+                           RUNS, PACKS], capture_output=True, text=True)
     if done.returncode != 0:
         return [f"the store's history cannot be read: {done.stderr.strip()[:200]}"]
     touched: Dict[str, List[str]] = {}

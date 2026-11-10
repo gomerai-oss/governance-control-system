@@ -21,6 +21,7 @@ from epap import ed25519
 from epap.signing import dump
 from evidence import EvidenceError
 from evidence import chain as chain_mod
+from evidence import pack as pack_mod
 from evidence import record as rec_mod
 from evidence import seal as seal_mod
 from evidence import store as store_mod
@@ -50,15 +51,41 @@ def seed_from(text: str) -> bytes:
     return bytes.fromhex(text)
 
 
+# Runs that never hold a mission's records: the credentials check's and the checker's.
+_NO_MISSION = ("-credentials", "-verify")
+
+
+def _stored_records(store: "store_mod.Store") -> List[dict]:
+    """The records of every run that can hold a mission's records, read back from the store (the landing attestation
+    cites a mission's records across all its runs). Listed through the git trees API, which says when its listing is
+    truncated, never through the contents API, which stops at 1,000 entries without saying so."""
+    import base64
+    import json
+    tree = store.request("GET", f"/git/trees/{store.branch}?recursive=1")
+    if tree.get("truncated"):
+        raise EvidenceError("the store's tree is too large to list in one call; the landing attestation needs all of it")
+    out: List[dict] = []
+    for entry in tree.get("tree", []):
+        path = entry.get("path", "")
+        parts = path.split("/")
+        if entry.get("type") != "blob" or len(parts) != 3 or parts[0] != store_mod.RUNS \
+                or parts[2] != chain_mod.RECORDS or parts[1].endswith(_NO_MISSION):
+            continue
+        data = base64.b64decode(store.request("GET", f"/git/blobs/{entry['sha']}").get("content") or "")
+        out += [json.loads(line) for line in data.decode("utf-8").splitlines() if line]
+    return out
+
+
 def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_mod.Store", time: str,
-              worm=None) -> dict:
+              worm=None, repository: str = "") -> dict:
     """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}]}``. With ``worm`` (a declared WORM bucket),
     each run's records and seal are also copied there once they are in the store; a copy the bucket refuses fails the
     job, so the run's PRs are not marked."""
     kid = seal_mod.keyid(ed25519.public_key(seed))
     if kid not in keys:
         raise EvidenceError("the seal key is not a pinned evidence key (evidence/key.json); nothing was sealed")
-    out: dict = {"sealed": [], "refused": [], "prs": []}
+    out: dict = {"sealed": [], "refused": [], "prs": [], "packs": []}
+    landed: List[dict] = []
     for run, directory in find_runs(chains).items():
         try:
             records, _ = verify.verify_run(directory, run, {})
@@ -78,6 +105,16 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
         for rec in records:
             if rec["action"] == "dispatch.publish" and rec["result"] == "done" and rec["subject"]["pr"]:
                 out["prs"].append({"pr": rec["subject"]["pr"], "run": run})
+        landed += pack_mod.landings(records)
+    if landed and repository:  # each landing's attestation, once its run is in the store (§3m item 2)
+        everything = _stored_records(store)
+        for landing in landed:
+            name = pack_mod.name_for(landing)
+            data = pack_mod.sign(pack_mod.statement(landing, everything, repository), seed)
+            store.add(name, data, f"Landing provenance for {landing['subject']['mission']} ({landing['id']})")
+            if worm is not None:
+                worm.put(name, data)
+            out["packs"].append(name)
     return out
 
 

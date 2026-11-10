@@ -140,11 +140,11 @@ def _when(text: str) -> datetime:
 
 
 def check_copies(store: Path, bucket: Bucket, retention_years: int) -> List[str]:
-    """For a clone of the store: every file under ``runs/`` has its copy in the bucket, byte-identical, retained for
+    """For a clone of the store: every file under ``runs/`` and ``packs/`` has its copy in the bucket, byte-identical, retained for
     at least ``retention_years`` from when the copy was made. One line per problem."""
     problems: List[str] = []
     base = Path(store)
-    for path in sorted((base / "runs").rglob("*")):
+    for path in sorted(p for top in ("runs", "packs") for p in (base / top).rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
         name = path.relative_to(base).as_posix()

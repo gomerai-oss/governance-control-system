@@ -32,6 +32,8 @@ def check(store: Path, keys: Mapping[str, str], git: Optional[Path], recorder=No
     for ``retention_years``."""
     report = verify.verify_store(Path(store), keys, require_seal=True, git=git)
     failures = ([report.failure] if report.failure else []) + store_mod.history_problems(Path(store))
+    from evidence import pack as pack_mod
+    failures += pack_mod.store_problems(Path(store), keys)  # every landing attestation (§3m item 2)
     if worm_error:  # a declared WORM bucket the checker could not reach is a failure to verify, reported like any
         failures.append(f"the WORM copy could not be checked: {worm_error}")
     if worm is not None:
