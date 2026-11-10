@@ -32,7 +32,7 @@
     "evidence-seal.yml": {
       "top level": {},
       "jobs": {
-        "seal": {"contents": "read", "actions": "read"},
+        "seal": {"contents": "read", "actions": "read", "id-token": "write"},
         "mark": {"contents": "read", "checks": "write", "pull-requests": "read"}
       },
       "app_tokens": {
@@ -42,7 +42,7 @@
     "evidence-verify.yml": {
       "top level": {},
       "jobs": {
-        "verify": {"contents": "read"},
+        "verify": {"contents": "read", "id-token": "write"},
         "report": {"contents": "read", "checks": "write", "issues": "write"}
       },
       "app_tokens": {

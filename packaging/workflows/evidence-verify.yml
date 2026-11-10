@@ -39,6 +39,7 @@ jobs:
     environment: evidence-verify
     permissions:
       contents: read  # check out this repository, with its whole history, to check the records' commits
+      id-token: write  # the WORM copy (§3m item 3): GitHub's OIDC token, exchanged for a short-lived read-only token
     outputs:
       store: ${{ steps.store.outputs.full }}
     steps:

@@ -50,8 +50,11 @@ def seed_from(text: str) -> bytes:
     return bytes.fromhex(text)
 
 
-def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_mod.Store", time: str) -> dict:
-    """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}]}``."""
+def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_mod.Store", time: str,
+              worm=None) -> dict:
+    """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}]}``. With ``worm`` (a declared WORM bucket),
+    each run's records and seal are also copied there once they are in the store; a copy the bucket refuses fails the
+    job, so the run's PRs are not marked."""
     kid = seal_mod.keyid(ed25519.public_key(seed))
     if kid not in keys:
         raise EvidenceError("the seal key is not a pinned evidence key (evidence/key.json); nothing was sealed")
@@ -65,13 +68,36 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
         head = rec_mod.digest(records[-1]) if records else rec_mod.genesis(run)
         doc = seal_mod.make(run, head, len(records), {}, time, seed)
         message = f"Seal {run}: {len(records)} records"
-        store.add(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", (directory / chain_mod.RECORDS).read_bytes(), message)
-        store.add(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", dump(doc), message)
+        records_bytes, seal_bytes = (directory / chain_mod.RECORDS).read_bytes(), dump(doc)
+        store.add(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes, message)
+        store.add(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes, message)
+        if worm is not None:
+            worm.put(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes)
+            worm.put(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes)
         out["sealed"].append(run)
         for rec in records:
             if rec["action"] == "dispatch.publish" and rec["result"] == "done" and rec["subject"]["pr"]:
                 out["prs"].append({"pr": rec["subject"]["pr"], "run": run})
     return out
+
+
+def backfill(request, bucket) -> Dict[str, int]:
+    """Copy every file the store already holds under ``runs/`` to the WORM bucket (§3m item 3): runs sealed before the
+    bucket was declared. ``request`` is the store's GitHub client (the evidence App's token can read the store). A copy
+    already there is left as it is. Returns ``{"added": n, "present": n}``."""
+    import base64
+    tree = request("GET", f"/git/trees/{store_mod.Store(request).branch}?recursive=1")
+    if tree.get("truncated"):
+        raise EvidenceError("the store's tree is too large to list in one call; backfill in parts")
+    counts = {"added": 0, "present": 0}
+    for entry in tree.get("tree", []):
+        path = entry.get("path", "")
+        if entry.get("type") != "blob" or not path.startswith(f"{store_mod.RUNS}/"):
+            continue
+        blob = request("GET", f"/git/blobs/{entry['sha']}")
+        data = base64.b64decode(blob.get("content") or "")
+        counts[bucket.put(path, data)] += 1
+    return counts
 
 
 def mark(result: Mapping, gh, store_repo: str) -> List[int]:

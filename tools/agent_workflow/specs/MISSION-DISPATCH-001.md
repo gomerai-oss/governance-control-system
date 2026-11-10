@@ -1319,6 +1319,42 @@ on" below).
      decision, and it is not made here: the item's mention of an A3 seat is not a commitment. G-R6-02 stays open.
      Until it is decided, a ring 6 PR has only the builder's self-check and HITL's hand merge.
 
+   **Clarified in the WORM part (item 3, HITL direction 2026-11-09: Google Cloud Storage, governance mode first, then
+   compliance):**
+   - **The declaration.** `config.json` `evidence_worm` is `{provider: "gcs", bucket, workload_identity_provider,
+     retention_years}`. `load_config` refuses a malformed one.
+   - **The copy.** The seal job copies each sealed run's `records.jsonl` and `seal.json` to the bucket, at the same
+     paths as the store, once they are in the store.
+     - Each object is created with `ifGenerationMatch=0`, so Google refuses it when the object exists: a copy is
+       never replaced. A re-run that finds a copy there reports it as present.
+     - A copy the bucket refuses fails the seal job, so the run's PRs are not marked, and under enforce they are held
+       (item 6).
+   - **No key is stored.** The job asks GitHub for its OIDC token (`id-token: write`) and exchanges it at Google's
+     Security Token Service for a short-lived token. This goes through a Workload Identity Federation provider that
+     trusts this repository on the default branch only, and binds one role on the bucket to each workflow file:
+     - `evidence-seal.yml` gets `roles/storage.objectCreator`: it can create, and never read, replace or delete;
+     - `evidence-verify.yml` gets `roles/storage.objectViewer`: it can read and list.
+
+     The writer and reader are separate, as for the store.
+   - **The checker** also confirms that every file under `runs/` in the store has its copy, byte-identical (MD5 and
+     content), with a retention expiry at least `retention_years` after the copy was made. A bucket it cannot reach
+     is a failed verification, reported like any other.
+   - **The lock.** The bucket's retention policy is `retention_years` (6).
+     - **Governance:** set first, unlocked. Nothing can be deleted or replaced before it expires, but a project
+       administrator can still remove or shorten the policy.
+     - **Compliance:** once copies are verified for a while, HITL locks the policy. From then on it can only be
+       lengthened, by anyone, for the life of the bucket: the write-once media of SEC 17a-4. Locking is HITL's act,
+       is irreversible, and is recorded in this spec when made.
+   - **Backfill.** Runs sealed before the bucket was declared are copied once, by hand: run the seal workflow by
+     hand (`workflow_dispatch`), and it only runs `python3 -m evidence backfill`. That copies every file the store
+     holds under `runs/` to the bucket, leaving any copy already there as it is, and seals and marks nothing.
+   - **Switched on 2026-11-09** in governance: its `config.json` declares the bucket, in a Google Cloud project of
+     its own, through a provider whose condition also pins the repository's and its owner's numeric ids. The
+     retention policy is unlocked (governance).
+   - **Limit 29, revised.** While the lock holds, an organization owner who deletes the store can no longer destroy
+     the record: every sealed run survives in the bucket, and each seal still verifies it. While the policy is
+     unlocked, a project administrator could still remove it, so limit 29 is only fully closed by the lock.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker

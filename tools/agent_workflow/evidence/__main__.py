@@ -4,6 +4,8 @@
   (§3m item 5);
 - ``seal --chains DIR --store-repo OWNER/NAME --out FILE``: the seal job (item 2), with ``EVIDENCE_SEAL_KEY`` and
   ``STORE_TOKEN``;
+- ``backfill --store-repo OWNER/NAME``: copy the runs already in the store to the declared WORM bucket, with
+  ``STORE_TOKEN``;
 - ``mark --repo OWNER/NAME --result FILE --store-repo OWNER/NAME``: the ``evidence-sealed`` checks, with
   ``GITHUB_TOKEN``;
 - ``check --store DIR --git DIR --out FILE`` and ``report --repo OWNER/NAME --result FILE --sha SHA --store-repo
@@ -45,6 +47,8 @@ def main(argv=None) -> int:
     s.add_argument("--chains", required=True)
     s.add_argument("--store-repo", required=True)
     s.add_argument("--out", required=True)
+    b = sub.add_parser("backfill", help="copy the runs already in the store to the declared WORM bucket")
+    b.add_argument("--store-repo", required=True)
     m = sub.add_parser("mark", help="set evidence-sealed on the PRs a sealed run published")
     m.add_argument("--repo", required=True)
     m.add_argument("--result", required=True)
@@ -105,8 +109,18 @@ def _other(args) -> int:
             return 0
         if args.command == "check":
             from evidence import checker, producer
+            from evidence import worm as worm_mod
+            from mission_router.router import load_config
+            config = load_config()
+            declared = worm_mod.config(config)
+            bucket, worm_error = None, ""
+            try:
+                bucket = worm_mod.from_config(config)
+            except EvidenceError as exc:
+                worm_error = str(exc)
             result = checker.check(Path(args.store), seal_mod.load_keys(), Path(args.git) if args.git else None,
-                                   producer.Recorder.from_env(os.environ))
+                                   producer.Recorder.from_env(os.environ), bucket,
+                                   declared["retention_years"] if declared else 0, worm_error)
             sealer.write_json(args.out, result)
             print("verified" if result["ok"] else f"REFUSED: {result['failures'][0]}")
             return 0  # the report job turns a refusal into a failed check and an issue
@@ -129,13 +143,26 @@ def _other(args) -> int:
             seed = sealer.seed_from(os.environ.get(sealer.SEAL_KEY_ENV, ""))
             from evidence import store as store_mod
             store = store_mod.Store(GitHub(os.environ["STORE_TOKEN"], args.store_repo).request)
-            result = sealer.seal_runs(Path(args.chains), seed, seal_mod.load_keys(), store, chain_mod.now())
+            from evidence import worm as worm_mod
+            from mission_router.router import load_config
+            bucket = worm_mod.from_config(load_config())  # the WORM copy, when declared (item 3)
+            result = sealer.seal_runs(Path(args.chains), seed, seal_mod.load_keys(), store, chain_mod.now(), bucket)
             sealer.write_json(args.out, result)
             for run in result["sealed"]:
                 print(f"sealed: {run}")
             for r in result["refused"]:
                 print(f"REFUSED: {r['run']}: {r['reason']}")
             return 1 if result["refused"] else 0
+        if args.command == "backfill":
+            from evidence import worm as worm_mod
+            from mission_router.router import load_config
+            bucket = worm_mod.from_config(load_config())
+            if bucket is None:
+                print("evidence backfill: config.json declares no evidence_worm", file=sys.stderr)
+                return 1
+            counts = sealer.backfill(GitHub(os.environ["STORE_TOKEN"], args.store_repo).request, bucket)
+            print(f"backfill: {counts['added']} added, {counts['present']} already present")
+            return 0
         if args.command == "mark":
             result = json.loads(Path(args.result).read_text(encoding="utf-8"))
             marked = sealer.mark(result, GitHub(os.environ["GITHUB_TOKEN"], args.repo), args.store_repo)
