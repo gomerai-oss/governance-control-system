@@ -15,6 +15,7 @@ on:
   workflow_run:
     workflows: [Mission Agent, Mission Router, Credentials Check, Evidence Verify]
     types: [completed]
+  workflow_dispatch:  # by hand: copy the runs already in the store to the WORM bucket (backfill), nothing else
 
 permissions: {}
 
@@ -22,7 +23,7 @@ env:
   PYTHONPATH: tooling/tools/agent_workflow
 
 concurrency:
-  group: evidence-seal-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: evidence-seal-${{ github.event.workflow_run.id || 'backfill' }}-${{ github.event.workflow_run.run_attempt || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -34,6 +35,7 @@ jobs:
     permissions:
       contents: read  # check out this repository's tooling
       actions: read
+      id-token: write  # the WORM copy (§3m item 3): GitHub's OIDC token, exchanged for a short-lived cloud token
     outputs:
       store: ${{ steps.store.outputs.full }}
     steps:
@@ -54,7 +56,7 @@ jobs:
         run: python3 -B -m evidence store-name >> "$GITHUB_OUTPUT"
 
       - name: Fetch the run's evidence chains
-        if: steps.store.outputs.full != ''
+        if: steps.store.outputs.full != '' && github.event_name == 'workflow_run'
         continue-on-error: true  # a run that recorded nothing has no evidence artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -74,8 +76,15 @@ jobs:
           repositories: ${{ steps.store.outputs.name }}
           permission-contents: write
 
+      - name: Copy the runs already in the store to the WORM bucket (by hand only)
+        if: steps.store.outputs.full != '' && github.event_name == 'workflow_dispatch'
+        env:
+          STORE_TOKEN: ${{ steps.token.outputs.token }}
+          STORE: ${{ steps.store.outputs.full }}
+        run: python3 -B -m evidence backfill --store-repo "$STORE"
+
       - name: Seal each chain and add it to the store
-        if: steps.store.outputs.full != ''
+        if: steps.store.outputs.full != '' && github.event_name == 'workflow_run'
         env:
           EVIDENCE_SEAL_KEY: ${{ secrets.EVIDENCE_SEAL_KEY }}
           STORE_TOKEN: ${{ steps.token.outputs.token }}
@@ -85,7 +94,7 @@ jobs:
           python3 -B -m evidence seal --chains "$RUNNER_TEMP/chains" --store-repo "$STORE" --out "$RUNNER_TEMP/sealed/sealed.json"
 
       - name: Hand the result to the mark job
-        if: steps.store.outputs.full != ''
+        if: steps.store.outputs.full != '' && github.event_name == 'workflow_run'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sealed
@@ -96,7 +105,7 @@ jobs:
   mark:
     name: mark
     needs: seal
-    if: needs.seal.result == 'success' && needs.seal.outputs.store != ''
+    if: needs.seal.result == 'success' && needs.seal.outputs.store != '' && github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

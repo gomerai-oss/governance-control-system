@@ -194,6 +194,11 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     store = config.get("evidence_store")
     if store is not None and not (isinstance(store, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", store)):
         raise ValueError("config.json: evidence_store must be owner/name")
+    from evidence import worm as worm_mod
+    try:
+        worm_mod.config(config)
+    except evidence.EvidenceError as exc:
+        raise ValueError(f"config.json: {exc}") from None
     if evidence.mode(config) == evidence.ENFORCE and not store:
         # Nothing can be sealed without a store, so every A2 and A3 stage PR would be held for ever.
         raise ValueError("config.json: \"evidence\": \"enforce\" needs an evidence_store")

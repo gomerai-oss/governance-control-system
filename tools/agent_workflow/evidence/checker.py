@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Mapping, Optional
 
-from evidence import producer
+from evidence import EvidenceError, producer
 from evidence import store as store_mod
 from evidence import verify
 
@@ -25,12 +25,24 @@ ACTOR = "evidence-verify"
 AUTHORITY = "MISSION-DISPATCH-001 section 3m item 7"
 
 
-def check(store: Path, keys: Mapping[str, str], git: Optional[Path], recorder=None) -> dict:
-    """``{"ok", "runs", "records", "commits", "unsealed", "withdrawn", "failures"}`` for the whole store."""
+def check(store: Path, keys: Mapping[str, str], git: Optional[Path], recorder=None, worm=None,
+          retention_years: int = 0, worm_error: str = "") -> dict:
+    """``{"ok", "runs", "records", "commits", "unsealed", "withdrawn", "failures", "worm"}`` for the whole store. With
+    ``worm`` (a declared WORM bucket), every stored file must also have its copy there, byte-identical and retained
+    for ``retention_years``."""
     report = verify.verify_store(Path(store), keys, require_seal=True, git=git)
     failures = ([report.failure] if report.failure else []) + store_mod.history_problems(Path(store))
+    if worm_error:  # a declared WORM bucket the checker could not reach is a failure to verify, reported like any
+        failures.append(f"the WORM copy could not be checked: {worm_error}")
+    if worm is not None:
+        from evidence import worm as worm_mod
+        try:
+            failures += worm_mod.check_copies(Path(store), worm, retention_years)
+        except EvidenceError as exc:
+            failures.append(f"the WORM copy could not be checked: {exc}")
     result = {"ok": not failures, "runs": report.runs, "records": report.records, "commits": report.commits_checked,
-              "unsealed": report.unsealed, "withdrawn": dict(sorted(report.withdrawn.items())), "failures": failures}
+              "unsealed": report.unsealed, "withdrawn": dict(sorted(report.withdrawn.items())), "failures": failures,
+              "worm": worm is not None or bool(worm_error)}
     if recorder is not None:
         recorder.record(actor=ACTOR, account_id=None, action="evidence.verify",
                         result="done" if result["ok"] else "refused",
@@ -43,7 +55,8 @@ def check(store: Path, keys: Mapping[str, str], git: Optional[Path], recorder=No
 
 def summary(result: Mapping, store_repo: str) -> str:
     lines = [f"Store `{store_repo}`: {result['runs']} runs, {result['records']} records, {result['commits']} commits "
-             "checked; every run sealed with a pinned key, every stored file added once and never changed."
+             "checked; every run sealed with a pinned key, every stored file added once and never changed"
+             + ("; every file's WORM copy identical and retained." if result.get("worm") else ".")
              if result["ok"] else f"Store `{store_repo}`: verification **refused**."]
     lines += [f"- {f}" for f in result.get("failures", [])]
     if result.get("withdrawn"):
