@@ -36,6 +36,9 @@ class Store:
                 return None
             raise
 
+    def holds(self, path: str) -> bool:
+        return self._existing(path) is not None
+
     def add(self, path: str, data: bytes, message: str) -> str:
         """``"added"``, or ``"same"`` when the store already holds these bytes. Raises when it holds others."""
         from mission_router.github import GitHubError

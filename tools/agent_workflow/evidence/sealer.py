@@ -77,10 +77,12 @@ def _stored_records(store: "store_mod.Store") -> List[dict]:
 
 
 def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_mod.Store", time: str,
-              worm=None, repository: str = "") -> dict:
+              worm=None, repository: str = "", resume: bool = False) -> dict:
     """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}]}``. With ``worm`` (a declared WORM bucket),
     each run's records and seal are also copied there once they are in the store; a copy the bucket refuses fails the
-    job, so the run's PRs are not marked."""
+    job, so the run's PRs are not marked. With ``resume`` (the sweep, Amendment 022), a chain the store already holds
+    a seal for is not sealed again: its records must be the stored ones, and it counts as sealed for marking, with no
+    second seal and no second landing attestation."""
     kid = seal_mod.keyid(ed25519.public_key(seed))
     if kid not in keys:
         raise EvidenceError("the seal key is not a pinned evidence key (evidence/key.json); nothing was sealed")
@@ -97,14 +99,16 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
         message = f"Seal {run}: {len(records)} records"
         records_bytes, seal_bytes = (directory / chain_mod.RECORDS).read_bytes(), dump(doc)
         store.add(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes, message)
+        if resume and store.holds(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}"):
+            out["sealed"].append(run)  # sealed by an earlier sweep that stopped part way; its records are the stored ones
+            out["prs"] += _published(records, run)
+            continue
         store.add(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes, message)
         if worm is not None:
             worm.put(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes)
             worm.put(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes)
         out["sealed"].append(run)
-        for rec in records:
-            if rec["action"] == "dispatch.publish" and rec["result"] == "done" and rec["subject"]["pr"]:
-                out["prs"].append({"pr": rec["subject"]["pr"], "run": run})
+        out["prs"] += _published(records, run)
         landed += pack_mod.landings(records)
     if landed and repository:  # each landing's attestation, once its run is in the store (§3m item 2)
         everything = _stored_records(store)
@@ -116,6 +120,11 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
                 worm.put(name, data)
             out["packs"].append(name)
     return out
+
+
+def _published(records: List[dict], run: str) -> List[dict]:
+    return [{"pr": rec["subject"]["pr"], "run": run} for rec in records
+            if rec["action"] == "dispatch.publish" and rec["result"] == "done" and rec["subject"]["pr"]]
 
 
 def backfill(request, bucket) -> Dict[str, int]:

@@ -406,3 +406,98 @@ class WorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SweepTests(Base):
+    """Amendment 022, vectors 122 and 123: the router starts Mission Agent runs with GITHUB_TOKEN, and GitHub sends no
+    workflow_run for those, so the scheduled sweep finds and seals them."""
+
+    NOW = __import__("datetime").datetime(2026, 11, 10, 5, 0, tzinfo=__import__("datetime").timezone.utc)
+
+    class Actions:
+        def __init__(self, runs, artifacts):
+            self.runs, self.artifacts, self.paths = runs, artifacts, []
+
+        def __call__(self, method, path, body=None):
+            self.paths.append(path)
+            if path.startswith("/actions/workflows/"):
+                name = path.split("/")[3]
+                return {"workflow_runs": [r for r in self.runs if r["_file"] == name]}
+            run = int(path.split("/")[3])
+            return {"artifacts": [{"name": n, "expired": False} for n in self.artifacts.get(run, [])]}
+
+    class Trees:
+        def __init__(self, chains, truncated=False):
+            self.chains, self.truncated = chains, truncated
+
+        def __call__(self, method, path, body=None):
+            if path == "/git/trees/main":
+                return {"tree": [{"path": "runs", "type": "tree", "sha": "r"}]}
+            assert path == "/git/trees/r?recursive=1", path
+            out = []
+            for chain_name, sealed in self.chains.items():
+                out.append({"path": f"{chain_name}/records.jsonl", "type": "blob"})
+                if sealed:
+                    out.append({"path": f"{chain_name}/seal.json", "type": "blob"})
+            return {"tree": out, "truncated": self.truncated}
+
+    def run_(self, rid, actor="github-actions[bot]", f="mission-agent.yml", attempt=1):
+        return {"id": rid, "run_attempt": attempt, "_file": f, "triggering_actor": {"login": actor}}
+
+    def test_v122_a_token_started_run_with_unsealed_evidence_is_named(self):
+        from evidence import sweep
+        actions = self.Actions([self.run_(11), self.run_(12, actor="example-user"), self.run_(13)],
+                               {11: ["evidence-agent-x", "evidence-publish-x", "change-x"], 12: ["evidence-agent-y"],
+                                13: ["evidence-agent-z"]})
+        store_ = self.Trees({"gh-11-1-agent-x": True, "gh-11-1-publish-x": False, "gh-13-1-agent-z": True})
+        self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW), [{"id": 11, "attempt": 1}])
+        listed = [p for p in actions.paths if p.startswith("/actions/workflows/")]
+        self.assertEqual(sorted(p.split("/")[3] for p in listed), sorted(sweep.WORKFLOWS.values()))
+        self.assertTrue(all("event=workflow_dispatch" in p and "created=%3E%3D2026-11-08T05:00:00Z" in p
+                            for p in listed))
+        self.assertNotIn("/actions/runs/12/artifacts?per_page=100", actions.paths, "a user-started run is never swept")
+
+    def test_a_truncated_store_listing_sweeps_nothing(self):
+        from evidence import sweep
+        with self.assertRaisesRegex(EvidenceError, "too large"):
+            sweep.unsealed_runs(self.Actions([], {}), self.Trees({}, truncated=True), self.NOW)
+
+    def test_v123_resume_seals_the_rest_and_never_seals_twice(self):
+        a = self.job("agent", [("dispatch.prepare", None)])
+        p = self.job("publish", [("dispatch.publish", 7)])
+        first = self.seal()
+        stored_seal = self.fake.files[f"runs/{p}/seal.json"]
+        del self.fake.files[f"runs/{a}/seal.json"]  # an earlier sweep stopped before sealing the agent chain
+        again = sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request),
+                                 "2026-11-10T05:00:00Z", resume=True)
+        self.assertEqual((sorted(again["sealed"]), again["refused"], again["prs"]),
+                         (sorted(first["sealed"]), [], [{"pr": 7, "run": p}]))
+        self.assertEqual(self.fake.files[f"runs/{p}/seal.json"], stored_seal, "the stored seal is kept")
+        self.assertIn(f"runs/{a}/seal.json", self.fake.files, "the missing seal is made")
+        copy = self.tmp / "store"
+        self.fake.copy_to(copy)
+        self.assertTrue(verify.verify_store(copy, self.keys, require_seal=True).ok)
+
+    def test_without_resume_a_second_seal_is_still_refused(self):
+        self.job("publish")
+        self.seal()
+        with self.assertRaisesRegex(EvidenceError, "never replaced"):
+            sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request), "2026-11-10T05:00:00Z")
+
+    def test_the_sweep_covers_the_workflows_the_seal_workflow_waits_for(self):
+        import re
+        from evidence import sweep
+        def workflow(name):  # live here; under packaging/workflows in a built release tree
+            live = ROOT / ".github" / "workflows" / name
+            return (live if live.is_file() else ROOT / "packaging" / "workflows" / name).read_text(encoding="utf-8")
+        text = workflow("evidence-seal.yml")
+        listed = re.search(r"workflows: \[([^\]]*)\]", text).group(1)
+        self.assertEqual(sorted(w.strip() for w in listed.split(",")), sorted(sweep.WORKFLOWS))
+        self.assertIn("schedule:", text)
+        self.assertIn("evidence sweep --repo", text)
+        self.assertIn("$RESUME", text)
+        for name, file_ in sweep.WORKFLOWS.items():
+            wf = workflow(file_)
+            with self.subTest(file_):
+                self.assertIn(f"\nname: {name}\n", "\n" + wf)
+                self.assertNotIn("repository_dispatch", wf, "the sweep lists workflow_dispatch runs only")
