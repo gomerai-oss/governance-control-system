@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
-                   evaluate_capture, evaluate_landing, instruction_build_findings, instruction_plan_findings)
+                   evaluate_capture, evaluate_challenge, evaluate_landing, instruction_build_findings,
+                   instruction_plan_findings)
+from . import challenge as challenge_mod
 from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
 import os
 
@@ -190,6 +192,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     login.mode(config)  # ring 1 amendment (MISSION-DISPATCH-001 §3i item 6): likewise (vectors 88, 114)
     supply_chain.mode(config)  # ring 4 (MISSION-DISPATCH-001 §3l): likewise (vectors 97, 116)
     evidence.mode(config)  # ring 6 (MISSION-DISPATCH-001 §3m): likewise (vectors 111, 119)
+    challenge_mod.mode(config)  # the challenge loop (MISSION-DISPATCH-001 §3n): likewise (vectors 120, 126)
     config_accounts(config)
     store = config.get("evidence_store")
     if store is not None and not (isinstance(store, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", store)):
@@ -254,6 +257,8 @@ class MissionRouter:
         self.identity_mode = identity_mode(config)
         self.quarantine_mode = quarantine.mode(config)  # Amendment 012
         self.evidence_mode = evidence.mode(config)  # Amendment 018
+        self.challenge_mode = challenge_mod.mode(config)  # Amendment 019
+        self._loops: Dict[Tuple[str, str], challenge_mod.LoopStatus] = {}
         self.guard = AccountGuard(self.identity_mode, lambda message: self.log(message))
         self.gh = GuardedGitHub(gh, self.guard)
         self._accounts = config_accounts(config)
@@ -347,6 +352,7 @@ class MissionRouter:
     def _discover(self) -> List[dict]:
         """Load tracking issues, open PRs and mission branches. Returns open non-mission PRs into the default branch."""
         self._ids = None
+        self._loops = {}
         self.identities()  # sets the account IDs the guard expects before any record is read
         self._histories: Dict[str, Tuple[MergedStage, ...]] = {}
         self._issues, self._stack_issues = {}, {}
@@ -959,6 +965,10 @@ class MissionRouter:
             if integration_actual is not None:
                 integration_clean = int(self.gh.compare(landing, integration_actual).get("ahead_by", 1)) == 0
             start_rejects, start_waits = self._start_checks(ref.mission_id, manifest, integration_actual)
+            if self.challenge_mode == challenge_mod.ENFORCE and "AR" not in manifest.roles:
+                start_rejects = start_rejects + [
+                    "under \"challenge\": \"enforce\" a plan assigns an AR seat, which challenges it before HITL "
+                    "approves it (MISSION-DISPATCH-001 §3n item 1)"]
             target = self.target_branch(manifest)
             if integration_actual is None and target in self.targets and self.gh.branch_head(target) is None:
                 # Nothing can be prepared without the branch, and nothing merges while this holds (Amendment 008).
@@ -1007,15 +1017,19 @@ class MissionRouter:
                         verdict, verdict_error, promotion, promotion_complete,
                         self.landing_branch(manifest) if ref.role == "A1" else ctx.landing,
                         start_rejects, start_waits, integration_clean, self.identities(),
-                        hitl_logins=self.hitl, refuse_instruction_files=enforce)
+                        hitl_logins=self.hitl, refuse_instruction_files=enforce, plan_mergers={self.bot})
 
     # ---------------------------------------------------------------- acting
     def _handle_pr(self, raw: dict, ctx: "_Context") -> bool:
         number, head_sha = raw["number"], raw["head"]["sha"]
         ref = parse_stage_branch(raw["head"]["ref"])
+        if ref.role == "AR":
+            return self._handle_challenge(raw, ctx)
         if ref.role == "A1" and ctx.state.stage == AWAIT_A1 and not raw.get("draft"):
             raw = self._prepare_a1(raw, ctx, self._head_manifest(raw))
         decision = self._evidence_hold(self.decide(raw, ctx), ref, head_sha)
+        if ref.role == "A1" and ctx.state.stage == AWAIT_A1 and not raw.get("draft"):
+            decision = self._challenge_gate(raw, decision)
         self.log(f"  PR #{number} {ref.role} r{ref.round}: {decision.action} {decision.summary}".rstrip())
         if raw["base"]["ref"] in self.targets:
             # Published before the merge below, which branch protection holds until the check passes.
@@ -1084,6 +1098,191 @@ class MissionRouter:
             raise
         return bool(result)
 
+    # ------------------------------------------------- the challenge loop (§6a)
+    def _plan_raw(self, mission_id: str) -> Optional[dict]:
+        """The mission's open plan PR, if any."""
+        for raw in self._open_prs.get(mission_id, []) if hasattr(self, "_open_prs") else []:
+            if parse_stage_branch(raw["head"]["ref"]).role == "A1":
+                return raw
+        return None
+
+    def _ar_login(self, manifest: Optional[Manifest]) -> Optional[str]:
+        if manifest is None or "AR" not in manifest.roles:
+            return None
+        return self.identities().get(manifest.roles["AR"].agent)
+
+    def _round_authentic(self, mission_id: str, round_no: int, head: str, ar_login: Optional[str]) -> bool:
+        """Whether round N at ``head`` came in through a PR of AR's own App that the router merged into the plan branch,
+        and both of its files are still as that PR wrote them (§6a: the router checks who wrote it and where)."""
+        if ar_login is None:
+            return False
+        owner = self.gh.repo.split("/")[0]
+        listed = self.gh.paginate(f"/pulls?state=closed&base={challenge_mod.plan_branch(mission_id)}"
+                                  f"&head={owner}:{stage_branch(mission_id, 'AR', round_no)}", limit=50)
+        for raw in listed:
+            if not raw.get("merged_at") or (raw["head"].get("repo") or {}).get("full_name") != self.gh.repo:
+                continue
+            detail = self.gh.get(f"/pulls/{raw['number']}")
+            user = detail.get("user") or {}
+            if (user.get("type") != "Bot" or user.get("login") != ar_login
+                    or (detail.get("merged_by") or {}).get("login") != self.bot):
+                continue
+            pr_head = (detail.get("head") or {}).get("sha")
+            if pr_head and all(self.gh.file_at(path, pr_head) == self.gh.file_at(path, head)
+                               for path in (challenge_mod.round_json(mission_id, round_no),
+                                            challenge_mod.round_md(mission_id, round_no))):
+                return True
+        return False
+
+    def challenge_loop(self, mission_id: str, head: str, manifest: Optional[Manifest]) -> challenge_mod.LoopStatus:
+        """Where the challenge loop stands for the plan at ``head`` (MISSION-DISPATCH-001 §3n item 3, router §6a).
+        Read-only; memoized for the sweep. The dispatcher starts AR from ``due_round`` (part 2)."""
+        key = (mission_id, head)
+        if key in self._loops:
+            return self._loops[key]
+        ar_login = self._ar_login(manifest)
+        rounds = []
+        for n in range(1, challenge_mod.MAX_ROUNDS + 1):
+            text = self.gh.file_at(challenge_mod.round_json(mission_id, n), head)
+            if text is None:
+                break
+            try:
+                parsed, error = challenge_mod.parse_challenge(text, mission_id, n), ""
+            except MissionInputError as exc:
+                parsed, error = None, str(exc)
+            rounds.append(challenge_mod.RoundFacts(parsed, error, self._round_authentic(mission_id, n, head, ar_login),
+                                                   self.gh.file_at(challenge_mod.response_path(mission_id, n), head)))
+        stray = [n for n in (len(rounds) + 1, len(rounds) + 2)
+                 if self.gh.file_at(challenge_mod.response_path(mission_id, n), head) is not None]
+        plan_changed = False
+        latest = rounds[-1].challenge if rounds else None
+        if latest is not None:
+            try:
+                files, complete, _ = self._changes(latest.challenged_sha, head)
+                plan_changed = not complete or any(challenge_mod.is_plan_file(p, mission_id)
+                                                   for f in files for p in (f.path, f.previous_path or ""))
+            except GitHubError:
+                plan_changed = True  # a challenged commit GitHub cannot compare is not the plan AR read
+        status = challenge_mod.loop_status(mission_id, rounds, plan_changed, stray)
+        self._loops[key] = status
+        return status
+
+    def _challenge_gate(self, raw: dict, decision: Decision) -> Decision:
+        """HITL's approval of a plan head counts under ``"challenge": "enforce"`` only when the loop is complete for that
+        head (router §6a, vectors 120-122, 125). Under observe the router says what is missing and counts it (vector
+        119). It also says when A1's latest response is missing a line, as AR is not started on it (vector 127)."""
+        ref = parse_stage_branch(raw["head"]["ref"])
+        head = raw["head"]["sha"]
+        manifest = self._head_manifest(raw)
+        if manifest is None or (self.challenge_mode == challenge_mod.OBSERVE and "AR" not in manifest.roles):
+            return decision  # no seat and nothing enforced: today's flow, unchanged
+        loop = self.challenge_loop(ref.mission_id, head, manifest)
+        if loop.response_error:
+            self._comment_once(raw["number"], f"challenge-response:{head[:12]}",
+                               f"The challenge loop is waiting on A1: {quarantined(loop.response_error)}.\n\n"
+                               "AR is not started until the response opens with these two lines:\n\n"
+                               "```\nPosition: DEFEND\nDrafted-with: <the agent you drafted it with, or HITL>\n```\n\n"
+                               "(`Position: ACCEPT` when you accept the points, usually with the plan change in the "
+                               "same push.)", mission=ref.mission_id)
+        if decision.action != MERGE or loop.complete:
+            return decision
+        if self.challenge_mode == challenge_mod.ENFORCE:
+            self._comment_once(raw["number"], f"challenge-incomplete:{head[:12]}",
+                               "HITL's approval of this head is not counted yet: the challenge loop is not complete "
+                               f"for it ({quarantined(loop.missing)}).\n\nThe loop is complete when at least one AR "
+                               "round exists, AR spoke last, and the plan is unchanged since AR read it. Approving "
+                               "again once it is complete is how the mission proceeds (MISSION-ROUTER-001 §6a).",
+                               mission=ref.mission_id)
+            return Decision(WAIT, (f"the challenge loop is not complete for this head: {loop.missing}",))
+        self._comment_once(raw["number"], f"challenge-observe:{head[:12]}",
+                           "Challenge loop (observe): under `\"challenge\": \"enforce\"` this approval would not count "
+                           f"yet, because {quarantined(loop.missing)}. Under observe it counts as before.",
+                           mission=ref.mission_id)
+        return decision
+
+    def _handle_challenge(self, raw: dict, ctx: "_Context") -> bool:
+        """AR's challenge PR into the plan branch (router §6a): merged when every check holds, then the round is posted
+        on the plan PR with its points quarantined and any steering lines listed (§3n item 6)."""
+        number, head_sha = raw["number"], raw["head"]["sha"]
+        ref = parse_stage_branch(raw["head"]["ref"])
+        mid = ref.mission_id
+        plan_head = self.gh.branch_head(challenge_mod.plan_branch(mid))
+        manifest = None
+        if plan_head is not None:
+            try:
+                manifest = parse_manifest(self.gh.file_at(manifest_path(mid), plan_head), mid)
+            except MissionInputError:
+                manifest = None
+        loop = self.challenge_loop(mid, plan_head, manifest) if plan_head is not None and manifest is not None else None
+        parsed = error = None
+        try:
+            parsed = challenge_mod.parse_challenge(self.gh.file_at(challenge_mod.round_json(mid, ref.round), head_sha),
+                                                   mid, ref.round)
+        except MissionInputError as exc:
+            error = str(exc)
+        files, complete, behind = self._changes(plan_head or raw["base"]["ref"], head_sha)
+        user = raw.get("user") or {}
+        pushers, head_pushed = self._push_evidence(raw["head"]["ref"], head_sha)
+        pr = OpenStagePR(number=number, ref=ref, head_sha=head_sha, base_ref=raw["base"]["ref"],
+                         author=str(user.get("login", "")), author_type=str(user.get("type", "")),
+                         same_repo=(raw["head"].get("repo") or {}).get("full_name") == self.gh.repo,
+                         draft=bool(raw.get("draft")), files=files, files_complete=complete, behind_by=behind,
+                         pushers=pushers, head_pushed=head_pushed)
+        decision = evaluate_challenge(pr, ctx.state, manifest, self.identities(), plan_head,
+                                      loop.due_round if loop else None, parsed, error)
+        decision = self._evidence_hold(decision, ref, head_sha)
+        self.log(f"  PR #{number} AR r{ref.round}: {decision.action} {decision.summary}".rstrip())
+        if decision.action == WAIT:
+            if decision.reasons and not raw.get("draft"):
+                digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
+                self._comment_once(number, f"wait:{head_sha[:12]}:{digest}", "The mission router is holding this "
+                                   "challenge:\n\n" + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
+                                   + "\n\nIt will continue on its own once this changes.", mission=mid)
+            return False
+        if decision.action == REJECT:
+            digest = hashlib.sha256(decision.summary.encode()).hexdigest()[:12]
+            self._comment_once(number, f"reject:{head_sha[:12]}:{digest}", "The mission router did not merge this "
+                               "challenge:\n\n" + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
+                               + "\n\nNothing from it reaches the plan (MISSION-ROUTER-001 §6a).", mission=mid)
+            self._add_labels(number, ["agent:blocked"])
+            return False
+        self._record_decision(number, head_sha, raw["base"]["ref"], decision, mid, ref.round)
+        md = self.gh.file_at(challenge_mod.round_md(mid, ref.round), head_sha) or ""
+        held = quarantine.quarantine(md, "AR", f"challenge round {ref.round} at {head_sha[:12]}", 12000, github=True)
+        if held.hits:
+            self._comment_once(number, f"challenge-steering:{head_sha[:12]}",
+                               "\n".join(quarantine.machine_note(held.hits, github=True)), mission=mid)
+        try:
+            result = self._write(f"merge PR #{number} at {head_sha}",
+                                 lambda: self.gh.merge(number, head_sha,
+                                                       f"Mission {mid}: AR round {ref.round} ({decision.verdict})"),
+                                 "router.merge", mission=mid, round_n=ref.round, pr=number, commit=head_sha)
+        except GitHubError as exc:
+            if exc.status in (405, 409, 422):
+                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                                   f"The mission router approved this challenge, but GitHub will not merge it yet: "
+                                   f"{exc.message}. The router retries every sweep (about 5 minutes).", mission=mid)
+                return False
+            raise
+        plan = self._plan_raw(mid)
+        if result and plan is not None:
+            points = parsed.points if parsed else ()
+            listed = "\n".join(f"- `{quarantined(p.id, 60)}` on {quarantined(p.on, 300)}" for p in points)
+            self._comment_once(
+                plan["number"], f"challenge-round:{ref.round}:{head_sha[:12]}",
+                f"**AR challenge round {ref.round}: {decision.verdict}**"
+                + (f" ({len(points)} point{'s' if len(points) != 1 else ''})" if points else "") + "\n\n"
+                + (listed + "\n\n" if listed else "") + held.text + "\n"
+                + (f"To answer, the A1 seat pushes `{challenge_mod.response_path(mid, ref.round)}` to this branch. Its "
+                   "first line is `Position: DEFEND` or `Position: ACCEPT`, its second `Drafted-with: <agent>` (or "
+                   "`Drafted-with: HITL`); accepting usually changes the plan in the same push. AR then answers in "
+                   f"round {ref.round + 1}. " if decision.verdict == "CHALLENGE" else
+                   "AR found nothing to challenge: a null loop is a valid outcome. ")
+                + "HITL ends the loop by approving the plan's head or cancelling the mission.", mission=mid)
+        # Not reported as a stage merge: the plan PR's head moved, so it is decided afresh on the next sweep rather
+        # than again in this one from the head it was listed with.
+        return False
+
     def _sealed(self, sha: str) -> bool:
         """Whether the seal job set ``evidence-sealed`` on ``sha``: every chain of the run that published it is sealed
         and in the store (MISSION-DISPATCH-001 §3m item 6)."""
@@ -1091,10 +1290,10 @@ class MissionRouter:
                    and r.get("conclusion") == "success" for r in self.gh.check_runs(sha, SEALED_CHECK))
 
     def _evidence_hold(self, decision: Decision, ref: StageRef, head_sha: str) -> Decision:
-        """Under ``"evidence": "enforce"`` an A2 or A3 stage PR, which a dispatcher run published, is merged only once
-        that run is sealed and stored; until then it is held and says why (router vector 118). Under observe the
-        router only says so in its log."""
-        if decision.action != MERGE or ref.role not in ("A2", "A3") or self._sealed(head_sha):
+        """Under ``"evidence": "enforce"`` an A2, A3 or AR PR, which a dispatcher run published, is merged only once
+        that run is sealed and stored; until then it is held and says why (router vectors 118, and dispatch 118 for
+        AR). Under observe the router only says so in its log."""
+        if decision.action != MERGE or ref.role not in ("A2", "A3", "AR") or self._sealed(head_sha):
             return decision
         reason = ("the run that published this PR is not sealed and stored yet (MISSION-DISPATCH-001 §3m item 6; "
                   "the seal job sets the evidence-sealed check)")

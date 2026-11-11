@@ -90,6 +90,7 @@ def evaluate(
     identities: Mapping[str, str] = {},
     hitl_logins: Set[str] = frozenset(),
     refuse_instruction_files: bool = False,
+    plan_mergers: Set[str] = frozenset(),
 ) -> Decision:
     """``start_rejects`` / ``start_waits`` are the router's stack checks for an A1 PR
     (scope overlap with active missions, unmet CHAINED dependencies); ``integration_clean``
@@ -99,7 +100,9 @@ def evaluate(
     by HITL, so for the plan stage a HITL login is the assigned actor (spec section 5a).
     ``refuse_instruction_files`` is ``"quarantine": "enforce"`` (Amendment 012): a plan or an A2 build naming a
     SPEC-002 AGENT_POLICY or TOOL_CONFIG file is refused like AUTHORITY. Under observe the router logs
-    ``instruction_plan_findings`` / ``instruction_build_findings`` itself."""
+    ``instruction_plan_findings`` / ``instruction_build_findings`` itself. ``plan_mergers`` are the router's own
+    logins: it merges AR's challenge PRs into the plan branch (MISSION-ROUTER-001 §6a), so its merges there are not
+    a foreign push."""
     ref = pr.ref
     if pr.draft:
         return Decision(WAIT, ("the PR is a draft",))
@@ -133,7 +136,7 @@ def evaluate(
                 c.reasons.append(f"{ref.role} is assigned to agent {agent} ({login}), but this PR was opened by {pr.author}")
         allowed = {login.casefold()} if login is not None else set()
         if ref.role == "A1":
-            allowed |= hitl
+            allowed |= hitl | {m.casefold() for m in plan_mergers}
         foreign = sorted({p for p in pr.pushers if p.casefold() not in allowed})
         if foreign:
             if ref.role == "A1":
@@ -220,6 +223,65 @@ def evaluate(
     if hitl_reasons and pr.head_sha not in approved_shas:
         return Decision(WAIT_APPROVAL, tuple(hitl_reasons), approval_required=True, verdict="PASS")
     return Decision(MERGE, verdict="PASS")
+
+
+def evaluate_challenge(
+    pr: OpenStagePR,
+    state: MissionState,
+    manifest: Optional[Manifest],  # the plan as it is at the plan branch's head
+    identities: Mapping[str, str],
+    plan_head: Optional[str],
+    due_round: Optional[int],
+    challenge=None,  # challenge.Challenge, parsed from the PR head
+    challenge_error: Optional[str] = None,
+) -> Decision:
+    """Whether AR's challenge PR may merge into the plan branch (MISSION-ROUTER-001 §6a). Pure, like ``evaluate``.
+
+    It merges only when all of these hold: opened and pushed by AR's own App only (by account ID, via the guarded
+    reads), head ``mission/<ID>/ar-r<N>`` into the plan branch ``mission/<ID>/a1`` while the mission is AWAIT_A1, round
+    N the round due, exactly ``round-<N>.json`` and ``round-<N>.md`` added on top of the plan head, the JSON a valid
+    ``mission-challenge-v1`` for this mission and round, and its ``challenged_sha`` the plan head AR read.
+    """
+    from .challenge import CHALLENGE_SCHEMA, plan_branch, round_json, round_md
+
+    ref = pr.ref
+    if pr.draft:
+        return Decision(WAIT, ("the PR is a draft",))
+    c = _Checks()
+    c.require(pr.same_repo, "the PR must come from a branch in this repository, not a fork")
+    c.require(state.stage == AWAIT_A1, f"challenges are taken only while the plan awaits approval; the mission is "
+                                       f"{state.stage}")
+    if manifest is None or "AR" not in manifest.roles:
+        c.reasons.append("the plan at the head of its branch assigns no AR seat, so no challenge is taken")
+    else:
+        agent = manifest.roles["AR"].agent
+        login = identities.get(agent)
+        if login is None:
+            c.reasons.append(f"AR is assigned to agent {agent}, which has no ACTIVE GitHub App identity")
+        else:
+            c.require(pr.author_type == "Bot" and pr.author == login,
+                      f"AR is assigned to agent {agent} ({login}), but this PR was opened by {pr.author}")
+            foreign = sorted({p for p in pr.pushers if p.casefold() != login.casefold()})
+            c.require(not foreign, f"the branch was pushed to by {', '.join(foreign)}; only {login} may push an AR branch")
+    c.require(pr.base_ref == plan_branch(ref.mission_id), f"an AR PR must target {plan_branch(ref.mission_id)}")
+    c.require(due_round is not None and ref.round == due_round,
+              f"round {ref.round} is not due" + (f"; round {due_round} is" if due_round is not None else
+                                                  "; no challenge round is due on this plan head"))
+    expected = sorted([(round_json(ref.mission_id, ref.round), "added"), (round_md(ref.mission_id, ref.round), "added")])
+    c.require(pr.files_complete and sorted((f.path, f.status) for f in pr.files) == expected
+              and not any(f.previous_path for f in pr.files),
+              f"an AR PR adds exactly {expected[0][0]} and {expected[1][0]}, and nothing else")
+    c.require(pr.behind_by == 0, "the branch does not contain the plan branch's head; AR must read the current plan")
+    if challenge is None:
+        c.reasons.append(challenge_error or f"the challenge file is missing or not {CHALLENGE_SCHEMA}")
+    else:
+        c.require(plan_head is not None and challenge.challenged_sha == plan_head,
+                  f"the challenge reads {challenge.challenged_sha}, but the plan branch's head is {plan_head}")
+    if c.reasons:
+        return Decision(REJECT, tuple(c.reasons))
+    if not pr.head_pushed:
+        return Decision(WAIT, (f"GitHub has not yet recorded the push of {pr.head_sha}",))
+    return Decision(MERGE, verdict=challenge.verdict)
 
 
 @dataclass(frozen=True)

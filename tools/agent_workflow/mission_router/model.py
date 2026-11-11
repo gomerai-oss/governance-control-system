@@ -29,6 +29,9 @@ CLAUDE_CODE_MODELS = ("opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "cl
                       "claude-fable-5-1")
 _CURSOR_MODEL_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 DISPATCHED_ROLES = ("A2", "A3")  # A1 is HITL's seat; the dispatcher never starts it
+# The Adversarial Reviewer (MISSION-DISPATCH-001 Amendment 021): an optional fourth seat that challenges the plan before
+# HITL approves it. Like A2 and A3 it may name a runtime and a model; required only under "challenge": "enforce".
+CHALLENGE_ROLE = "AR"
 
 MISSION_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,63}$")
 BOT_LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}\[bot\]$")  # GitHub App logins; no user account can hold one
@@ -36,7 +39,8 @@ AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 STACK_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,63}$")
 _MISSION_REF_RE = re.compile(r"^mission/([A-Z0-9][A-Z0-9-]{2,63})/")
-_STAGE_BRANCH_RE = re.compile(r"^mission/([A-Z0-9][A-Z0-9-]{2,63})/(a1|a2-r([1-9][0-9]?)|a3-r([1-9][0-9]?))$")
+_STAGE_BRANCH_RE = re.compile(
+    r"^mission/([A-Z0-9][A-Z0-9-]{2,63})/(a1|a2-r([1-9][0-9]?)|a3-r([1-9][0-9]?)|ar-r([1-9][0-9]?))$")
 _STACK_BRANCH_RE = re.compile(r"^stack/([A-Z0-9][A-Z0-9-]{2,63})$")
 _TARGET_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
 TARGET_BRANCH_MAX_CHARS = 200
@@ -116,7 +120,7 @@ def parse_stage_branch(ref: Any) -> Optional[StageRef]:
     mission_id, stage = match.group(1), match.group(2)
     if stage == "a1":
         return StageRef(mission_id, "A1", 0)
-    round_no = int(match.group(3) or match.group(4))
+    round_no = int(match.group(3) or match.group(4) or match.group(5))
     return StageRef(mission_id, stage[:2].upper(), round_no)
 
 
@@ -179,13 +183,15 @@ def parse_manifest(text: Any, expected_id: str) -> Manifest:
     _require(isinstance(title, str) and 0 < len(title) <= 200, "mission.json: title must be 1-200 characters")
 
     roles_raw = data.get("roles")
-    _require(isinstance(roles_raw, dict) and set(roles_raw) == set(ROLES), "mission.json: roles must assign exactly A1, A2, A3")
+    _require(isinstance(roles_raw, dict) and set(ROLES) <= set(roles_raw) <= {*ROLES, CHALLENGE_ROLE},
+             f"mission.json: roles must assign A1, A2 and A3, and may assign {CHALLENGE_ROLE}")
     roles = {}
-    for role in ROLES:
+    for role in ROLES + ((CHALLENGE_ROLE,) if CHALLENGE_ROLE in roles_raw else ()):
         entry = roles_raw[role]
-        keys = {"agent", "runtime", "model"} if role in DISPATCHED_ROLES else {"agent"}
+        started = role in DISPATCHED_ROLES or role == CHALLENGE_ROLE
+        keys = {"agent", "runtime", "model"} if started else {"agent"}
         _require(isinstance(entry, dict) and "agent" in entry and set(entry) <= keys,
-                 f"mission.json: {role} needs an agent" + (" and may name a runtime and a model" if role in DISPATCHED_ROLES
+                 f"mission.json: {role} needs an agent" + (" and may name a runtime and a model" if started
                                                            else " and nothing else"))
         _require(isinstance(entry["agent"], str) and AGENT_RE.fullmatch(entry["agent"]), f"mission.json: {role}.agent is not a valid agent name")
         runtime = entry.get("runtime")
@@ -197,6 +203,10 @@ def parse_manifest(text: Any, expected_id: str) -> Manifest:
         roles[role] = RoleAssignment(entry["agent"], runtime, model)
     _require(roles["A3"].agent not in (roles["A1"].agent, roles["A2"].agent),
              "mission.json: A3 must be a different agent from A1 and A2, so its review is independent")
+    # AR's seat is its own (Amendment 021, router vector 124). Its independence from A1 is by context, so no rule
+    # is checked against A1.
+    _require(CHALLENGE_ROLE not in roles or roles[CHALLENGE_ROLE].agent not in (roles["A2"].agent, roles["A3"].agent),
+             f"mission.json: {CHALLENGE_ROLE} must be a different agent from A2 and A3, so it has a seat of its own")
 
     scope = data.get("build_scope")
     _require(isinstance(scope, list) and 0 < len(scope) <= 50, "mission.json: build_scope must list 1-50 paths")
