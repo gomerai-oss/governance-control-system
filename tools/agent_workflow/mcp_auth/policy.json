@@ -1,6 +1,6 @@
 {
   "schema": "mcp-auth-policy-v1",
-  "policy_version": "MCP-AUTH-POLICY-2026-10-28.1",
+  "policy_version": "MCP-AUTH-POLICY-2026-11-11.1",
   "session": {
     "max_ttl_seconds": 3600
   },
@@ -47,7 +47,8 @@
   "roles": ["EXTERNAL_WORKER", "BUILDER", "REVIEWER", "PR_AUTHORITY"],
   "principals": {
     "a2": {"kind": "agent", "acting_identities": ["a2"], "roles": ["BUILDER"]},
-    "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["REVIEWER"]}
+    "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["REVIEWER"]},
+    "ar": {"kind": "agent", "acting_identities": ["ar"], "roles": ["REVIEWER"]}
   },
   "resources": {
     "corpus:governance-doctrine": {"class": "rag", "restricted": false, "credential_bearing": false},

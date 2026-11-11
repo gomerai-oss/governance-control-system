@@ -14,6 +14,14 @@
       "fabric_role": "REVIEWER",
       "principal": "a3",
       "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
+    },
+    "AR": {
+      "role": "reviewer",
+      "mission_type": "VERIFY",
+      "fabric_role": "REVIEWER",
+      "principal": "ar",
+      "resources": ["corpus:governance-doctrine", "index:epap-evidence"],
+      "drafts": ["missions/{mission_id}/challenges/round-{round}.json", "missions/{mission_id}/challenges/round-{round}.md"]
     }
   }
 }

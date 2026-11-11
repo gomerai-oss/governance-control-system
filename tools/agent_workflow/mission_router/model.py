@@ -58,7 +58,7 @@ SUMMARY_MAX_CHARS = 4000
 # in a row (since HITL's last /mission retry) the stage is recorded as blocked.
 MAX_AGENT_ATTEMPTS = 3
 FAILED_MARKER = "<!-- mission-dispatch:failed:{role}:{round} -->"
-_FAILED_RE = re.compile(r"<!-- mission-dispatch:failed:(A2|A3):([1-9][0-9]?) -->")
+_FAILED_RE = re.compile(r"<!-- mission-dispatch:failed:(A2|A3|AR):([1-9][0-9]?) -->")
 _RETRY_RE = re.compile(r"(?m)^\s*/mission retry\s*$")
 _HALT_RE = re.compile(r"(?m)^\s*/mission halt\s*$")
 _RESUME_RE = re.compile(r"(?m)^\s*/mission resume\s*$")
