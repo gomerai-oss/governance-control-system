@@ -67,6 +67,7 @@ from .dispatch import (
     plan,
     prepare,
     publish,
+    record_issue,
     run_agent,
 )
 
@@ -92,8 +93,13 @@ def live_survey(gh: GitHub, log: Callable[[str], None]) -> Tuple[Survey, Mission
     def order(mission_id: str) -> int:  # the queue runs in approval order: tracking issues open when plans merge
         return int((router.tracking_issue(mission_id) or {}).get("number") or 10 ** 9)
 
+    try:
+        challenges = router.challenges_due(contexts)
+    except GitHubError as exc:  # no AR this time; the other roles still run
+        log(f"challenge loops could not be read, so no AR starts this time: {exc}")
+        challenges = {}
     return Survey(contexts, router.identities(), gh.branch_head, config["default_branch"], blocked, stacks,
-                  feedback, order, router.now()), router
+                  feedback, order, router.now(), challenges), router
 
 
 def _env(name: str) -> str:
@@ -411,9 +417,9 @@ def cmd_report(args) -> int:
     if reason is None:
         _log(f"{job.key}: nothing to report")
         return 0
-    issue = router.tracking_issue(job.mission_id)
+    issue = record_issue(router, job.mission_id, job.role)  # AR: the plan PR (§3n)
     if issue is None:
-        raise DispatchError(f"{job.mission_id} has no tracking issue to report on")
+        raise DispatchError(f"{job.mission_id} has no {'plan PR' if job.role == 'AR' else 'tracking issue'} to report on")
     run_url = os.environ.get("RUN_URL", "")
     text = failure_comment(job, reason, run_url, read_refusals(args.refusal or []))
     _NOTE.update(comment=evidence_producer.text_digest(text))

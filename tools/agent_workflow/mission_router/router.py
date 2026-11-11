@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, FileChange, LandingPR, OpenStagePR, evaluate,
                    evaluate_capture, evaluate_challenge, evaluate_landing, instruction_build_findings,
@@ -138,6 +138,16 @@ class _Context:
     integration_actual: Optional[str]
     landing: str = "main"  # where an A3 PASS merges: the default branch or the mission's stack branch
     held_by: Optional[str] = None  # set when an CHAINED stack holds this mission because another mission is blocked
+
+
+@dataclass(frozen=True)
+class ChallengeDue:
+    """A plan PR whose plan assigns AR, and where its challenge loop stands at the plan head (dispatch §3n item 3)."""
+
+    plan_head: str
+    manifest: Manifest
+    loop: challenge_mod.LoopStatus
+    plan_pr: int
 
 
 @dataclass(frozen=True)
@@ -1166,6 +1176,26 @@ class MissionRouter:
         status = challenge_mod.loop_status(mission_id, rounds, plan_changed, stray)
         self._loops[key] = status
         return status
+
+    def challenges_due(self, contexts: Mapping[str, "_Context"]) -> Dict[str, "ChallengeDue"]:
+        """Read-only, for the dispatcher (MISSION-DISPATCH-001 §3n item 3): every mission waiting on A1 whose open,
+        non-draft plan PR assigns AR, with the plan head and where its challenge loop stands. Writes nothing."""
+        out: Dict[str, ChallengeDue] = {}
+        for mid, ctx in sorted(contexts.items()):
+            if ctx.state.stage != AWAIT_A1:
+                continue
+            raw = self._plan_raw(mid)
+            if raw is None or raw.get("draft"):
+                continue
+            try:
+                manifest = self._head_manifest(raw)
+                if manifest is None or "AR" not in manifest.roles:
+                    continue
+                head = raw["head"]["sha"]
+                out[mid] = ChallengeDue(head, manifest, self.challenge_loop(mid, head, manifest), int(raw["number"]))
+            except GitHubError as exc:  # left out, so AR is not started for it this time
+                self.log(f"{mid}: GitHub error, challenge loop left out of this survey: {exc}")
+        return out
 
     def _challenge_gate(self, raw: dict, decision: Decision) -> Decision:
         """HITL's approval of a plan head counts under ``"challenge": "enforce"`` only when the loop is complete for that

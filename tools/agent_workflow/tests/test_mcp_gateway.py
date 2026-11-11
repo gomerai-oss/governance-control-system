@@ -504,13 +504,14 @@ class SecretsBoundaryTests(GatewayCase):
 class ShippedDataTests(unittest.TestCase):
     def test_policy_adds_mission_seats_and_read_only_mission_grants(self):
         policy = P.load_file()
-        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-10-28.1")
+        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-11.1")
         self.assertEqual(policy["authority_refs"]["MISSION-ROUTER-001"],
                          {"kind": "HITL", "source": "tools/agent_workflow/specs/MISSION-ROUTER-001.md",
                           "missions": []})
         self.assertEqual(policy["principals"], {
             "a2": {"kind": "agent", "acting_identities": ["a2"], "roles": ["BUILDER"]},
-            "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["REVIEWER"]}})
+            "a3": {"kind": "agent", "acting_identities": ["a3"], "roles": ["REVIEWER"]},
+            "ar": {"kind": "agent", "acting_identities": ["ar"], "roles": ["REVIEWER"]}})  # AR's seat (Amendment 021)
         grants = {g["id"]: g for g in policy["grants"]}
         mission_grants = sorted(g["id"] for g in policy["grants"] if g["authority_ref"] == "MISSION-ROUTER-001")
         self.assertEqual(mission_grants, ["G-MISSION-BUILDER-EPAP-READ", "G-MISSION-BUILDER-RAG-READ",

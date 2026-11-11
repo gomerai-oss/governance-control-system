@@ -32,6 +32,10 @@ gateway knows whether a different catalog refuses its start or is only recorded)
 ``Edit(.mission-dispatch/DELETE)`` instead of ``Edit(**)``, and keeps ``Read(**)``; a scope that cannot be rendered
 refuses the binding. Without it the rules are as before, and ``scoped_rules`` says what narrowing would bind.
 This supersedes decision 17 of ``IMPLEMENTATION-DECISIONS.md`` when narrowing is asked for.
+
+A seat with ``"drafts"`` (MISSION-DISPATCH-001 §3n item 4, the Adversarial Reviewer) holds draft-class write rules
+for exactly those files and no others: each template, with ``{mission_id}`` and ``{round}`` put in, becomes one
+``Edit(<file>)`` in place of every rule its draft-class tools would give. A seat without it is bound as before.
 """
 
 from __future__ import annotations
@@ -55,6 +59,9 @@ GATEWAY_CATALOG = Path("mcp_gateway") / "tools.json"  # under gateway_root
 
 SEATS_SCHEMA = "mission-seats-v1"
 SEAT_FIELDS = frozenset({"role", "mission_type", "fabric_role", "principal", "resources"})
+OPTIONAL_SEAT_FIELDS = frozenset({"drafts"})
+ROUND_PLACEHOLDER = "{round}"
+_DRAFT_FILE = re.compile(r"[A-Za-z0-9_{}+-][A-Za-z0-9_.{}+/-]*")  # an exact file, no wildcard
 MISSION_FIELDS = frozenset({"id", "round", "agent", "base_sha", "build_scope"})
 RUNTIMES = ("claude-code", "cursor-cli")
 BUILTINS = ("Read", "Edit", "Write", "Glob", "Grep")
@@ -115,13 +122,25 @@ def load_seats(path: Path) -> dict:
             or not isinstance(doc["seats"], dict):
         raise BindingRefused(f"seat table must be a {SEATS_SCHEMA!r} document")
     for name, seat in doc["seats"].items():
-        if not isinstance(seat, dict) or set(seat) != SEAT_FIELDS \
+        if not isinstance(seat, dict) or not SEAT_FIELDS <= set(seat) <= SEAT_FIELDS | OPTIONAL_SEAT_FIELDS \
                 or not all(M.is_name(seat[f]) for f in ("role", "mission_type", "fabric_role", "principal")):
             raise BindingRefused(f"seat {name!r} must have exactly the fields {sorted(SEAT_FIELDS)}")
         res = seat["resources"]
         if not isinstance(res, list) or not res or not all(M.is_name(r) for r in res) or len(set(res)) != len(res):
             raise BindingRefused(f"seat {name!r} resources must be a non-empty list of distinct ids")
+        if "drafts" in seat:
+            drafts = seat["drafts"]
+            if not isinstance(drafts, list) or not drafts or len(set(drafts)) != len(drafts) or not all(
+                    isinstance(d, str) and _DRAFT_FILE.fullmatch(d) and "*" not in d
+                    and all(part not in ("", ".", "..") for part in d.split("/")) for d in drafts):
+                raise BindingRefused(f"seat {name!r} drafts must be a non-empty list of distinct exact file paths")
     return doc
+
+
+def draft_rules(seat_doc: Mapping, mission: Mapping) -> list:
+    """``Edit(<file>)`` for each of the seat's ``drafts``, with the mission id and round put in."""
+    return [f"Edit({d.replace(MISSION_PLACEHOLDER, mission['id']).replace(ROUND_PLACEHOLDER, str(mission['round']))})"
+            for d in seat_doc["drafts"]]
 
 
 def _mission(mission: Any) -> dict:
@@ -294,6 +313,13 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
         raise BindingRefused(f"selection record is inconsistent: {problem}")
 
     tools, allowed, mcp_tools, bound = _surface(selection, registry, matrix)
+    if "drafts" in seat_doc:  # §3n item 4: the seat's own files replace every draft-class rule
+        draft_paths = {_rule("Edit", e["resource"]["path"]) for e in registry["tools"]
+                       if REG.tool_name(e) in bound and not REG.tool_name(e).startswith(GATEWAY_PREFIX)
+                       and matrix["capabilities"].get(e["capability"]) == "draft"}
+        if "Edit(**)" in allowed:
+            raise BindingRefused(f"seat {seat} has drafts but its surface edits the whole checkout")
+        allowed = [r for r in allowed if r not in draft_paths] + draft_rules(seat_doc, mission)
     scoped, scope_problem = scoped_rules(allowed, mission["build_scope"])
     if narrow_writes is True:
         if scope_problem:

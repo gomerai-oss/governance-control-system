@@ -40,7 +40,7 @@ PAYLOAD_TYPE = "application/vnd.in-toto+json"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 BUILD_TYPE = "urn:evidence:mission-landing:v1"
-_ROLE = re.compile(r"\b(A[123]) round (\d+)\b")
+_ROLE = re.compile(r"\b(A[123]|AR) round (\d+)\b")
 
 
 def pae(payload_type: str, payload: bytes) -> bytes:
