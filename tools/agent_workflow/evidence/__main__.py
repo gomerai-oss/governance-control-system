@@ -4,6 +4,9 @@
   (§3m item 5);
 - ``seal --chains DIR --store-repo OWNER/NAME --out FILE``: the seal job (item 2), with ``EVIDENCE_SEAL_KEY`` and
   ``STORE_TOKEN``;
+- ``sweep --repo OWNER/NAME --store-repo OWNER/NAME``: the ended runs the seal job was never started for, one
+  ``<run id> <attempt>`` per line (Amendment 022), with ``GITHUB_TOKEN`` and ``STORE_TOKEN``; ``seal --resume`` then
+  seals them without sealing a chain twice;
 - ``backfill --store-repo OWNER/NAME``: copy the runs already in the store to the declared WORM bucket, with
   ``STORE_TOKEN``;
 - ``mark --repo OWNER/NAME --result FILE --store-repo OWNER/NAME``: the ``evidence-sealed`` checks, with
@@ -47,6 +50,10 @@ def main(argv=None) -> int:
     s.add_argument("--chains", required=True)
     s.add_argument("--store-repo", required=True)
     s.add_argument("--out", required=True)
+    s.add_argument("--resume", action="store_true", help="the sweep: a chain already sealed is not sealed again")
+    w = sub.add_parser("sweep", help="name the ended runs the seal job was never started for (Amendment 022)")
+    w.add_argument("--repo", required=True)
+    w.add_argument("--store-repo", required=True)
     b = sub.add_parser("backfill", help="copy the runs already in the store to the declared WORM bucket")
     b.add_argument("--store-repo", required=True)
     m = sub.add_parser("mark", help="set evidence-sealed on the PRs a sealed run published")
@@ -147,7 +154,7 @@ def _other(args) -> int:
             from mission_router.router import load_config
             bucket = worm_mod.from_config(load_config())  # the WORM copy, when declared (item 3)
             result = sealer.seal_runs(Path(args.chains), seed, seal_mod.load_keys(), store, chain_mod.now(), bucket,
-                                      os.environ.get("GITHUB_REPOSITORY", ""))
+                                      os.environ.get("GITHUB_REPOSITORY", ""), resume=args.resume)
             sealer.write_json(args.out, result)
             for run in result["sealed"]:
                 print(f"sealed: {run}")
@@ -156,6 +163,15 @@ def _other(args) -> int:
             for r in result["refused"]:
                 print(f"REFUSED: {r['run']}: {r['reason']}")
             return 1 if result["refused"] else 0
+        if args.command == "sweep":
+            import datetime
+            from evidence import sweep
+            found = sweep.unsealed_runs(GitHub(os.environ["GITHUB_TOKEN"], args.repo).request,
+                                        GitHub(os.environ["STORE_TOKEN"], args.store_repo).request,
+                                        datetime.datetime.now(datetime.timezone.utc))
+            for run in found:
+                print(f"{run['id']} {run['attempt']}")  # one ended run per line, for the download step
+            return 0
         if args.command == "backfill":
             from evidence import worm as worm_mod
             from mission_router.router import load_config

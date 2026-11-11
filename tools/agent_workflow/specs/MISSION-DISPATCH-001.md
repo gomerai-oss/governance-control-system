@@ -100,6 +100,28 @@ Amendment 018):** durable, tamper-evident evidence. Ring 6 was published as docu
 
 The mode is set by `"evidence"` in `config.json` (§3m).
 
+**Amendment 021 (2026-11-10, HITL direction: the Adversarial Reviewer Agent, CAPTURE-2026-006, with
+MISSION-ROUTER-001 Amendment 019):** a challenge loop on the plan, before A2 builds. A3 reviews the build against the
+plan, and nothing reviews the plan itself. The dispatcher gains a third agent role, **AR** (the Adversarial Reviewer),
+which challenges a mission's plan before HITL approves it:
+- it runs in its own job, as its own GitHub App (`ar`), on the plan's exact head;
+- it writes only its own challenge files, and never the plan;
+- A1 defends or accepts;
+- AR rebuts;
+- HITL decides when he is satisfied, with no cap on the rounds.
+
+The mode is set by `"challenge"` in `config.json` (§3n).
+
+**Amendment 022 (2026-11-10, HITL direction: ring 6 fix, dispatch spec only):** the seal sweep. GitHub sends no
+`workflow_run` when the run that ended was started with a workflow's `GITHUB_TOKEN`, and the router starts every
+Mission Agent run it dispatches that way. So the seal job never ran for those runs, their stage PRs never got
+`evidence-sealed`, and under enforce the router held them for good. The first such run was the A2 build of
+`M-INDEP-REVIEW-001` (run 42754032955, PR #1286, 2026-11-10). The seal workflow now also runs every 10 minutes. It
+looks for ended runs of the sealed workflows that `github-actions[bot]` started in the last 2 days and that have more
+`evidence-*` artifacts than chains sealed in the store. It seals and marks those runs the same way. It uses the same
+environment and credentials, nothing new. A run started any other way gets `workflow_run` and is never swept. A chain
+an earlier sweep already sealed is not sealed again (`seal --resume`). Vectors 122 and 123.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1238,6 +1260,14 @@ on" below).
        because the records already hold the artifacts' digests.
      - The key must be a pinned one (`key.json`): a seal no verifier would accept is never made.
      - Nothing runs until `config.json` names the store (`evidence_store`, `owner/name`).
+   - **The sweep (Amendment 022).** GitHub sends no `workflow_run` for a run started with `GITHUB_TOKEN`, and the
+     router starts every Mission Agent run that way. So the seal job also runs on a schedule. `evidence sweep` lists
+     the ended `workflow_dispatch` runs of the four sealed workflows. It keeps those whose triggering actor is
+     `github-actions[bot]`, from the last 2 days, that hold more unexpired `evidence-*` artifacts than the store
+     holds seals for under `gh-<run id>-<attempt>-`. The job downloads those runs' `evidence-*` artifacts and runs
+     `seal --resume`. A chain whose seal is already stored is not sealed again: its records must equal the stored
+     ones, and it counts as sealed for the mark job, with no second seal and no second landing attestation. The
+     store's `runs/` tree is listed in one call. A truncated listing sweeps nothing.
    - **The mark job.** It holds no secret. Its token can set check runs and read PRs. When every chain of the run
      was sealed, it sets the `evidence-sealed` check on the head of each PR the run published (the run's
      `dispatch.publish` records).
@@ -1397,6 +1427,104 @@ on" below).
        contents API stops at 1,000 entries silently), and refuses a truncated listing rather than writing a partial
        attestation. As the store grows this gets slower; an index of runs by mission is the later fix.
 
+
+### 3n. The Adversarial Reviewer (Amendment 021)
+
+**Threat.** A plan is approved on HITL's reading alone. Nothing reviews the plan against what it claims, the rings it
+must keep, or what it leaves out. A2 builds the plan faithfully, so it cannot also argue against it, and A3 checks
+the build against the plan, not the plan itself. A bad plan therefore becomes a bad build.
+
+**Mode.** `"challenge"` in `config.json`:
+- `"observe"` (the default when the key is absent): AR runs on every plan, and the router reports an incomplete loop
+  but counts HITL's approval as before;
+- `"enforce"`: the router counts an approval only for a head whose loop is complete (MISSION-ROUTER-001 Amendment
+  019);
+- any other value fails the job and stops the router.
+
+HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass.
+
+1. **The role.** A mission's manifest gains a fourth role:
+
+   ```json
+   "AR": {"agent": "ar", "runtime": "<runtime>", "model": "<model>"}
+   ```
+
+   - **Its own identity.** `ar` is the AR seat's own GitHub App, in the identity registry like the others. Reusing
+     A1's App was rejected (HITL's brief): its history and permissions point the wrong way for a checker.
+   - **Independence from A1 is by context (HITL, 2026-11-10).** A1 is not an identity the system knows. It is
+     whichever agent HITL brainstorms the plan with, in a browser session outside the pipeline, and every A1 submits
+     the same structured draft. AR sees only that draft, never the brainstorming. So AR is independent of the drafting
+     even when it runs the same model or vendor HITL brainstormed with (for example, AR on Codex CLI after a ChatGPT
+     session). No provider rule is checked against A1.
+   - **A seat of its own.** AR's agent may not be A2's or A3's, and its App is its own (`ar`). The router refuses a
+     plan that names another seat for AR.
+   - **Required under enforce.** The role is required under `"challenge": "enforce"`, and optional under observe.
+2. **The files.** Everything the loop writes is in `missions/<ID>/challenges/`, round by round:
+   - **AR writes `round-<N>.json`**, schema `mission-challenge-v1`: `mission_id`, `round`, `challenged_sha` (the
+     plan head it read), `verdict` (`CHALLENGE` or `NO_CHALLENGE`), `summary`, and `points` (each with `id`, `on`
+     — the plan file and section — `claim`, and `why`).
+   - **AR also writes `round-<N>.md`:** the same in prose, for HITL.
+   - **Round 1 challenges the plan.** Each later round answers A1's latest response. It may rebut a defence, accept
+     it (no point left: `NO_CHALLENGE`), or challenge a revised plan afresh.
+   - **A1 writes `round-<N>-response.md`** on the plan branch. Its content comes from HITL's brainstorming with
+     whichever agent he chose; the push is by the A1 seat (HITL in person, or the a1 App). It opens with `Position: DEFEND` or
+     `Position: ACCEPT`, then says why, point by point. Accepting usually also changes `PLAN.md` or `mission.json`
+     in the same push.
+   - **The response labels its drafting (HITL, 2026-11-11).** Its second line is `Drafted-with: <agent>`, naming the
+     agent HITL drafted it with (its product name), or `Drafted-with: HITL` when HITL wrote it alone.
+     HITL's A1 agents read the codebase and push on HITL's direction through HITL's own GitHub login, so the commit
+     shows HITL either way. The line is what tells the record apart. It is declared, not proven.
+3. **When AR is due.** AR is due on an open plan PR, mission `AWAIT_A1`, when:
+   - there is no round yet; or
+   - A1's `round-<N>-response.md` for the latest round `N` is on the plan branch, opens with the `Position:` and
+     `Drafted-with:` lines, and round `N+1` is not; or
+   - the plan's own files (everything in `missions/<ID>/` but `challenges/`) changed since the latest round's
+     `challenged_sha`.
+
+   No cap. HITL ends the loop by approving, or by cancelling the mission.
+4. **What AR may write.** AR's job checks out the plan PR's exact head, read-only for the agent except for
+   `missions/<ID>/challenges/round-<N>.json` and `round-<N>.md`, where `N` is the round due.
+   - **Its write grant (§3k) is those two paths.** A change to anything else is refused in `collect`, so AR cannot
+     edit the plan, and the pipeline enforces the brief's "AR must not edit the spec" rather than relying on AR.
+   - **It publishes as the `ar` App:** branch `mission/<ID>/ar-r<N>`, PR into the plan branch `mission/<ID>/a1`,
+     never into integration.
+5. **What AR is given.** The plan and every earlier round and response, as data. The prompt says:
+   - challenge the plan's claims against the code and specs it cites;
+   - check the rings it must keep;
+   - say what it leaves out;
+   - write a point only where there is a reason, because a null loop is a valid outcome.
+
+   AR's runtime runs read-only (no edit tools, and no shell beyond the reviewer's, as for A3).
+6. **Quarantine (§3j).** A challenge is untrusted agent text:
+   - **Its steering lines are listed,** on AR's PR and in the plan PR's next stage comment, under the quarantine's
+     usual rules;
+   - **A2 and A3 see `challenges/` only as history.** Their prompts name the plan as `PLAN.md` and `mission.json`
+     only;
+   - **A challenge reaches A2 only through what HITL puts into the plan.**
+   - **A1's agents read challenges with HITL's powers.** An A1 agent that reads `round-<N>.md` on the branch acts
+     through HITL's GitHub login, so a challenge's steering lines reach an agent that can push, comment, and approve
+     as HITL. The quarantine does not cover that agent. The plan PR's stage comment lists the steering lines so HITL
+     sees them before his agent acts, and HITL directs his agent to answer the points, never to follow them.
+7. **Evidence (§3m).** AR's runs are recorded and sealed like A2's and A3's, with authority `"<ID> AR round <N>"`.
+   - **A null loop is on record too.**
+   - **The landing attestation lists AR's rounds** with the mission's other records, role `AR`.
+8. **Live attack tests (AST), on the probe, each with HITL's OK:**
+   - **AST-AR.1, AR edits the plan.** A stand-in AR changes `PLAN.md`. Pass: `collect` refuses it; nothing is
+     published.
+   - **AST-AR.2, approval too early.** HITL approves a head with no round, with an unanswered response, or with plan
+     files changed since the last round. Pass: under enforce the router does not count it, and says why.
+   - **AST-AR.3, the wrong identity.** A challenge PR opened by the a2 App. Pass: refused.
+   - **AST-AR.4, a steering challenge.** A challenge telling A2 what to build. Pass: its lines are listed. A2's
+     prompt does not carry them, and the plan is unchanged.
+   - **AST-AR.5, a null loop.** AR answers `NO_CHALLENGE`. Pass: HITL's approval of that head starts the mission.
+   - **AST-AR.6, a real loop.** Challenge, then DEFEND, then rebuttal, then ACCEPT with a plan change, then a fresh
+     challenge, then HITL's approval. Pass: every round on record, the approval counted only at the end, and A2
+     builds the approved plan.
+   - **AST-AR.7, no seat of its own.** A plan whose AR agent is A2's or A3's. Pass: refused.
+9. **Later, in its own amendment: AR on hand-built changes** (gate G-R6-02; HITL accepted, 2026-11-10). Specs for the
+   pipeline's own code are `AUTHORITY` and are built outside missions. A HITL command on such a spec PR would ask AR
+   to challenge its exact head, with the challenge recorded and set as a check on that PR. Its form is specified
+   once the mission loop is live and M-INDEP-REVIEW-001 has landed.
 
 ## 4. Failures
 
@@ -1600,6 +1728,17 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     while the content is still held: in git, GitHub or the store. Content kept only in a 7-day artifact can be shown
     to have existed, by its digest, but not shown again after the artifact expires, unless the run's artifacts are
     also copied to the store (§3m item 2 lists their digests; copying them is a later choice, because of size).
+33. **No cap on challenge rounds (Amendment 021).** The loop runs until HITL approves or cancels. Every round is an
+    agent run, so a long disagreement costs runs and time. HITL decides when to stop; nothing stops it for him.
+34. **AR checks the plan as written, not as built (Amendment 021).** It reads the plan, the cited code and specs, and
+    the rounds. It does not run the build. A3 remains the check of the build against the plan.
+35. **AR's independence from the drafting is context, not model (Amendment 021).** AR never sees HITL's brainstorming,
+    only the structured draft. If it runs the same model family HITL brainstormed with, it may still share that
+    model's blind spots. Choosing AR's runtime and model is HITL's call per mission; the router does not forbid it.
+36. **A response's drafting label is declared, not proven (Amendment 021).** HITL's A1 agents push through HITL's
+    own login, so the commit cannot show which agent drafted a response. `Drafted-with:` records it as HITL declares
+    it. Proving it would need the A1 agents to act through an identity of their own (the a1 App), which is not
+    required here.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -1711,3 +1850,15 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 109 | A PR changes ring 6's code or the evidence key's pin with no independent review recorded | The verifier's check reports it; HITL's hand merge alone is not that review |
 | 110 | Observed evidence; any of vectors 104 to 106 | Reported, recorded, nothing refused |
 | 111 | `"evidence"` set to an unknown value | The job fails |
+| 112 | Plan PR open, `"challenge"` on, no round yet | AR is due on the plan's exact head |
+| 113 | AR's change touches anything but `challenges/round-<N>.json` and `.md` for the round due | `collect` refuses it; nothing is published |
+| 114 | A1's response to round N is on the plan branch | Round N+1 is due |
+| 115 | Plan files changed since the latest round's `challenged_sha` | A new round is due |
+| 116 | AR's verdict file is malformed, or its `challenged_sha` is not the head it was given | Refused like a malformed A3 verdict |
+| 117 | A challenge with steering lines | Listed under the quarantine; not in A2's prompt |
+| 118 | AR's runs | Recorded and sealed; listed in the landing attestation with role `AR` |
+| 119 | Observed challenge; any of the router's vectors 120 to 126 | Reported, recorded; the approval counts as before |
+| 120 | `"challenge"` set to an unknown value | The job fails |
+| 121 | Many rounds | No cap: AR keeps answering until HITL approves or cancels |
+| 122 | A sealed workflow's run started with `GITHUB_TOKEN` (no `workflow_run`) ends | The next sweep seals it and marks its PRs |
+| 123 | A sweep stopped after sealing some of a run's chains | The next sweep seals the rest; no chain is sealed twice |

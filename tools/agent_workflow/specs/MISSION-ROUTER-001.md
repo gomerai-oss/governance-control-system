@@ -81,6 +81,17 @@ the stage and says why (MISSION-DISPATCH-001 §3m item 6). An unknown `"evidence
 through `_write`, which records it first. Each merge is preceded by its `router.decision` and the HITL approvals it
 acted on, and the verifier replays that order (MISSION-DISPATCH-001 §3m, "Clarified in part 3"). *Switched on 2026-11-09:* governance runs under `"evidence": "enforce"`; an A2 or A3 stage PR is merged only once
 `evidence-sealed` passed on its head (AST-6.6), and `"enforce"` without an `evidence_store` stops the router.
+**Amendment 019 (2026-11-10, HITL direction: the Adversarial Reviewer Agent, CAPTURE-2026-006, with
+MISSION-DISPATCH-001 Amendment 021):** a plan is challenged before HITL approves it.
+- **AR's PRs:** AR, the fourth role, opens challenge PRs into the plan branch. The router merges one only from the
+  `ar` App, by account ID, touching only that round's challenge files.
+- **The approval gate:** under `"challenge": "enforce"`, the router counts HITL's `/mission approve <sha>` only for a
+  head whose challenge loop is complete (§6a), and otherwise says why.
+- **A seat of its own:** the router refuses a plan whose AR agent is A2's or A3's. AR's independence from A1 is by
+  context: A1 is whichever agent HITL brainstorms with outside the pipeline, and AR sees only the structured draft.
+- **No cap on rounds:** HITL approves when he is satisfied.
+
+An unknown `"challenge"` value stops the router.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -484,6 +495,40 @@ Closing a blocked stack's issue ends its review: the router closes its missions'
 again. Until then, a retried mission reopens the stack: the stack issue says which mission resumed, and if the stack is
 blocked again it says so again.
 
+### 6a. The challenge loop (Amendment 019)
+
+A plan PR, `mission/<ID>/a1`, goes through the loop before HITL's approval counts (MISSION-DISPATCH-001 §3n).
+
+| Step | Who | What | The router then |
+|---|---|---|---|
+| Challenge, round 1 | AR (the `ar` App) | PR `mission/<ID>/ar-r1` into `mission/<ID>/a1`, writing `missions/<ID>/challenges/round-1.json` and `.md` | Merges it into the plan branch (checks below); posts a stage comment on the plan PR with the verdict, the points, and any steering lines listed |
+| Response | The A1 seat (HITL in person, or the a1 App), carrying what HITL and his brainstorming agent decided | Pushes `challenges/round-<N>-response.md` (`Position: DEFEND` or `ACCEPT`, then `Drafted-with: <agent>` or `HITL`) to the plan branch, and, when accepting, the plan changes | Starts AR for round N+1; a response missing either line is not answered, and the router says which line is missing |
+| Rebuttal or fresh challenge, round N+1 | AR | As round 1, answering the response, or challenging the changed plan | As round 1 |
+| Decision | HITL | `/mission approve <head>` on the plan PR | Counts it only when the loop is complete for that head; merges the plan as before |
+
+**An AR PR is merged only when all of these hold:**
+- it was opened by the `ar` App, checked by account ID (§5a);
+- its head branch is `mission/<ID>/ar-r<N>` and its base is `mission/<ID>/a1`, with the mission `AWAIT_A1`;
+- it changes exactly `missions/<ID>/challenges/round-<N>.json` and `round-<N>.md`, for the round due;
+- the JSON parses as `mission-challenge-v1` for this mission and round;
+- its `challenged_sha` is the plan head AR was given.
+
+Anything else is refused, as a refused stage PR is.
+
+**The loop is complete for a head `H` when:**
+- at least one round exists;
+- the latest event in `challenges/` is AR's round, not an unanswered response;
+- the plan's own files (all of `missions/<ID>/` except `challenges/`) at `H` are the files at that round's
+  `challenged_sha`.
+
+Under `"enforce"`, an approval of a head whose loop is not complete is not counted. The router comments once with
+which of these is missing, and approving again later is how HITL proceeds. Under `"observe"`, the router posts the
+same note and counts the approval.
+
+**Approval mechanics.** `/mission approve <sha>` stays the single decision (HITL, 2026-11-10). It carries the plan,
+every challenge and every response into the mission, because they are all in the approved head. A2 and A3 need no
+further approval.
+
 ## 7. Security model
 
 - **Only `main`'s code runs.** `pull_request_target` is limited to PRs into `main`, so its workflow file comes from
@@ -569,6 +614,10 @@ The router enforces everything it can see. These settings live in GitHub and onl
    the pipeline is protected against agents acting through its own seats, not against HITL's own credentials.
 10. **Instruction files on the default branch are HITL's (Amendment 012).** The router keeps them out of builds. The
     ones already on the default branch are loaded by the runtimes as they are; changing them is a HITL pipeline patch.
+11. **The challenge loop has no cap (Amendment 019).** HITL ends it by approving or cancelling. The router does not judge
+    a challenge's merit; it checks who wrote it, where, and whether the loop is complete for the head HITL approves.
+12. **A response's `Drafted-with:` line is HITL's declaration (Amendment 019).** HITL's A1 agents push through HITL's
+    login, as limit 9 accepts, so the router checks the line is present, not that it is true.
 
 ## 10. Predicted vectors (A3 verifies)
 
@@ -693,3 +742,11 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 117 | A refused stage PR whose reasons quote a path with an `@` mention, a `/mission` line or a bidirectional override | The `route-handoff-block` summary shows the reason quarantined: no live mention or command, hidden characters removed |
 | 118 | Enforced evidence; a stage PR whose run has no seal in the evidence store | Held, not merged; the router says why |
 | 119 | `"evidence"` set to an unknown value | The router stops |
+| 120 | Enforced challenge; HITL approves a plan head with no challenge round | Not counted; the router says no round exists yet |
+| 121 | Enforced challenge; HITL approves while A1's latest response has no AR answer | Not counted; the router says the rebuttal is pending |
+| 122 | Enforced challenge; HITL approves a head whose plan files changed after the latest round | Not counted; the router says the plan changed since AR read it |
+| 123 | A challenge PR from any identity but the `ar` App, or touching any file but the round's two | Refused |
+| 124 | A plan whose AR agent is A2's or A3's | Refused at the plan check |
+| 125 | Enforced challenge; a complete loop, then HITL's approval of that head | Counted; the plan merges; A2 starts |
+| 126 | `"challenge"` set to an unknown value | The router stops |
+| 127 | A1's response lacks its `Position:` or `Drafted-with:` line | AR is not started; the router says which line is missing |

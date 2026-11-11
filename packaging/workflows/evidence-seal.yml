@@ -10,11 +10,18 @@ name: Evidence Seal
 # and the ended run's artifacts. It handles records only: digests, never agent content. The mark job holds no
 # secret; its token can read this repository, set check runs and read PRs. Nothing runs until config.json names the
 # store.
+#
+# The sweep (Amendment 022): GitHub sends no workflow_run when the run that ended was started with a GITHUB_TOKEN, and
+# the router starts every Mission Agent run it dispatches that way. So on a schedule the seal job also lists the ended,
+# token-started runs of those workflows whose evidence is not all sealed in the store, downloads their evidence-*
+# artifacts, and seals and marks them as above. Same environment, same credentials, nothing new.
 
 on:
   workflow_run:
     workflows: [Mission Agent, Mission Router, Credentials Check, Evidence Verify]
     types: [completed]
+  schedule:
+    - cron: "*/10 * * * *"  # the sweep (Amendment 022)
   workflow_dispatch:  # by hand: copy the runs already in the store to the WORM bucket (backfill), nothing else
 
 permissions: {}
@@ -23,7 +30,7 @@ env:
   PYTHONPATH: tooling/tools/agent_workflow
 
 concurrency:
-  group: evidence-seal-${{ github.event.workflow_run.id || 'backfill' }}-${{ github.event.workflow_run.run_attempt || github.run_id }}
+  group: ${{ github.event_name == 'schedule' && 'evidence-seal-sweep' || format('evidence-seal-{0}-{1}', github.event.workflow_run.id || 'backfill', github.event.workflow_run.run_attempt || github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -76,6 +83,26 @@ jobs:
           repositories: ${{ steps.store.outputs.name }}
           permission-contents: write
 
+      - name: Find the ended runs the seal job was never started for (the sweep, Amendment 022)
+        if: steps.store.outputs.full != '' && github.event_name == 'schedule'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STORE_TOKEN: ${{ steps.token.outputs.token }}
+          STORE: ${{ steps.store.outputs.full }}
+        run: python3 -B -m evidence sweep --repo "$GITHUB_REPOSITORY" --store-repo "$STORE" > "$RUNNER_TEMP/sweep.txt"
+
+      - name: Fetch those runs' evidence chains (the sweep)
+        if: steps.store.outputs.full != '' && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/chains"
+          while read -r run attempt; do
+            case "$run$attempt" in *[!0-9]*|"") echo "::error::bad sweep line: $run $attempt"; exit 1 ;; esac
+            echo "sweep: run $run attempt $attempt"
+            gh run download "$run" -R "$GITHUB_REPOSITORY" -p 'evidence-*' -D "$RUNNER_TEMP/chains/$run-$attempt"
+          done < "$RUNNER_TEMP/sweep.txt"
+
       - name: Copy the runs already in the store to the WORM bucket (by hand only)
         if: steps.store.outputs.full != '' && github.event_name == 'workflow_dispatch'
         env:
@@ -84,17 +111,18 @@ jobs:
         run: python3 -B -m evidence backfill --store-repo "$STORE"
 
       - name: Seal each chain and add it to the store
-        if: steps.store.outputs.full != '' && github.event_name == 'workflow_run'
+        if: steps.store.outputs.full != '' && github.event_name != 'workflow_dispatch'
         env:
           EVIDENCE_SEAL_KEY: ${{ secrets.EVIDENCE_SEAL_KEY }}
           STORE_TOKEN: ${{ steps.token.outputs.token }}
           STORE: ${{ steps.store.outputs.full }}
+          RESUME: ${{ github.event_name == 'schedule' && '--resume' || '' }}
         run: |
           mkdir -p "$RUNNER_TEMP/chains" "$RUNNER_TEMP/sealed"
-          python3 -B -m evidence seal --chains "$RUNNER_TEMP/chains" --store-repo "$STORE" --out "$RUNNER_TEMP/sealed/sealed.json"
+          python3 -B -m evidence seal --chains "$RUNNER_TEMP/chains" --store-repo "$STORE" --out "$RUNNER_TEMP/sealed/sealed.json" $RESUME
 
       - name: Hand the result to the mark job
-        if: steps.store.outputs.full != '' && github.event_name == 'workflow_run'
+        if: steps.store.outputs.full != '' && github.event_name != 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sealed
@@ -105,7 +133,7 @@ jobs:
   mark:
     name: mark
     needs: seal
-    if: needs.seal.result == 'success' && needs.seal.outputs.store != '' && github.event_name == 'workflow_run'
+    if: needs.seal.result == 'success' && needs.seal.outputs.store != '' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
