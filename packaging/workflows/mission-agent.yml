@@ -513,7 +513,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write  # an AR job reports on the plan PR, which issues: write alone cannot comment on (§3n item 4)
       checks: read
     strategy:
       fail-fast: false

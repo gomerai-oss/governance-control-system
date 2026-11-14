@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from .model import SHA_RE, MissionInputError, _load_json, _require
 
@@ -39,6 +39,10 @@ RESPONSE_MAX_CHARS = 65536
 _POSITION_RE = re.compile(r"Position:[ \t]*(DEFEND|ACCEPT)[ \t]*")
 _DRAFTED_RE = re.compile(r"Drafted-with:[ \t]*(\S(?:[^\r\n]*\S)?)[ \t]*")
 _POINT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0," + str(POINT_ID_MAX_CHARS - 1) + r"}")
+# A3's line on one open AR point, in its verdict's summary (Amendment 024 of MISSION-DISPATCH-001).
+AR_STATUSES = ("handled", "still present", "out of reach")
+AR_LINE_RE = re.compile(r"(?m)^[ \t]*(AR [A-Za-z0-9][A-Za-z0-9._-]{0," + str(POINT_ID_MAX_CHARS - 1)
+                        + r"}: (?:" + "|".join(AR_STATUSES) + r")\b[^\r\n]*)$")
 
 
 class ChallengeError(ValueError):
@@ -177,15 +181,17 @@ class LoopStatus:
     missing: str  # when not complete, what is missing, for HITL
     response_error: str = ""  # A1's latest response is there but malformed: AR is not started (vector 127)
     latest: Optional[Challenge] = None
+    ended: bool = False  # HITL ended the loop for this head with /mission end-challenge (router Amendment 020)
 
 
 def loop_status(mission_id: str, rounds: Sequence[RoundFacts], plan_changed: bool,
-                stray_responses: Sequence[int] = ()) -> LoopStatus:
+                stray_responses: Sequence[int] = (), ended: bool = False) -> LoopStatus:
     """Where the loop stands for one plan head (§3n item 3, §6a).
 
     ``rounds`` are rounds 1..L in order, as found at the head. ``plan_changed`` says whether the plan's own files at
     the head differ from those at the latest round's ``challenged_sha``. ``stray_responses`` are responses found for a
-    round that does not exist.
+    round that does not exist. ``ended`` says HITL ended the loop for this head (router Amendment 020): the loop is
+    then complete, with no round due, as long as at least one round exists and every round is valid and AR's own.
     """
     if not rounds:
         return LoopStatus(0, 1, "the plan has no challenge round yet", False, "no challenge round exists yet")
@@ -202,6 +208,8 @@ def loop_status(mission_id: str, rounds: Sequence[RoundFacts], plan_changed: boo
                           "a response exists for a round AR has not written: round "
                           + ", ".join(str(n) for n in stray_responses))
     latest = rounds[-1]
+    if ended:  # HITL's decision: no rebuttal and no fresh round for this head, whatever A1 wrote since
+        return LoopStatus(latest_no, None, "", True, "", latest=latest.challenge, ended=True)
     if latest.response is not None:
         try:
             parse_response(latest.response)
@@ -222,3 +230,31 @@ def loop_status(mission_id: str, rounds: Sequence[RoundFacts], plan_changed: boo
         return LoopStatus(latest_no, latest_no + 1, f"the plan changed since AR read it in round {latest_no}", False,
                           f"the plan changed since AR read it in round {latest_no}", latest=latest.challenge)
     return LoopStatus(latest_no, None, "", True, "", latest=latest.challenge)
+
+
+@dataclass(frozen=True)
+class OpenPoints:
+    """AR's latest round, when it is a CHALLENGE: the points HITL approved the plan over (dispatch Amendment 024)."""
+    round: int
+    challenge: Challenge
+    response: Optional[str]  # A1's response to it, when HITL ended the loop after one; AR never read it
+
+
+def open_points(read: Callable[[str], Optional[str]], mission_id: str) -> Optional[OpenPoints]:
+    """The open points in an approved plan, from its challenge files. ``read`` returns a file's text at the approved
+    head, or None. None when there is no round, or the latest round is ``NO_CHALLENGE``. A latest round that does not
+    parse raises ``MissionInputError``: it cannot be in an approved plan, as the router never counts the approval."""
+    latest = 0
+    while latest < MAX_ROUNDS and read(round_json(mission_id, latest + 1)) is not None:
+        latest += 1
+    if not latest:
+        return None
+    found = parse_challenge(read(round_json(mission_id, latest)), mission_id, latest)
+    if found.verdict != "CHALLENGE":
+        return None
+    return OpenPoints(latest, found, read(response_path(mission_id, latest)))
+
+
+def ar_lines(summary: str) -> Tuple[str, ...]:
+    """A3's ``AR <id>: handled|still present|out of reach ...`` lines in its verdict's summary."""
+    return tuple(m.group(1).strip() for m in AR_LINE_RE.finditer(summary or ""))

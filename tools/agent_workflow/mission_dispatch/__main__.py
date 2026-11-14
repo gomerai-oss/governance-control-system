@@ -56,6 +56,7 @@ from .dispatch import (
     Survey,
     failure_feedback,
     failure_gate,
+    hitl_note_text,
     land,
     land_matrix,
     plan_landings,
@@ -99,7 +100,7 @@ def live_survey(gh: GitHub, log: Callable[[str], None]) -> Tuple[Survey, Mission
         log(f"challenge loops could not be read, so no AR starts this time: {exc}")
         challenges = {}
     return Survey(contexts, router.identities(), gh.branch_head, config["default_branch"], blocked, stacks,
-                  feedback, order, router.now(), challenges), router
+                  feedback, order, router.now(), challenges, hitl_note_text(router, hitl)), router
 
 
 def _env(name: str) -> str:
@@ -489,6 +490,8 @@ def record_step(recorder, args, result: str, reason: str) -> None:
     if step == "prepare":
         outputs = evidence_producer.file_digests(root / binding.BINDING_DIR,
                                                  [binding.BINDING_FILE, provenance.RECORD_FILE])
+        if job.notes:  # HITL's notes the agent was given (Amendment 025), by digest
+            outputs["hitl_notes"] = evidence_producer.text_digest(job.notes)
     elif step == "run":
         outputs = evidence_producer.file_digests(root, ["agent.log", blast.EGRESS_LOG])
     elif step == "collect":

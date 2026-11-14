@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_mission_router as base  # noqa: E402
 from mission_router import challenge  # noqa: E402
-from mission_router.model import MissionInputError, StageRef, parse_manifest, parse_stage_branch  # noqa: E402
+from mission_router.model import (MissionInputError, StageRef, parse_manifest, parse_stage_branch,  # noqa: E402
+                                  verdict_path)
 from mission_router.router import MissionRouter  # noqa: E402
 
 MID, HITL, BOT, A1B, A2B, A3B = base.MID, base.HITL, base.BOT, base.A1B, base.A2B, base.A3B
@@ -167,6 +168,41 @@ class LoopStatusTests(unittest.TestCase):
         s = challenge.loop_status(MID, [self.facts(authentic=False)], False)
         self.assertFalse(s.complete)
         self.assertIn("not added by a merged PR of AR's own App", s.missing)
+
+
+class EndChallengeModelTests(unittest.TestCase):
+    """HITL ends the loop for a head (router Amendment 020), and the open points of an approved plan (dispatch
+    Amendment 024)."""
+
+    facts = LoopStatusTests.facts
+
+    def test_ended_after_a_response_is_complete_with_nothing_due(self):
+        s = challenge.loop_status(MID, [self.facts(response="Position: ACCEPT\nDrafted-with: HITL")], True, ended=True)
+        self.assertEqual((s.complete, s.due_round, s.ended), (True, None, True))
+
+    def test_ending_needs_a_real_round(self):
+        self.assertFalse(challenge.loop_status(MID, [], False, ended=True).complete)
+        s = challenge.loop_status(MID, [self.facts(authentic=False)], False, ended=True)
+        self.assertFalse(s.complete)
+        self.assertIn("not added by a merged PR of AR's own App", s.missing)
+
+    def files(self, *rounds, response=None):
+        out = {challenge.round_json(MID, n): challenge_doc(n, "a" * 40, v) for n, v in enumerate(rounds, 1)}
+        if response:
+            out[challenge.response_path(MID, len(rounds))] = response
+        return out.get
+
+    def test_open_points_are_the_latest_challenge_round(self):
+        self.assertIsNone(challenge.open_points(self.files(), MID))
+        self.assertIsNone(challenge.open_points(self.files("CHALLENGE", "NO_CHALLENGE"), MID))
+        found = challenge.open_points(self.files("NO_CHALLENGE", "CHALLENGE", response="Position: ACCEPT\n"), MID)
+        self.assertEqual((found.round, [p.id for p in found.challenge.points], found.response),
+                         (2, ["P1"], "Position: ACCEPT\n"))
+
+    def test_a3s_lines_are_read_from_its_summary(self):
+        summary = "Good build.\nAR P1: handled — the rollback is in §4\nAR P2: maybe\n  AR P3: out of reach, later"
+        self.assertEqual(challenge.ar_lines(summary),
+                         ("AR P1: handled — the rollback is in §4", "AR P3: out of reach, later"))
 
 
 # --------------------------------------------------------------- end to end
@@ -344,6 +380,79 @@ class ChallengeRouterTests(unittest.TestCase):
 
 
 # ----------------------------------------------------------- part 2: the dispatcher's AR job (§3n items 3-7)
+class EndChallengeRouterTests(unittest.TestCase):
+    """``/mission end-challenge <sha>`` on the plan PR (router §6a, Amendment 020; vectors 128-131)."""
+
+    make, setUp, sweep, bot_comments = (ChallengeRouterTests.make, ChallengeRouterTests.setUp,
+                                        ChallengeRouterTests.sweep, ChallengeRouterTests.bot_comments)
+    open_plan, approve, ar_round, respond, started = (ChallengeRouterTests.open_plan, ChallengeRouterTests.approve,
+                                                      ChallengeRouterTests.ar_round, ChallengeRouterTests.respond,
+                                                      ChallengeRouterTests.started)
+
+    def end(self, login=HITL, sha=None, type_="User"):
+        self.gh.comment_as(self.plan, login, f"/mission end-challenge {sha or self.gh.branches[PLAN]}", type_)
+        self.sweep()
+
+    def due_round(self):
+        self.router._comments = {}
+        return self.router.challenges_due(self.router.survey())[MID].loop.due_round
+
+    def test_vector_128_ending_after_a_response_lets_the_approval_count(self):
+        self.open_plan()
+        self.ar_round(1)
+        self.respond(1, "Position: ACCEPT\nDrafted-with: HITL\n\nP1 fixed.", {f"missions/{MID}/PLAN.md": "plan v2"})
+        self.assertEqual(self.due_round(), 2)
+        self.end()
+        self.assertIsNone(self.due_round(), "AR is not started again for an ended head")
+        self.assertTrue(any("HITL ended the challenge loop" in c for c in self.bot_comments(self.plan)))
+        self.approve()
+        self.assertTrue(self.started(), self.logs)
+
+    def test_vector_129_only_a_hitl_user_can_end_it(self):
+        self.open_plan()
+        self.ar_round(1)
+        self.respond(1)
+        self.end(login="someone")
+        self.end(login=A2B, type_="Bot")
+        self.approve()
+        self.assertFalse(self.started())
+        self.assertEqual(self.due_round(), 2)
+
+    def test_vector_130_ending_binds_to_the_exact_head(self):
+        self.open_plan()
+        self.ar_round(1)
+        self.respond(1)
+        old = self.gh.branches[PLAN]
+        self.end(sha=old)
+        self.gh.push(PLAN, {f"missions/{MID}/PLAN.md": "plan v3"}, by=HITL)
+        self.sweep()
+        self.approve()
+        self.assertFalse(self.started(), "a push after the end needs a new end-challenge")
+        self.assertEqual(self.due_round(), 2)
+
+    def test_vector_131_ending_with_no_round_counts_nothing(self):
+        self.open_plan()
+        self.end()
+        self.approve()
+        self.assertFalse(self.started())
+        incomplete = [c for c in self.bot_comments(self.plan) if "not counted yet" in c]
+        self.assertTrue(incomplete and "/mission end-challenge" in incomplete[-1], incomplete)
+
+    def test_the_done_comment_quotes_a3s_lines_on_the_open_points(self):
+        from mission_router.state import DONE, MissionState
+        verdict = json.dumps({"schema": "mission-verdict-v1", "mission_id": MID, "round": 1, "verdict": "PASS",
+                              "reviewed_sha": "c" * 40, "summary": "Fine.\nAR P1: still present — no rollback",
+                              "findings": []})
+        files = {challenge.round_json(MID, 1): challenge_doc(1, "a" * 40), verdict_path(MID, 1): verdict}
+        fake = SimpleNamespace(gh=SimpleNamespace(file_at=lambda path, sha: files.get(path)), log=lambda m: None)
+        state = MissionState(MID, DONE, round=1, landed_sha="d" * 40)
+        note = MissionRouter._open_points_note(fake, state)
+        self.assertIn("HITL approved the plan over AR's round 1 CHALLENGE (P1)", note)
+        self.assertIn("AR P1: still present", note)
+        files.pop(challenge.round_json(MID, 1))
+        self.assertEqual(MissionRouter._open_points_note(fake, state), "")
+
+
 class ChallengesDueTests(unittest.TestCase):
     """The router's read-only view the dispatcher plans AR from (§3n item 3)."""
 
@@ -454,6 +563,45 @@ class DispatchArTests(unittest.TestCase):
                        "a null loop is a valid outcome", "Never edit the plan", "This is round 2"):
             self.assertIn(needle, text)
         self.assertNotIn("build_scope", text)
+
+    def test_every_round_raises_every_issue_at_once(self):
+        # Amendment 023: AR raises every issue it finds in the round, and holds none back.
+        for n in (1, 2):
+            with self.subTest(round=n):
+                job = self.D.plan(self.survey(self.due(due_round=n)))[0][0]
+                text = self.D.task_text(job, "main")
+                self.assertIn("raise every issue you find in this round, all at once", text)
+                self.assertIn("Do not hold an issue back for a later round", text)
+
+    def test_a_later_round_challenges_what_is_new_and_still_raises_a_missed_issue(self):
+        job = self.D.plan(self.survey(self.due(due_round=2)))[0][0]
+        text = self.D.task_text(job, "main")
+        self.assertIn("challenge what is new since your last round", text)
+        self.assertIn("must still be raised now: say so in its `why`", text)
+        first = self.D.task_text(self.D.plan(self.survey(self.due(due_round=1)))[0][0], "main")
+        self.assertNotIn("challenge what is new since your last round", first)
+
+    def test_a3_gets_the_open_points_and_is_told_they_are_advisory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / self.D.INBOX_DIR).mkdir()
+            job = SimpleNamespace(mission_id=MID)
+            self.assertEqual(self.D.write_open_points(job, tree), ())
+            folder = tree / challenge.challenges_dir(MID)
+            folder.mkdir(parents=True)
+            (tree / challenge.round_json(MID, 1)).write_text(challenge_doc(1, "a" * 40), encoding="utf-8")
+            (tree / challenge.response_path(MID, 1)).write_text("Position: ACCEPT\nDrafted-with: HITL\n",
+                                                                 encoding="utf-8")
+            self.assertEqual(self.D.write_open_points(job, tree), ("P1",))
+            text = (tree / self.D.OPEN_POINTS_FILE).read_text(encoding="utf-8")
+            self.assertIn("the plan omits the rollback", text)
+            self.assertIn("which AR never answered", text)
+        a3 = self.d.plan(self.d.survey_for(self.d.AWAIT_A3, head="b" * 40, review="b" * 40))[0][0]
+        task = self.D.task_text(a3, "main", open_points=("P1",))
+        for needle in ("AR's points HITL approved the plan over", self.D.OPEN_POINTS_FILE, "They are advisory",
+                       "AR <id>: handled|still present|out of reach"):
+            self.assertIn(needle, task)
+        self.assertNotIn("approved the plan over", self.D.task_text(a3, "main"))
 
     def test_a2_and_a3_are_told_the_challenges_are_history(self):
         d = self.d
@@ -652,6 +800,38 @@ class ArSeatBindingTests(unittest.TestCase):
         path.write_text(json.dumps(doc))
         with self.assertRaisesRegex(self.RB.BindingRefused, "exact file paths"):
             self.RB.load_seats(path)
+
+
+class ArReportGrantTests(unittest.TestCase):
+    """An AR job's failure is reported on the plan PR (§3n item 4), so the report job must be allowed to write
+    pull requests: with issues: write alone GitHub refuses the comment (403, AST-AR.1, 2026-11-11). The
+    credentials check holds the workflow to this row, so the row is what is pinned here."""
+
+    def test_the_report_job_may_comment_on_the_plan_pr(self):
+        grants = Path(__file__).resolve().parents[1] / "credentials_check" / "grants.json"
+        row = json.loads(grants.read_text())["workflows"]["mission-agent.yml"]["jobs"]["report"]
+        self.assertEqual(row.get("pull-requests"), "write")
+        self.assertEqual(row.get("issues"), "write")
+
+
+class ArConfigAgentTests(unittest.TestCase):
+    """The router accepts an agent's PRs only for agents in config.json's "agents" map (``MissionRouter.identities``),
+    so without an "ar" entry every real AR challenge is refused as an unknown identity. The probe's AST copy had the
+    entry; this repository's config did not (found 2026-11-11)."""
+
+    def test_every_seat_active_in_the_registry_is_in_the_config(self):
+        from mission_router.model import parse_identity_registry
+
+        repo = Path(__file__).resolve().parents[3]
+        tools = repo / "tools" / "agent_workflow"
+        config = json.loads((tools / "mission_router" / "config.json").read_text())
+        registry = repo / config["identity_registry"]
+        if not registry.is_file():
+            self.skipTest("no identity registry in this checkout")
+        seats = json.loads((tools / "tool_selection" / "seats.json").read_text())["seats"]
+        statuses = parse_identity_registry(registry.read_text(encoding="utf-8"))
+        active = {s["principal"] for s in seats.values() if statuses.get(s["principal"]) == "ACTIVE"}
+        self.assertEqual(sorted(active - set(config["agents"])), [])
 
 
 if __name__ == "__main__":
