@@ -92,6 +92,13 @@ MISSION-DISPATCH-001 Amendment 021):** a plan is challenged before HITL approves
 - **No cap on rounds:** HITL approves when he is satisfied.
 
 An unknown `"challenge"` value stops the router.
+*Switched on 2026-11-12:* governance runs under `"challenge": "enforce"`, after AST-AR.1 to AR.7 passed
+(MISSION-DISPATCH-001 §3n item 8). A new plan here must assign `AR`, and HITL's approval counts only for a head whose
+loop is complete.
+**Amendment 020 (2026-11-13, HITL direction, with MISSION-DISPATCH-001 Amendment 024):** HITL ends the challenge
+loop for a head with `/mission end-challenge <sha>`, so stopping no longer costs one more AR round, and the points of
+AR's last round, when it is a `CHALLENGE`, go to A3 as advisory open points and come back to HITL in the DONE comment
+(§6a; vectors 128-132).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -491,6 +498,11 @@ router-opened issue only, from a `hitl_logins` user account only):
 | `/mission resume` | Posted after the latest `/mission halt` on the same issue, it lifts the halt: the mission continues from the stage it was in, as if no time had passed. A resume before any halt does nothing |
 | `/mission retry` | Gives a stage recorded as failed 3 times in a row new attempts: failed agent runs (MISSION-DISPATCH-001 §4) and refused stage PRs (§5). On a mission blocked by A3, it reopens that mission alone (§4, Amendment 004): A3 reviews the same build again after `BLOCKED`, or A2 gets one more round after a last-round FAIL. Nothing else in the stack reruns |
 
+HITL's notes are not router commands. A comment whose first line starts `/mission note` is read by the dispatcher,
+not the router: its text goes to the next A2 and A3 rounds as guidance within the approved plan
+(MISSION-DISPATCH-001 §3o, Amendment 025). The router acts on nothing in it. Its quick trigger still starts a
+sweep, as for any `/mission` comment, which changes nothing.
+
 Closing a blocked stack's issue ends its review: the router closes its missions' issues and the stack id cannot start
 again. Until then, a retried mission reopens the stack: the stack issue says which mission resumed, and if the stack is
 blocked again it says so again.
@@ -528,6 +540,22 @@ same note and counts the approval.
 **Approval mechanics.** `/mission approve <sha>` stays the single decision (HITL, 2026-11-10). It carries the plan,
 every challenge and every response into the mission, because they are all in the approved head. A2 and A3 need no
 further approval.
+
+**HITL ends the loop (Amendment 020).** A HITL user's `/mission end-challenge <sha>` line on the plan PR, for its
+exact head, makes the loop complete for that head:
+- it needs at least one round, and every round valid and from AR's own App; otherwise it changes nothing;
+- AR is not started again for that head, whatever A1 wrote since its last round;
+- HITL's `/mission approve <sha>` of the same head then counts. Both lines may be in one comment;
+- a push to the plan makes a new head, which needs a new `end-challenge`;
+- it is read like an approval (a user account in `hitl`, never a bot), and recorded as a `router.hitl_command` when
+  the plan merges.
+
+The router comments once that the loop was ended, and its "not counted yet" comment names the command.
+
+**Open points reach A3 (Amendment 020, MISSION-DISPATCH-001 §3n item 6).** When the approved plan's latest round is
+a `CHALLENGE`, its points go to A3 as advisory open points. A3 adds an `AR <id>: handled`, `still present` or
+`out of reach` line for each to its verdict's summary. The DONE comment (or the stack's "Mission passed" comment)
+quotes those lines, quarantined, or says A3 gave none.
 
 ## 7. Security model
 
@@ -750,3 +778,8 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 125 | Enforced challenge; a complete loop, then HITL's approval of that head | Counted; the plan merges; A2 starts |
 | 126 | `"challenge"` set to an unknown value | The router stops |
 | 127 | A1's response lacks its `Position:` or `Drafted-with:` line | AR is not started; the router says which line is missing |
+| 128 | Enforced challenge; A1 answered the latest round; HITL comments `/mission end-challenge <head>`, then approves | AR is not started for that head; the approval counts; the plan merges |
+| 129 | `/mission end-challenge` from a non-HITL user or a bot | Ignored: AR is still due, and an approval is not counted |
+| 130 | `/mission end-challenge <old head>`, then a push to the plan | Ignored for the new head: AR is due, and an approval is not counted |
+| 131 | `/mission end-challenge` on a plan with no round | Changes nothing: an approval is not counted, and the comment names the command |
+| 132 | A mission lands whose approved plan ended on a `CHALLENGE` round | The DONE comment lists A3's `AR <id>:` lines, quarantined, or says it gave none |

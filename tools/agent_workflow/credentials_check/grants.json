@@ -9,7 +9,7 @@
         "checks": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
         "agent": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
         "publish": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
-        "report": {"contents": "read", "issues": "write", "pull-requests": "read", "checks": "read"},
+        "report": {"contents": "read", "issues": "write", "pull-requests": "write", "checks": "read"},
         "land": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"}
       },
       "app_tokens": {

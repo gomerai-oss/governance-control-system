@@ -74,6 +74,7 @@ SEALED_CHECK = "evidence-sealed"  # set by the seal job (MISSION-DISPATCH-001 §
 COMMENT_ACTIONS = {"approval": "router.approval_request", "reject": "router.refusal", "refused": "router.refusal",
                    "wait": "router.decision", "waiting": "router.decision"}
 _APPROVE_RE = re.compile(r"(?m)^\s*/mission approve ([0-9a-f]{40})\s*$")
+_END_CHALLENGE_RE = re.compile(r"(?m)^\s*/mission end-challenge ([0-9a-f]{40})\s*$")  # Amendment 020
 _CANCEL_RE = re.compile(r"(?m)^\s*/mission cancel\s*$")
 _TRACKING_RE = re.compile(r"<!-- mission-router:tracking-issue:([1-9][0-9]*) -->")
 COMPARE_FILE_CAP = 300
@@ -684,6 +685,16 @@ class MissionRouter:
                 shas.update(_APPROVE_RE.findall(comment.get("body") or ""))
         return shas
 
+    def _ended_challenges(self, number: int) -> set:
+        """The plan heads HITL ended the challenge loop for on PR ``number`` (§6a, Amendment 020): a HITL user's
+        ``/mission end-challenge <sha>`` line, read like an approval."""
+        shas = set()
+        for comment in self._pr_comments(number):
+            user = comment.get("user") or {}
+            if user.get("type") == "User" and str(user.get("login", "")).casefold() in self.hitl:
+                shas.update(_END_CHALLENGE_RE.findall(comment.get("body") or ""))
+        return shas
+
     def _changes(self, base: str, head: str) -> Tuple[Tuple[FileChange, ...], bool, int]:
         cmp = self.gh.compare(base, head)
         files = tuple(FileChange(f["filename"], f["status"], f.get("previous_filename")) for f in cmp.get("files") or [])
@@ -1173,7 +1184,10 @@ class MissionRouter:
                                                    for f in files for p in (f.path, f.previous_path or ""))
             except GitHubError:
                 plan_changed = True  # a challenged commit GitHub cannot compare is not the plan AR read
-        status = challenge_mod.loop_status(mission_id, rounds, plan_changed, stray)
+        raw = self._plan_raw(mission_id)
+        ended = (raw is not None and raw["head"]["sha"] == head
+                 and head in self._ended_challenges(int(raw["number"])))
+        status = challenge_mod.loop_status(mission_id, rounds, plan_changed, stray, ended)
         self._loops[key] = status
         return status
 
@@ -1214,6 +1228,12 @@ class MissionRouter:
                                "```\nPosition: DEFEND\nDrafted-with: <the agent you drafted it with, or HITL>\n```\n\n"
                                "(`Position: ACCEPT` when you accept the points, usually with the plan change in the "
                                "same push.)", mission=ref.mission_id)
+        if loop.ended:
+            self._comment_once(raw["number"], f"challenge-ended:{head[:12]}",
+                               f"HITL ended the challenge loop for `{head}`: AR is not started again for this head, "
+                               "and HITL's approval of it counts. A push to the plan needs a new "
+                               "`/mission end-challenge` for the new head. Any points of AR's last round go to A3 as "
+                               "open points (MISSION-ROUTER-001 §6a).", mission=ref.mission_id)
         if decision.action != MERGE or loop.complete:
             return decision
         if self.challenge_mode == challenge_mod.ENFORCE:
@@ -1221,7 +1241,9 @@ class MissionRouter:
                                "HITL's approval of this head is not counted yet: the challenge loop is not complete "
                                f"for it ({quarantined(loop.missing)}).\n\nThe loop is complete when at least one AR "
                                "round exists, AR spoke last, and the plan is unchanged since AR read it. Approving "
-                               "again once it is complete is how the mission proceeds (MISSION-ROUTER-001 §6a).",
+                               "again once it is complete is how the mission proceeds. Or, once at least one round "
+                               f"exists, end the loop here:\n\n```\n/mission end-challenge {head}\n```\n\n"
+                               "(MISSION-ROUTER-001 §6a).",
                                mission=ref.mission_id)
             return Decision(WAIT, (f"the challenge loop is not complete for this head: {loop.missing}",))
         self._comment_once(raw["number"], f"challenge-observe:{head[:12]}",
@@ -1375,14 +1397,15 @@ class MissionRouter:
         self._write(f"delete refused branch {branch}", lambda: self.gh.delete_branch(branch), "router.refusal",
                     mission=ref.mission_id, round_n=ref.round, pr=raw["number"], commit=head)
 
-    def _comment_once(self, number: int, key: str, body: str, action: Optional[str] = None, before=None,
+    def _comment_once(self, number: int, key: str, body, action: Optional[str] = None, before=None,
                       mission: Optional[str] = None) -> bool:
-        """Post ``body`` once per ``key``; True when this call posted it. ``before`` runs just before it is posted
-        (the HITL commands the comment acts on are recorded there)."""
+        """Post ``body`` once per ``key``; True when this call posted it. ``body`` may be a function, called only
+        when the comment is posted. ``before`` runs just before it is posted (the HITL commands the comment acts on
+        are recorded there)."""
         for comment in self._pr_comments(number):
             if (comment.get("user") or {}).get("login") == self.bot and MARKER.format(key) in (comment.get("body") or ""):
                 return False
-        text = f"{body}\n\n{MARKER.format(key)}"
+        text = f"{body() if callable(body) else body}\n\n{MARKER.format(key)}"
         if before is not None and not self.dry_run:
             action = before() or action
         kind = key.split(":", 1)[0]
@@ -1398,6 +1421,28 @@ class MissionRouter:
 
     def issue_comments(self, number: int) -> list:
         return self._pr_comments(number)
+
+    def _open_points_note(self, state: MissionState) -> str:
+        """For a DONE comment (§6a, Amendment 020): when the approved plan carried open AR points, A3's line on each,
+        from its PASS verdict, quarantined. Empty otherwise, or when it cannot be read."""
+        if state.stage != DONE or not state.landed_sha:
+            return ""
+        mid, sha = state.mission_id, state.landed_sha
+        try:
+            found = challenge_mod.open_points(lambda path: self.gh.file_at(path, sha), mid)
+            if found is None:
+                return ""
+            ids = ", ".join(p.id for p in found.challenge.points)
+            text = self.gh.file_at(verdict_path(mid, state.round), sha)
+            lines = challenge_mod.ar_lines(parse_verdict(text, mid, state.round).summary) if text is not None else ()
+        except (GitHubError, MissionInputError) as exc:
+            self.log(f"{mid}: open AR points not read for the DONE comment: {exc}")
+            return ""
+        head = (f"\n\nHITL approved the plan over AR's round {found.round} CHALLENGE ({ids}). A3's word on each, "
+                "advisory:\n\n")
+        if not lines:
+            return head + "- A3's verdict gives no line on them; read its summary.\n"
+        return head + "".join(f"- {quarantined(line)}\n" for line in lines)
 
     def _start_agent(self, state: MissionState, manifest: Optional[Manifest]) -> None:
         """Ask the Mission Agent workflow to start the role the mission now waits on.
@@ -1458,6 +1503,12 @@ class MissionRouter:
             login = str(user.get("login", ""))
             if user.get("type") == "User" and login.casefold() in self.hitl and head_sha in _APPROVE_RE.findall(body):
                 self._record("router.hitl_command", f"HITL command: /mission approve {head_sha}", actor=login,
+                             account=user.get("id") if isinstance(user.get("id"), int) else None,
+                             authority=("hitl_command", f"comment {comment.get('id')} on #{number}"),
+                             mission=mission, round_n=round_n, pr=number, commit=head_sha,
+                             outputs={"comment": evidence_producer.text_digest(body)})
+            if user.get("type") == "User" and login.casefold() in self.hitl and head_sha in _END_CHALLENGE_RE.findall(body):
+                self._record("router.hitl_command", f"HITL command: /mission end-challenge {head_sha}", actor=login,
                              account=user.get("id") if isinstance(user.get("id"), int) else None,
                              authority=("hitl_command", f"comment {comment.get('id')} on #{number}"),
                              mission=mission, round_n=round_n, pr=number, commit=head_sha,
@@ -1748,8 +1799,9 @@ class MissionRouter:
                 return "router.halt" if state.stage == PAUSED else ("router.retry" if retry and state.stage in
                                                                      (AWAIT_A2, AWAIT_A3) else None)
             if self._comment_once(number, f"stage:{state.stage}:{state.round}",
-                                  render_stage_comment(state, manifest, self.identities(), landing,
-                                                       target if target != self.main else ""),
+                                  lambda: render_stage_comment(state, manifest, self.identities(), landing,
+                                                               target if target != self.main else "",
+                                                               self._open_points_note(state)),
                                   before=commands, mission=state.mission_id):
                 self._start_agent(state, manifest)
 
@@ -1839,8 +1891,9 @@ def render_issue_body(state: MissionState, manifest: Optional[Manifest], repo: s
 
 
 def render_stage_comment(state: MissionState, manifest: Optional[Manifest], identities: Dict[str, str],
-                         landing: str = "main", target: str = "") -> str:
-    """``target`` names the mission's own branch (Amendment 008); empty for the default branch."""
+                         landing: str = "main", target: str = "", open_note: str = "") -> str:
+    """``target`` names the mission's own branch (Amendment 008); empty for the default branch. ``open_note`` is
+    A3's word on the AR points HITL approved the plan over, added to the DONE comment (Amendment 020)."""
     mid, r = state.mission_id, state.round
     in_stack = landing.startswith("stack/")
     final = f"`{target}`" if target else "the default branch"
@@ -1866,9 +1919,10 @@ def render_stage_comment(state: MissionState, manifest: Optional[Manifest], iden
                 + _runtime_note(manifest, "A3"))
     if state.stage == DONE and in_stack:
         return (f"**Mission passed.** A3 passed round {r}; the router merged the mission into `{landing}` at "
-                f"`{state.landed_sha}`. It lands on {final} together with the rest of its stack.")
+                f"`{state.landed_sha}`. It lands on {final} together with the rest of its stack." + open_note)
     if state.stage == DONE:
-        return f"**Mission complete.** A3 passed round {r}; the router merged the mission into {final} at `{state.landed_sha}`."
+        return (f"**Mission complete.** A3 passed round {r}; the router merged the mission into {final} at "
+                f"`{state.landed_sha}`." + open_note)
     if state.stage == BLOCKED:
         return (f"**Mission blocked.** {state.reason}" + (f" ({state.when})" if state.when else "") + ".\n\n"
                 + "".join(f"- {quarantined(d)}\n" for d in state.details)

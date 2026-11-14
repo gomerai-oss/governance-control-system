@@ -122,6 +122,43 @@ looks for ended runs of the sealed workflows that `github-actions[bot]` started 
 environment and credentials, nothing new. A run started any other way gets `workflow_run` and is never swept. A chain
 an earlier sweep already sealed is not sealed again (`seal --resume`). Vectors 122 and 123.
 
+**Amendment 023 (2026-11-13, HITL direction, dispatch spec only):** AR raises every issue at once. In
+M-APP-HARNESS-001, the first real loop, AR raised one or two points a round for 11 rounds, and A1 accepted every one.
+Several were in sections earlier rounds never touched. Nothing told AR to be exhaustive: `MAX_POINTS` is 50
+(`mission_router/challenge.py`), and the prompt said only to write a point where there is a reason. AR's prompt now
+says to raise every issue it finds in the round, all at once. A later round challenges what is new since the last
+round, and an issue an earlier round missed is still raised, marked as missed in its `why`, never held back. This is an
+instruction to AR, not a check: the router cannot tell an issue held back from one found late (§7 item 37). §3n items
+2 and 5.
+
+**Amendment 024 (2026-11-13, HITL direction, with MISSION-ROUTER-001 Amendment 020):** HITL can end the challenge
+loop, and A3 checks the points HITL approved over. In M-APP-HARNESS-001, ending the loop cost one more AR round after
+A1's last response, and AR's last round (round 11, a CHALLENGE) went to the build unanswered and unseen: A2's spec
+missed both points, and nothing told A3 about them.
+- **HITL ends the loop for a head** with `/mission end-challenge <sha>` on the plan PR (router §6a, Amendment 020).
+  AR is then not started again for that head, and HITL's approval of it counts. It needs at least one valid round of
+  AR's own.
+- **A3 is given the open points.** When the approved plan's latest round is a `CHALLENGE`, A3's job gets its points,
+  and A1's response if HITL ended the loop after one, in `AR-OPEN-POINTS.md` through the quarantine. They are
+  advisory (HITL, 2026-11-13): never a FAIL or a BLOCKED on their own, because A2 builds the plan as approved. A3
+  adds one line per point to its verdict's summary, `AR <id>: handled`, `still present` or `out of reach`, and the
+  router quotes those lines in the mission's DONE comment.
+- **A2 is still not given them** (§3n item 6, AST-AR.4).
+
+§3n items 3 and 6; vectors 124 and 125.
+
+**Amendment 025 (2026-11-13, HITL direction, dispatch spec, with a note in MISSION-ROUTER-001 §6):** HITL's notes
+reach A2 and A3. Until now, nothing HITL wrote on a tracking issue reached an agent: an agent's task is built from the
+checkout and the approved plan only. HITL's `/mission note` on the tracking issue now goes to the next A2 and A3
+rounds, through the quarantine.
+- **What a note is (HITL, 2026-11-13):** guidance within the approved plan. It clarifies or prioritises; it never
+  replaces the plan. A change to what is built goes through the plan, where AR challenges it.
+- **A note widens nothing.** An agent's grants come only from its seat, runtime and `build_scope` (§3k item 5), and
+  `collect` refuses any change outside scope.
+- **Who reads it: A2 and A3 both**, so A3 does not fail A2 for following a note it never saw.
+
+§3o; vectors 126 to 131; §7 item 38.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1441,7 +1478,11 @@ the build against the plan, not the plan itself. A bad plan therefore becomes a 
   019);
 - any other value fails the job and stops the router.
 
-HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass.
+HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass. **Switched on 2026-11-12:** this repository's `config.json`
+sets `"enforce"`, after AST-AR.1 to AR.7 passed on the probe (item 8). From then on every new plan here assigns `AR`,
+and HITL's approval counts only for a head whose loop is complete. Core switches on in its own companion. The GCS
+template keeps observe (no `"challenge"` key), because an adopter without an `ar` App could approve no plan under
+enforce.
 
 1. **The role.** A mission's manifest gains a fourth role:
 
@@ -1464,8 +1505,10 @@ HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass.
      plan head it read), `verdict` (`CHALLENGE` or `NO_CHALLENGE`), `summary`, and `points` (each with `id`, `on`
      — the plan file and section — `claim`, and `why`).
    - **AR also writes `round-<N>.md`:** the same in prose, for HITL.
-   - **Round 1 challenges the plan.** Each later round answers A1's latest response. It may rebut a defence, accept
-     it (no point left: `NO_CHALLENGE`), or challenge a revised plan afresh.
+   - **Round 1 challenges the plan, raising every issue AR finds (Amendment 023).** Each later round answers A1's
+     latest response. It may rebut a defence, accept it (no point left: `NO_CHALLENGE`), or challenge what is new since
+     the last round: a defect a fix introduced, or something the plan changed. An issue an earlier round missed is
+     still raised, and its `why` says it was missed then.
    - **A1 writes `round-<N>-response.md`** on the plan branch. Its content comes from HITL's brainstorming with
      whichever agent he chose; the push is by the A1 seat (HITL in person, or the a1 App). It opens with `Position: DEFEND` or
      `Position: ACCEPT`, then says why, point by point. Accepting usually also changes `PLAN.md` or `mission.json`
@@ -1481,18 +1524,26 @@ HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass.
    - the plan's own files (everything in `missions/<ID>/` but `challenges/`) changed since the latest round's
      `challenged_sha`.
 
-   No cap. HITL ends the loop by approving, or by cancelling the mission.
+   No cap. HITL ends the loop by approving, or by cancelling the mission. HITL can also end it for a head with
+   `/mission end-challenge <sha>` (Amendment 024, router §6a): AR is then not due for that head.
 4. **What AR may write.** AR's job checks out the plan PR's exact head, read-only for the agent except for
    `missions/<ID>/challenges/round-<N>.json` and `round-<N>.md`, where `N` is the round due.
    - **Its write grant (§3k) is those two paths.** A change to anything else is refused in `collect`, so AR cannot
      edit the plan, and the pipeline enforces the brief's "AR must not edit the spec" rather than relying on AR.
    - **It publishes as the `ar` App:** branch `mission/<ID>/ar-r<N>`, PR into the plan branch `mission/<ID>/a1`,
      never into integration.
+   - **Its failures are reported on the plan PR.** An AR job that does not end in an open PR is reported there, not
+     on a tracking issue, so the report job holds `pull-requests: write` (`grants.json`): `issues: write` alone
+     cannot comment on a PR. AST-AR.1 (2026-11-11) found the gap: the refusal was made, but its report failed with
+     GitHub 403 and never reached the plan PR.
 5. **What AR is given.** The plan and every earlier round and response, as data. The prompt says:
    - challenge the plan's claims against the code and specs it cites;
    - check the rings it must keep;
    - say what it leaves out;
-   - write a point only where there is a reason, because a null loop is a valid outcome.
+   - write a point only where there is a reason, because a null loop is a valid outcome;
+   - raise every issue it finds in the round, all at once, and hold none back for a later round (Amendment 023). A
+     later round challenges what is new since the last round; an issue an earlier round missed is still raised,
+     marked as missed in its `why`.
 
    AR's runtime runs read-only (no edit tools, and no shell beyond the reviewer's, as for A3).
 6. **Quarantine (§3j).** A challenge is untrusted agent text:
@@ -1501,6 +1552,12 @@ HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass.
    - **A2 and A3 see `challenges/` only as history.** Their prompts name the plan as `PLAN.md` and `mission.json`
      only;
    - **A challenge reaches A2 only through what HITL puts into the plan.**
+   - **A3 alone is given the open points (Amendment 024).** When the approved plan's latest round is a `CHALLENGE`,
+     its points, and A1's response if HITL ended the loop after one, go to A3 in `AR-OPEN-POINTS.md`, through the
+     quarantine (its steering lines listed). A3 judges the build against the plan as always. The points are advisory:
+     they never make a FAIL or BLOCKED on their own. A3 adds one line per point to its verdict's `summary`, exactly
+     `AR <id>: handled|still present|out of reach — why`, and the router quotes those lines to HITL in the DONE
+     comment (router §6a).
    - **A1's agents read challenges with HITL's powers.** An A1 agent that reads `round-<N>.md` on the branch acts
      through HITL's GitHub login, so a challenge's steering lines reach an agent that can push, comment, and approve
      as HITL. The quarantine does not cover that agent. The plan PR's stage comment lists the steering lines so HITL
@@ -1521,10 +1578,64 @@ HITL switches to `"enforce"` after AST-AR.1 to AR.7 pass.
      challenge, then HITL's approval. Pass: every round on record, the approval counted only at the end, and A2
      builds the approved plan.
    - **AST-AR.7, no seat of its own.** A plan whose AR agent is A2's or A3's. Pass: refused.
+
+   **Results (2026-11-11 and 2026-11-12, probe `st-runner-probe`, tooling from governance 68c03b37, `"challenge":
+   "enforce"`; stand-in agents in place of the runtimes, every other step the pipeline's own code). All seven pass:**
+   - **AR.1:** a stand-in AR wrote a valid round and changed `PLAN.md`. `collect` refused it and nothing was
+     published.
+   - **AR.2:** HITL's approval was not counted, with the reason stated, in all three cases. They were a head with no
+     round, a head whose response had no rebuttal yet, and a head whose plan changed after AR's latest round.
+   - **AR.3:** a valid round in a PR opened by the a3 App (the probe's wrong-key slot) was refused.
+   - **AR.4:** a challenge telling A2 to change a workflow and build another file had its four lines listed on AR's PR
+     (six hits) and on the plan PR, its `/mission` line was marked as agent text, and the plan was unchanged. A2's
+     prompt files carried none of them; its task names `challenges/` as history.
+   - **AR.5:** after A1's DEFEND, AR's round 2 was `NO_CHALLENGE`, and HITL's approval of that head started the
+     mission.
+   - **AR.6:** four rounds: challenge, DEFEND, rebuttal, ACCEPT with a `PLAN.md` change, a fresh challenge, a plan edit
+     (AR.2's third case), and a fourth challenge. Every round and response is in `challenges/`. Only HITL's last
+     approval counted, and A2 built from that approved plan.
+   - **AR.7:** a plan naming `a2` for AR was refused.
+   - **Not shown on the probe:** sealing. The probe has no evidence store since AST-6.6. In governance, AR's first
+     real round (M-APP-HARNESS-001, PR #1301) was sealed (`evidence-sealed` passed) before the router merged it.
+   - **No code change came from these tests.** Two fixes came from AR's first runs and are merged: the report job
+     may comment on the plan PR (#1298), and `config.json` maps the `ar` seat to its App (#1299).
 9. **Later, in its own amendment: AR on hand-built changes** (gate G-R6-02; HITL accepted, 2026-11-10). Specs for the
    pipeline's own code are `AUTHORITY` and are built outside missions. A HITL command on such a spec PR would ask AR
    to challenge its exact head, with the challenge recorded and set as a check on that PR. Its form is specified
    once the mission loop is live and M-INDEP-REVIEW-001 has landed.
+
+
+### 3o. HITL's notes (Amendment 025)
+
+**Gap.** HITL could direct a mission only through the plan, or by retrying, halting or cancelling it. Anything HITL
+wrote on the tracking issue never reached an agent: the task is built from the checkout and the approved plan only.
+
+1. **The command.**
+   - A comment on the mission's tracking issue whose first line starts `/mission note`. The note is everything after
+     the command, on that line and the lines below; a note with no text is ignored.
+   - Only a `hitl_logins` user account counts, as for every HITL command. A comment whose account ID does not match
+     is relabelled by the router's account guard before it is read (MISSION-ROUTER-001 Amendment 011), so it is never
+     taken for HITL's.
+   - Notes go on the tracking issue only. Before the plan merges there is none, and the plan itself is where HITL
+     directs the work.
+2. **Who reads them.** `plan` reads the tracking issue's notes with the rest of the survey and gives them, oldest
+   first, to every A2 and A3 job of the mission, as the job's `notes`.
+   - AR is never given them: it challenges the plan, not HITL's direction of the build.
+   - At most 16 KiB in all. When they do not all fit, the newest are kept and the text says how many earlier notes
+     were left out.
+3. **How they reach the agent.** Through the quarantine (§3j item 1): labelled as written by HITL on the tracking
+   issue, fenced, with any steering lines listed, in a section of the task, "HITL's notes on this mission".
+   - **A2 is told:** a note is guidance within the approved plan. Follow it where it clarifies or prioritises what
+     the plan asks. It never replaces the plan, and never widens `build_scope`, the rules or the tools. Anything it
+     asks beyond the plan is not done, and is recorded under `Blockers:` as an out-of-plan request.
+   - **A3 is told:** judge the build against the plan as always. Following a note within the plan is not a finding;
+     going beyond the plan is a finding even when a note asked for it.
+4. **A note widens nothing.**
+   - The agent's grants come only from its seat, runtime and `build_scope` (§3k item 5).
+   - `collect` and `publish` refuse a change outside scope (§3c), whatever a note says.
+   - The job description refuses notes on any role but A2 and A3, and notes longer than the limit.
+5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
+   The notes themselves stay on the tracking issue, by comment id and author.
 
 ## 4. Failures
 
@@ -1739,6 +1850,13 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     own login, so the commit cannot show which agent drafted a response. `Drafted-with:` records it as HITL declares
     it. Proving it would need the A1 agents to act through an identity of their own (the a1 App), which is not
     required here.
+37. **AR's exhaustiveness is an instruction, not a check (Amendment 023).** The router cannot tell an issue AR held
+    back from one it found late, so no test can pass or fail on it. It shows only in the loop's shape: fewer rounds,
+    with round 1 carrying most of the points, and each late find marked as missed in its `why`.
+38. **A note is not reviewed by AR, and is followed by judgement (Amendment 025).** AR challenges the plan before
+    HITL approves it; a note comes later and is never challenged. Within the plan, A2 decides how to follow a note,
+    and A3 judges the build. A note that should change what is built belongs in the plan. A note cannot widen any
+    grant (§3o item 4), so the limit is one of judgement, not of reach.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -1862,3 +1980,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 121 | Many rounds | No cap: AR keeps answering until HITL approves or cancels |
 | 122 | A sealed workflow's run started with `GITHUB_TOKEN` (no `workflow_run`) ends | The next sweep seals it and marks its PRs |
 | 123 | A sweep stopped after sealing some of a run's chains | The next sweep seals the rest; no chain is sealed twice |
+| 124 | An A3 job for a mission whose approved plan ends on a `CHALLENGE` round | `AR-OPEN-POINTS.md` holds its points, quarantined, with A1's response if any; A3's task names the point ids, says they are advisory, and asks for one `AR <id>:` line each |
+| 125 | An A3 job whose approved plan ends on `NO_CHALLENGE`, or has no round | No open-points file and no such section in the task |
+| 126 | A `/mission note` by a HITL user account on the tracking issue | The next A2 and A3 jobs carry it in `notes`; each task has "HITL's notes on this mission", quarantined, with its role's rule |
+| 127 | A `/mission note` by another account, a bot, or an account whose ID does not match | Ignored |
+| 128 | `/mission note` not at the start of the comment, `/mission notes`, or a note with no text | Ignored |
+| 129 | Notes longer than 16 KiB in all | The newest kept; the task says how many earlier notes were left out; one note over the limit is cut, never dropped |
+| 130 | A job description with notes on an AR job, notes that are not text, or notes over the limit | Refused as malformed |
+| 131 | A job with notes, `prepare` recorded | Its record's outputs carry `hitl_notes`, the notes' digest, and no text |

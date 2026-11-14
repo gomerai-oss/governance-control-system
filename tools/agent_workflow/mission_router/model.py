@@ -62,6 +62,9 @@ _FAILED_RE = re.compile(r"<!-- mission-dispatch:failed:(A2|A3|AR):([1-9][0-9]?) 
 _RETRY_RE = re.compile(r"(?m)^\s*/mission retry\s*$")
 _HALT_RE = re.compile(r"(?m)^\s*/mission halt\s*$")
 _RESUME_RE = re.compile(r"(?m)^\s*/mission resume\s*$")
+# A HITL note (MISSION-DISPATCH-001 Amendment 025): a comment whose first line is ``/mission note``, optionally
+# followed by text on the same line; the note is everything after the command.
+_NOTE_RE = re.compile(r"\A[ \t]*/mission note(?=[ \t]|\r?\n|\Z)")
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 REGISTRY_STATUSES = ("ACTIVE", "SUSPENDED", "RETIRED")
 _REGISTRY_ROW_RE = re.compile(r"^\|\s*([a-z0-9][a-z0-9-]{0,39})\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([A-Z]+)\s*\|")
@@ -375,6 +378,37 @@ def hitl_halt(comments: Sequence[dict], hitl: set) -> Optional[str]:
         elif _RESUME_RE.search(body):
             halted_by = None
     return halted_by
+
+
+@dataclass(frozen=True)
+class HitlNote:
+    """One ``/mission note`` by a HITL account (MISSION-DISPATCH-001 Amendment 025)."""
+    login: str
+    created_at: str
+    comment_id: int
+    text: str
+
+
+def hitl_notes(comments: Sequence[dict], hitl: set) -> Tuple[HitlNote, ...]:
+    """HITL's notes on a tracking issue, oldest first (Amendment 025).
+
+    A note is a comment by a HITL user account whose first line starts ``/mission note``; its text is the rest of the
+    comment, stripped. Only HITL user accounts count, as for every HITL command: a comment whose account ID does not
+    match is relabelled by the account guard before it is read, so it is never taken for HITL's. A note with no text
+    is ignored.
+    """
+    notes = []
+    for c in comments:
+        user = c.get("user") or {}
+        login = str(user.get("login", ""))
+        if user.get("type") != "User" or login.casefold() not in hitl:
+            continue
+        body = str(c.get("body") or "")
+        found = _NOTE_RE.match(body)
+        text = body[found.end():].strip() if found else ""
+        if text and isinstance(c.get("id"), int) and c.get("created_at"):
+            notes.append(HitlNote(login, str(c["created_at"]), c["id"], text))
+    return tuple(notes)
 
 
 def parse_iso(text: str) -> Optional[datetime]:

@@ -4,6 +4,7 @@ commits. Vector 102 (records for each action) and vector 104 (a changed file). T
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import stat
@@ -113,6 +114,18 @@ class DispatcherTests(Base):  # vector 102
         self.assertEqual(rec["result"], "done")
         self.assertEqual(rec["outputs"], {"binding.json": producer.file_digest(root / "binding" / "binding.json"),
                                           "provenance.json": producer.file_digest(root / "binding" / "provenance.json")})
+
+    def test_prepare_records_hitl_notes_by_digest_when_the_job_has_them(self):
+        """Amendment 025: the notes an agent was given are on record by digest, never as text."""
+        notes = "Note by hitl-user, 2026-11-13T10:00:00Z (comment 1):\nkeep the old flag name"
+        self.env["JOB"] = json.dumps(dataclasses.replace(JOB, notes=notes).to_dict())
+        root = self.tmp / "job"
+        (root / "binding").mkdir(parents=True)
+        self.main(["prepare", "--repo", "o/r", "--root", str(root)], {"cmd_prepare": mock.Mock(return_value=0)})
+        (rec,) = self.records()
+        self.assertEqual(rec["outputs"].get("hitl_notes"), producer.text_digest(notes))
+        self.assertNotIn("flag name", json.dumps(rec))
+        self.verified()
 
     def test_collect_records_the_change_and_each_gateway_and_egress_decision(self):
         root, out = self.tmp / "job", self.tmp / "out"
