@@ -1,6 +1,6 @@
 {
   "schema": "tool-selection-matrix-v1",
-  "matrix_version": "doctrine-s4-v2",
+  "matrix_version": "doctrine-s4-v3",
   "spec": "GOVERNED-TOOL-SELECTION-SPEC-001",
   "admission_threshold": "1.0",
   "capabilities": {
@@ -29,7 +29,11 @@
     "self_approval": "elevated",
     "merge": "elevated",
     "credential_access": "elevated",
-    "production_runtime": "elevated"
+    "production_runtime": "elevated",
+    "app_read": "read",
+    "app_write": "write",
+    "app_send": "send",
+    "app_delete": "delete"
   },
   "roles": {
     "writer": {
@@ -45,7 +49,9 @@
         "self_approval": "self-review and self-approval are prohibited (doctrine section 4.1)",
         "merge": "merge authority is not on the writer surface",
         "credential_access": "credential access is not on the writer surface",
-        "production_runtime": "production runtime is not on the writer surface"
+        "production_runtime": "production runtime is not on the writer surface",
+        "app_send": "no agent sends in an app: it drafts the call, and the send-and-delete step performs it after HITL's command",
+        "app_delete": "no agent deletes in an app: it drafts the call, and the send-and-delete step performs it after HITL's command"
       }
     },
     "reviewer": {
@@ -61,7 +67,10 @@
         "self_approval": "self-review and self-approval are prohibited (doctrine section 4.1)",
         "merge": "merge authority is not on the reviewer surface",
         "credential_access": "credential access is not on the reviewer surface",
-        "epap_write": "EPAP write/update is not on the reviewer surface"
+        "epap_write": "EPAP write/update is not on the reviewer surface",
+        "app_write": "app writes are not on the reviewer surface",
+        "app_send": "no agent sends in an app: it drafts the call, and the send-and-delete step performs it after HITL's command",
+        "app_delete": "no agent deletes in an app: it drafts the call, and the send-and-delete step performs it after HITL's command"
       }
     },
     "router": {
@@ -75,7 +84,10 @@
         "implementation_repair": "implementation is not on the router surface",
         "review_disposition": "final authority is not on the router surface",
         "epap_write": "artifact mutation is not on the router surface",
-        "index_update": "index update needs elevated authorization outside the router surface"
+        "index_update": "index update needs elevated authorization outside the router surface",
+        "app_write": "app writes are not on the router surface",
+        "app_send": "no agent sends in an app: it drafts the call, and the send-and-delete step performs it after HITL's command",
+        "app_delete": "no agent deletes in an app: it drafts the call, and the send-and-delete step performs it after HITL's command"
       }
     }
   },

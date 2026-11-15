@@ -20,8 +20,11 @@ Rules beyond shape:
 
 - ``elevated`` (final authority, merge, credentials, production runtime) is
   admissible in no row and no mission type;
+- ``send`` and ``delete`` (an app action that sends or deletes, APP-CONTROL-HARNESS-SPEC-001 §4.3,
+  MISSION-DISPATCH-001 Amendment 026) are admissible in no row and no mission type either: no agent seat ever
+  holds them, and only the send-and-delete step, which is pipeline code and not a seat, performs them;
 - a ``read_only`` row names a ``separation_rule`` and admits no mutation class
-  (``write``, ``execute``, ``elevated``); the reviewer and router rows are read-only;
+  (``write``, ``execute``, ``elevated``, ``send``, ``delete``); the reviewer and router rows are read-only;
 - every admitted capability's class is one of its row's evidence classes, and
   no capability is both admitted and blocked.
 
@@ -42,9 +45,11 @@ DEFAULT_PATH = Path(__file__).resolve().parent / "matrix.json"
 
 ROLES = ("writer", "reviewer", "router")
 READ_ONLY_ROLES = ("reviewer", "router")
-CLASSES = ("read", "draft", "write", "execute", "elevated")
-MUTATION_CLASSES = ("write", "execute", "elevated")
+CLASSES = ("read", "draft", "write", "execute", "elevated", "send", "delete")
+MUTATION_CLASSES = ("write", "execute", "elevated", "send", "delete")
 ELEVATED = "elevated"
+# Classes no row and no mission type may admit (Amendment 026 adds send and delete beside elevated).
+NO_ROW_CLASSES = (ELEVATED, "send", "delete")
 MISSION_TYPES = ("CAPTURE", "PLAN", "IMPLEMENT", "VERIFY", "CLOSEOUT")
 # The spec's five confidence signals, in the order they are recorded.
 SIGNALS = ("role_resolved", "mission_type_resolved", "resource_in_scope", "registry_entry_valid",
@@ -141,8 +146,9 @@ def validate(doc: Any) -> dict:
         elif row["separation_rule"] is not None:
             raise MatrixError(f"{where}.separation_rule must be null on a mutation-capable row")
         classes = _names(row["evidence_classes"], f"{where}.evidence_classes", CLASSES)
-        if ELEVATED in classes:
-            raise MatrixError(f"{where}: the {ELEVATED!r} class is admissible in no row")
+        for cls in NO_ROW_CLASSES:
+            if cls in classes:
+                raise MatrixError(f"{where}: the {cls!r} class is admissible in no row")
         if row["read_only"] and set(classes) & set(MUTATION_CLASSES):
             raise MatrixError(f"{where}: a read-only row admits no mutation class")
         admit = _names(row["admit"], f"{where}.admit", caps)
@@ -162,8 +168,9 @@ def validate(doc: Any) -> dict:
     mission_types = _fields(doc["mission_types"], MISSION_TYPES, "mission_types")
     for mtype in MISSION_TYPES:
         classes = _names(mission_types[mtype], f"mission_types.{mtype}", CLASSES)
-        if ELEVATED in classes:
-            raise MatrixError(f"mission_types.{mtype}: the {ELEVATED!r} class is admissible in no mission type")
+        for cls in NO_ROW_CLASSES:
+            if cls in classes:
+                raise MatrixError(f"mission_types.{mtype}: the {cls!r} class is admissible in no mission type")
 
     routes = _fields(doc["fallback_routes"], SIGNALS, "fallback_routes")
     for signal in SIGNALS:

@@ -47,7 +47,8 @@ There is no `__init__.py`: `tool_selection` is a namespace package.
 | `runtime_binding.py` | `bind(seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now) -> Binding`, `BindingRefused` |
 | `seats.json` | Seat → role, mission type, fabric role, principal, gateway resources (`mission-seats-v1`) |
 | `runtime_registry.json` | The `tool-registry-v1` registry of runtime tools the dispatcher can grant |
-| `matrix.json` | `doctrine-s4-v2`: HITL decision D2 only |
+| `matrix.json` | `doctrine-s4-v3`: HITL decision D2, and the app capabilities (decision 28) |
+| `apps.py`, `apps.json` | The app register (`app-register-v1`), shipped empty (decision 28) |
 | `../tests/test_runtime_binding.py` | Vectors P1-P7 (with P4a, P5a) as `test_vector…`, plus hardening cases |
 
 ## Resolutions
@@ -65,3 +66,11 @@ There is no `__init__.py`: `tool_selection` is a namespace package.
 25. **Matrix D2.** `matrix_version` is `doctrine-s4-v2`. The writer `admit` list gains `repo_read`, `doctrine_lookup`, `corpus_search`, `citation_extract` and `artifact_lookup`; the reviewer `admit` list gains `corpus_search`, `citation_extract` and `artifact_lookup`. Nothing else changes. Four existing `test_tool_selection.py` cases asserted v1's disjoint writer and reviewer rows. Their expected values are updated to what D2 implies (the writer now also admits the fixture's two read-class tools); no test logic changed.
 26. **Catalog pin (MISSION-DISPATCH-001 §3k item 1, ring 2 part 1).** `bind(..., catalog_mode="observe"|"enforce")` reads the gateway catalog it already checks in decision 21, and pins it: the session gains `catalog` `{"sha256": <canonical SHA-256>, "mode": <catalog_mode>}`, the audit gains the catalog as its first material (`tool_selection/catalogs/<sha>.json`), and `Binding.catalog_sha256` carries the digest. Any other `catalog_mode` refuses the binding. Without `catalog_mode` nothing changes, so a caller that does not pin gets exactly the decision 22 session and decision 24 audit. The description check is the dispatcher's (`mission_dispatch/binding.py`), not the binder's, so this library still imports nothing from the dispatcher.
 27. **Write grant narrowed to the scope (MISSION-DISPATCH-001 §3k item 2, ring 2 part 2).** Supersedes decision 17 when `bind(..., narrow_writes=True)`. A row whose rules include `Edit(**)` gets, in its place, one `Edit(<pattern>)` per `build_scope` pattern in plan order, then `Edit(.mission-dispatch/COMMIT_MSG)` and `Edit(.mission-dispatch/DELETE)`; `Read(**)` stays. A pattern must match `[A-Za-z0-9_+-][A-Za-z0-9_.*+/-]*` with no empty, `.` or `..` segment and no leading wildcard, so it renders inside the checkout under the dispatcher's ceiling (`mission_dispatch/binding.py` `_RULE`); otherwise the binding is refused. Rows without `Edit(**)` (the reviewer's `Edit(missions/<ID>/reviews/**)`) are unchanged. `Binding.scoped_rules` and `scope_problem` are computed whether or not narrowing is applied, so `"observe"` can report them. `narrow_writes` must be a boolean.
+28. **Matrix v3 and the app register (MISSION-DISPATCH-001 §3p, Amendment 026; app-control harness part 1).**
+    `matrix_version` is `doctrine-s4-v3`. `CLASSES` and `MUTATION_CLASSES` gain `send` and `delete`, and
+    `NO_ROW_CLASSES` (`elevated`, `send`, `delete`) are refused in any row's `evidence_classes` and any mission type.
+    The capabilities gain `app_read`, `app_write`, `app_send` and `app_delete`; no row admits one. Every row blocks
+    `app_send` and `app_delete`, and the reviewer and router rows block `app_write`. Selection needs no change: a
+    read-only row denies the new classes by its separation rule, and `_scope_kind` gives them the write scope.
+    `apps.py` validates `apps.json` strictly (`matrix.read_file`), and nothing reads the register at run time
+    until part 2. Vector P7 now pins v1 + D2 + Amendment 026.
