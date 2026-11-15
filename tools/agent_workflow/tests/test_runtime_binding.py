@@ -227,10 +227,10 @@ class SpecVectors(Base):
                 by = audit["byproducts"]
                 row = {"A2": ("writer", "IMPLEMENT"), "A3": ("reviewer", "VERIFY")}[seat]
                 self.assertEqual((by["seat"], by["runtime"], by["role"], by["mission_type"]), (seat, runtime) + row)
-                self.assertEqual(by["matrix_version"], "doctrine-s4-v2")
+                self.assertEqual(by["matrix_version"], "doctrine-s4-v3")
                 record = by["selection"]
                 self.assertIsNone(R.record_problem(record))
-                self.assertEqual(record["matrix_version"], "doctrine-s4-v2")
+                self.assertEqual(record["matrix_version"], "doctrine-s4-v3")
                 self.assertEqual(record["disposition"], R.ADMITTED)
                 for cand in record["candidates"]:
                     self.assertIn(cand["outcome"], (R.ADMIT, R.DENY))
@@ -252,9 +252,11 @@ class SpecVectors(Base):
                 self.assertTrue(signing.signature_valid(ed25519.public_key(seed).hex(), block["signed"],
                                                         block["signatures"][0]["sig"]))
 
-    def test_vector7_matrix_differs_from_v1_exactly_by_d2(self):
+    def test_vector7_matrix_differs_from_v1_exactly_by_d2_and_amendment_026(self):
+        # doctrine-s4-v3: D2, plus MISSION-DISPATCH-001 Amendment 026 (four app capabilities, admitted by no row;
+        # every row blocks app_send and app_delete, and the read-only rows block app_write).
         matrix = M.load_file()
-        self.assertEqual(matrix["matrix_version"], "doctrine-s4-v2")
+        self.assertEqual(matrix["matrix_version"], "doctrine-s4-v3")
         rows = matrix["roles"]
         self.assertEqual(rows["writer"]["admit"], V1_WRITER_ADMIT + D2_WRITER)
         self.assertEqual(rows["reviewer"]["admit"], V1_REVIEWER_ADMIT + D2_REVIEWER)
@@ -262,18 +264,22 @@ class SpecVectors(Base):
                                                    "citation_extract", "corpus_search"])
         self.assertTrue(all(matrix["capabilities"][c] == "read" for c in D2_WRITER + D2_REVIEWER))
         self.assertEqual(sorted(rows["writer"]["blocked"]),
-                         ["credential_access", "merge", "production_runtime", "review_disposition", "self_approval"])
+                         ["app_delete", "app_send", "credential_access", "merge", "production_runtime",
+                          "review_disposition", "self_approval"])
         self.assertEqual(sorted(rows["reviewer"]["blocked"]),
-                         ["credential_access", "epap_write", "file_edit", "implementation_repair", "merge",
-                          "self_approval"])
+                         ["app_delete", "app_send", "app_write", "credential_access", "epap_write", "file_edit",
+                          "implementation_repair", "merge", "self_approval"])
         self.assertEqual(sorted(rows["router"]["blocked"]),
-                         ["epap_write", "implementation_repair", "index_update", "review_disposition"])
+                         ["app_delete", "app_send", "app_write", "epap_write", "implementation_repair",
+                          "index_update", "review_disposition"])
+        self.assertEqual({c: matrix["capabilities"][c] for c in matrix["capabilities"] if c.startswith("app_")},
+                         {"app_read": "read", "app_write": "write", "app_send": "send", "app_delete": "delete"})
         self.assertEqual({r: (rows[r]["read_only"], rows[r]["separation_rule"], rows[r]["evidence_classes"])
                           for r in rows},
                          {"writer": (False, None, ["read", "draft", "write", "execute"]),
                           "reviewer": (True, "WRITER_REVIEWER_SEPARATION", ["read", "draft"]),
                           "router": (True, "ROUTER_NO_MUTATION", ["read"])})
-        self.assertEqual(len(matrix["capabilities"]), 26)
+        self.assertEqual(len(matrix["capabilities"]), 30)
         self.assertEqual(matrix["mission_types"]["VERIFY"], ["read", "draft"])
         self.assertEqual(set(matrix["fallback_routes"].values()), {"HITL_GATE", "BOUNDED_CLARIFICATION"})
 
@@ -330,7 +336,8 @@ class Hardening(Base):
 
     def test_package_layout_and_no_init(self):
         names = sorted(p.name for p in PKG.iterdir() if p.name != "__pycache__")
-        self.assertEqual(names, sorted(["IMPLEMENTATION-DECISIONS.md", "matrix.json", "matrix.py", "records.py",
+        self.assertEqual(names, sorted(["IMPLEMENTATION-DECISIONS.md", "apps.json", "apps.py", "matrix.json",
+                                        "matrix.py", "records.py",
                                         "registry.py", "select.py", "seats.json", "runtime_registry.json",
                                         "runtime_binding.py"]))
         self.assertFalse(list(PKG.rglob("__init__.py")))

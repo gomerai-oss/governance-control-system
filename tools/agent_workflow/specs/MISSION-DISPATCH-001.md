@@ -159,6 +159,18 @@ rounds, through the quarantine.
 
 §3o; vectors 126 to 131; §7 item 38.
 
+**Amendment 026 (2026-11-14, HITL's approval of APP-CONTROL-HARNESS-BUILD-PLAN-001, build part 1 of 7):** the
+app-control harness's first part: the app register and the matrix's four app capabilities, with two new classes,
+`send` and `delete`. Nothing an agent can do changes: the register is empty, no matrix row admits an app capability,
+and nothing reads the register at run time until part 2. Design: `APP-CONTROL-HARNESS-SPEC-001` §4.3 (revised
+2026-11-14), in `change-specs/SPEC-APP-CONTROL-HARNESS-GOVERNANCE-001/`.
+- **Part 1 re-ran the spec's surface search first,** as the build plan requires. It stopped on rows the spec's table
+  lacked; the spec was revised (governance #1321) before this part was built.
+- **`send` and `delete` are admissible in no row and no mission type,** like `elevated`. No agent seat ever holds
+  them; only the send-and-delete step (part 5), which is pipeline code and not a seat, performs them.
+
+§3p; vectors 132 to 139.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1637,6 +1649,41 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
+### 3p. The app-control harness (Amendment 026)
+
+**What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
+server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
+(`APP-CONTROL-HARNESS-BUILD-PLAN-001`) and stays off until part 7. This section grows with each part. Part 1:
+
+1. **Two new classes, `send` and `delete`** (`tool_selection/matrix.py`).
+   - Both join `CLASSES` and `MUTATION_CLASSES`, so a read-only row denies a tool of either class by its separation
+     rule, and its path scope is the write scope.
+   - Both join `elevated` in `NO_ROW_CLASSES`: a row's `evidence_classes` or a mission type that lists one is refused
+     when the matrix loads. So no row can admit a capability of either class.
+2. **Four app capabilities** in `tool_selection/matrix.json`, `doctrine-s4-v3`: `app_read` (`read`), `app_write`
+   (`write`), `app_send` (`send`) and `app_delete` (`delete`).
+   - No row admits any of them.
+   - Every row blocks `app_send` and `app_delete`; the reviewer and router rows also block `app_write`.
+   - Admitting `app_read` (the writer and reviewer rows) or `app_write` (the writer row only) is for the part that
+     brings the first harness that needs it. The credentials check lists such a change as a `GRANT` line (§3k item 3).
+3. **The app register,** `tool_selection/apps.json`, `app-register-v1`, read by `tool_selection/apps.py`.
+   - SPEC-002 `AUTHORITY` under the `tool_selection/` prefix, so only a hand-merged PR changes it.
+   - It ships empty, with the run bounds of the build plan: at most 50 harness calls and 15 minutes per run.
+   - Each app lists: the classes its calls may use (of `read`, `write`, `send`, `delete`); whether its writes are
+     direct or drafted; its app-gateway tools; its hosts (exact DNS names); every request its harness makes (method,
+     path and class); its fabric resources (`app:<name>`, `app:<name>:<part>`); the approvals its calls need (its
+     restricted resources, and the runtime implications its calls declare); its key's slot (`APP_KEY_<n>`); and,
+     optionally, lower bounds of its own.
+   - It is refused whole on any defect: an unknown field, a class with no request or a request outside the app's
+     classes, a host that is a wildcard or an address, a path segment that is neither literal nor one `{name}`, a
+     resource of another app, an approval of a resource not its own or of an unknown implication, a tool or key slot
+     that belongs to two apps, or bounds above the register's.
+   - Nothing reads it at run time yet. Part 2's app gateway and overlay read it.
+4. **Release.** `apps.json` ships to Core and GCS in both sync manifests, which list each `tool_selection` JSON file
+   by name; `apps.py` ships with the folder's modules.
+5. **What part 1 leaves unchanged.** The files the spec's table marks unchanged are pinned by digest in
+   `tests/test_app_harness.py`, and `KEEP_ENV` (`mission_dispatch/runtimes.py`) still keeps only the model logins.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -1988,3 +2035,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 129 | Notes longer than 16 KiB in all | The newest kept; the task says how many earlier notes were left out; one note over the limit is cut, never dropped |
 | 130 | A job description with notes on an AR job, notes that are not text, or notes over the limit | Refused as malformed |
 | 131 | A job with notes, `prepare` recorded | Its record's outputs carry `hitl_notes`, the notes' digest, and no text |
+| 132 | The shipped app register | Loads; `app-register-v1`, no apps, bounds 50 calls and 15 minutes |
+| 133 | A register with any defect listed in §3p item 3 | Refused whole, naming the defect |
+| 134 | The matrix's classes | `send` and `delete` in `CLASSES`, `MUTATION_CLASSES` and `NO_ROW_CLASSES`; `doctrine-s4-v3` |
+| 135 | A matrix whose row or mission type lists `send` or `delete` | Refused when the matrix loads |
+| 136 | The shipped rows; a row admitting `app_send`, `app_delete`, or (read-only rows) `app_write` | No row admits an app capability; each such admission refused |
+| 137 | A writer or reviewer selection offered the four app tools | Each denied at `role_admission`: not admitted (`app_read`, writer `app_write`), blocked (writer `app_send`, `app_delete`), or the reviewer's separation rule |
+| 138 | The files the spec's table marks unchanged | Byte-identical to `main` at the spec's revision |
+| 139 | `KEEP_ENV` | Still only the three model logins; no `APP_KEY_*` |

@@ -1,0 +1,7 @@
+{
+  "schema": "app-register-v1",
+  "spec": "APP-CONTROL-HARNESS-SPEC-001",
+  "register_version": "apps-v1",
+  "bounds": {"calls": 50, "minutes": 15},
+  "apps": {}
+}
