@@ -1,6 +1,6 @@
 {
  "schema": "workflow-pins-v1",
- "spec": "MISSION-DISPATCH-001 \u00a73l items 1 to 3 (ring 4, Amendment 018)",
+ "spec": "MISSION-DISPATCH-001 \u00a73l items 1 to 3 (ring 4, Amendment 018); harnesses \u00a73p (Amendment 029)",
  "actions": {
   "actions/cache": {
    "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
@@ -54,5 +54,6 @@
     "by": "recorded at the ring 5 pin; not re-checked by a signature"
    }
   }
- }
+ },
+ "harnesses": {}
 }

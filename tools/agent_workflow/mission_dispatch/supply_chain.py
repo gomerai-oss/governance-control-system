@@ -16,10 +16,16 @@ stops the router.
   - in the table: a runtime whose ``provenance.version`` is not its version.
 - **Pin changes** (item 3): ``pin_lines`` lists each changed row against the PR's base, and for a runtime the
   behavioural tests the change owes. The lines never fail the check.
+- **Harnesses** (§3p, Amendment 029): each harness the app gateway may run, by name, with its app, the SHA-256 of
+  its file (``mcp_gateway/harnesses/<name>.py`` in the tooling tree), the commit reviewed, who built it and the
+  independent review that admits it: another seat, on another vendor's model, of that same commit. The section may be
+  empty. ``pin_lines`` lists a harness pin added, removed or changed, and a harness file that no longer matches its
+  pin; the app gateway refuses to run such a harness (``mcp_gateway/app_gateway.py``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -43,6 +49,17 @@ TESTS_OWED: Mapping[str, Tuple[str, ...]] = {
 }
 RUNTIME_FIELDS = frozenset({"version", "sha256", "url", "registry", "attestation", "provenance"})
 PROVENANCE_FIELDS = frozenset({"version", "checked", "how", "by"})
+TABLE_FIELDS = frozenset({"schema", "spec", "actions", "runtimes", "harnesses"})
+# A harness pin (§3p, Amendment 029): the file is mcp_gateway/harnesses/<name>.py in the tooling tree.
+HARNESS_DIR = "mcp_gateway/harnesses"
+HARNESS_FIELDS = frozenset({"app", "sha256", "commit", "built_by", "review"})
+BUILDER_FIELDS = frozenset({"seat", "vendor", "model"})
+REVIEW_FIELDS = frozenset({"seat", "vendor", "model", "commit", "date", "report"})
+HARNESS_TESTS_OWED = ("AST-H.6",)
+_HARNESS_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_APP_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")  # the app register's rule (tool_selection/apps.py)
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 _USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(['\"]?)([^'\"\s#]+)\1")
 _ACTION = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?)@([^@\s]+)")
@@ -70,14 +87,15 @@ def mode(config: Mapping[str, object]) -> str:
 
 # ------------------------------------------------------------------ the table
 def read_pins(path: Path) -> dict:
-    """``{"schema": "workflow-pins-v1", "spec", "actions": {...}, "runtimes": {...}}``; a malformed table raises."""
+    """``{"schema": "workflow-pins-v1", "spec", "actions": {...}, "runtimes": {...}, "harnesses": {...}}``; a
+    malformed table raises."""
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
         raise SupplyChainError(f"{PINS_TABLE} is not JSON: {exc}") from None
     if not (isinstance(doc, dict) and doc.get("schema") == PINS_SCHEMA
-            and set(doc) == {"schema", "spec", "actions", "runtimes"}):
-        raise SupplyChainError(f"{PINS_TABLE} must be {PINS_SCHEMA} with spec, actions and runtimes")
+            and set(doc) == TABLE_FIELDS):
+        raise SupplyChainError(f"{PINS_TABLE} must be {PINS_SCHEMA} with spec, actions, runtimes and harnesses")
     actions, runtimes = doc["actions"], doc["runtimes"]
     if not isinstance(actions, dict) or not all(
             isinstance(name, str) and _ACTION.fullmatch(f"{name}@x") and isinstance(row, dict)
@@ -98,7 +116,61 @@ def read_pins(path: Path) -> dict:
         if registry is not None and not (isinstance(registry, dict) and set(registry) == {"package", "keyid", "key"}
                                          and all(isinstance(registry[k], str) and registry[k] for k in registry)):
             raise SupplyChainError(f"{PINS_TABLE}: runtime {name!r} registry must be null or {{package, keyid, key}}")
+    check_harnesses(doc["harnesses"])
     return doc
+
+
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value.isprintable() and len(value) <= 200
+
+
+def check_harnesses(harnesses: object) -> None:
+    """The ``harnesses`` section: each pin well formed, at most one harness per app, and each admitted by a review
+    that is independent of its builder (another seat, another vendor) and of the commit pinned."""
+    if not isinstance(harnesses, dict):
+        raise SupplyChainError(f"{PINS_TABLE}: harnesses must be an object (it may be empty)")
+    apps: Dict[str, str] = {}
+    for name, row in harnesses.items():
+        where = f"{PINS_TABLE}: harness {name!r}"
+        if not (isinstance(name, str) and _HARNESS_NAME.fullmatch(name)):
+            raise SupplyChainError(f"{where}: a harness name is a lowercase identifier of at most 32 characters")
+        if not (isinstance(row, dict) and set(row) == HARNESS_FIELDS):
+            raise SupplyChainError(f"{where} must have exactly {sorted(HARNESS_FIELDS)}")
+        if not (isinstance(row["app"], str) and _APP_NAME.fullmatch(row["app"])):
+            raise SupplyChainError(f"{where}: app must be an app register name")
+        if row["app"] in apps:
+            raise SupplyChainError(f"{where}: app {row['app']!r} already has harness {apps[row['app']]!r}")
+        apps[row["app"]] = name
+        if not (isinstance(row["sha256"], str) and _HEX64.fullmatch(row["sha256"])):
+            raise SupplyChainError(f"{where}: sha256 must be 64 lowercase hex")
+        if not (isinstance(row["commit"], str) and _SHA.fullmatch(row["commit"])):
+            raise SupplyChainError(f"{where}: commit must be a full commit SHA (40 hex)")
+        built, review = row["built_by"], row["review"]
+        if not (isinstance(built, dict) and set(built) == BUILDER_FIELDS and all(_text(built[k]) for k in built)):
+            raise SupplyChainError(f"{where}: built_by must be exactly {sorted(BUILDER_FIELDS)}, each named")
+        if not (isinstance(review, dict) and set(review) == REVIEW_FIELDS
+                and all(_text(review[k]) for k in ("seat", "vendor", "model"))):
+            raise SupplyChainError(f"{where}: review must be exactly {sorted(REVIEW_FIELDS)}, each named")
+        if review["commit"] != row["commit"]:
+            raise SupplyChainError(f"{where}: the review is of commit {str(review['commit'])[:40]!r}, not the one "
+                                   "pinned")
+        if not (isinstance(review["date"], str) and _DATE.fullmatch(review["date"])):
+            raise SupplyChainError(f"{where}: review date must be YYYY-MM-DD")
+        if not (_text(review["report"]) and review["report"].startswith("https://")):
+            raise SupplyChainError(f"{where}: review report must be an https:// link to the review")
+        if review["seat"].strip().lower() == built["seat"].strip().lower():
+            raise SupplyChainError(f"{where}: reviewed by the seat that built it ({built['seat']!r})")
+        if review["vendor"].strip().lower() == built["vendor"].strip().lower():
+            raise SupplyChainError(f"{where}: reviewed on the builder's vendor's model ({built['vendor']!r})")
+
+
+def harness_path(tooling_root: Path, name: str) -> Path:
+    """Where harness ``name``'s file lies in a tooling tree."""
+    return Path(tooling_root) / HARNESS_DIR / f"{name}.py"
+
+
+def file_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 # ------------------------------------------------------------------ findings (items 1 and 3)
@@ -255,7 +327,47 @@ def pin_lines(base: Path, head: Path, tooling: str, workflows_rel: str) -> List[
     for name, refs in sorted(_workflow_pins(head / workflows_rel).items()):
         for ref in sorted(refs - old_wf.get(name, set())):
             lines.append(f"{name} now runs {ref}")
+    lines += harness_lines(base, head, tooling, before, after)
     lines += evidence_key_lines(base, head, tooling)
+    return lines
+
+
+def harness_lines(base: Path, head: Path, tooling: str, before: Mapping, after: Mapping) -> List[str]:
+    """A harness pin added, removed or changed (§3p, Amendment 029), with the test it owes; and, at the head, a
+    pinned harness whose file is missing or no longer matches its pin. Lines, never findings: the app gateway refuses
+    to run such a harness."""
+    lines: List[str] = []
+    old_h = before.get("harnesses", {}) if isinstance(before.get("harnesses"), dict) else {}
+    new_h = after.get("harnesses", {}) if isinstance(after.get("harnesses"), dict) else {}
+    owed = ", ".join(HARNESS_TESTS_OWED)
+    for name in sorted(set(old_h) | set(new_h)):
+        old, new = old_h.get(name), new_h.get(name)
+        if old == new:
+            continue
+        if old is None and isinstance(new, dict):
+            review = new.get("review") if isinstance(new.get("review"), dict) else {}
+            lines.append(f"pins.json adds harness {name} for app {new.get('app')} at {str(new.get('sha256'))[:16]}..., "
+                         f"commit {str(new.get('commit'))[:12]}, reviewed by {review.get('seat')} on "
+                         f"{review.get('vendor')} {review.get('model')}; re-run before merging: {owed}")
+        elif new is None:
+            lines.append(f"pins.json removes harness {name}")
+        else:
+            changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+            lines.append(f"pins.json changes harness {name} ({', '.join(changed)}); re-run before merging: {owed}")
+    for name, row in sorted(new_h.items()):
+        if not isinstance(row, dict):
+            continue
+        path = harness_path(Path(head) / tooling, name)
+        try:
+            data = path.read_bytes() if path.is_file() and not path.is_symlink() else None
+        except OSError:
+            data = None
+        if data is None:
+            lines.append(f"harness {name} is pinned but {HARNESS_DIR}/{name}.py is missing; the app gateway will "
+                         "refuse to run it")
+        elif file_sha256(data) != row.get("sha256"):
+            lines.append(f"harness {name}: {HARNESS_DIR}/{name}.py does not match its pin; the app gateway will "
+                         "refuse to run it")
     return lines
 
 
