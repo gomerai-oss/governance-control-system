@@ -190,6 +190,13 @@ pins table, the independent review that admits a pin, and the app gateway's way 
 an agent can do changes: the section ships empty and the app catalog is empty, so no harness is loaded or run, and
 `"app_gateway"` is off. §3p items 21 to 26; vectors 161 to 166; §7 item 40.
 
+**Amendment 030 (2026-11-16, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 4):** the harness evidence actions and the
+`delete` class (§3m item 1). `collect` keeps the app gateway's log beside the retrieval gateway's and records each
+app gateway call as one `harness.<kind>` record of the tool's own class, with the app's, the tool's and the
+arguments' digests as inputs and the result's digest as output. Nothing an agent can do changes: the app catalog is
+empty and `"app_gateway"` is off, so there is no app gateway log to record. §3p items 27 to 30; vectors 167 to 171;
+§7 item 41.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1157,8 +1164,8 @@ on" below).
    has a closed set of fields:
    - its id, and the time it was written;
    - the **actor**: the identity that acted, with its GitHub account ID where it has one (ring 1);
-   - the **action**: a name from a closed list, with a class (`read`, `write`, `send`, `decide`, `refuse`,
-     `withdraw`);
+   - the **action**: a name from a closed list, with a class (`read`, `write`, `send`, `delete`, `decide`,
+     `refuse`, `withdraw`; `delete` added by Amendment 030, §3p item 27);
    - the **subject**: the mission, round, run, PR and commit it concerns;
    - its **inputs** and **outputs**, each as a SHA-256 digest of the canonical bytes, never the content (a record
      never holds a secret or agent text);
@@ -1270,8 +1277,9 @@ on" below).
      - `prepare` records the binding and provenance records by digest.
      - `run` records the agent log and the egress log by digest.
      - `collect` records the patch, the message, the secrets-boundary record, the gateway's log and the egress log
-       by digest. It then writes one `gateway.tool` record per gateway decision or refusal, and one
-       `dispatch.egress` record per egress decision, each holding its log line's digest, up to 2,000 per log; past
+       by digest. It then writes one `gateway.tool` record per gateway decision or refusal, one `harness.<kind>`
+       record per app gateway call (Amendment 030, §3p item 29), and one `dispatch.egress` record per egress
+       decision, each holding its log line's digest, up to 2,000 per log; past
        that, one record gives the count and the whole log's digest.
      - `publish` is recorded as the agent's App, with its PR number and its commit's digest.
      - `report` records its comment's digest.
@@ -1671,7 +1679,7 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
-### 3p. The app-control harness (Amendments 026, 027, 028 and 029)
+### 3p. The app-control harness (Amendments 026, 027, 028, 029 and 030)
 
 **What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
 server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
@@ -1855,6 +1863,32 @@ Part 3 (Amendment 029): the harnesses pin section and its review.
     merging. It also prints a line for each pinned harness whose file, at the PR's head, is missing or does not match
     its pin. These are lines, not findings, like every other pin change: the app gateway refuses to run that harness
     (item 23).
+
+Part 4 (Amendment 030): the harness evidence actions and the `delete` class.
+
+27. **The `delete` class and the harness actions** (`evidence/record.py`, APP-CONTROL-HARNESS-SPEC-001 §4.7). The
+    closed list of classes gains `delete`, so a removal is never recorded as a plain `write`. The closed list of
+    actions gains one per class: `harness.read` (`read`), `harness.write` (`write`), `harness.send` (`send`) and
+    `harness.delete` (`delete`), and `harness.refusal` (`refuse`) for a call that names no catalog tool and so has
+    no class. Only `harness.delete` is of the `delete` class.
+28. **The app gateway's log names what a record needs** (`mcp_gateway/app_gateway.py`). A `decision` and a `bound`
+    entry name the tool's `kind`; a `decision` names `arguments_sha256`, the SHA-256 of the call's arguments as
+    canonical JSON (sorted keys, no spaces), never the arguments.
+29. **`collect` keeps and records the app gateway's log** (`mission_dispatch/binding.py` `keep_evidence`,
+    `mission_dispatch/__main__.py` `harness_calls`).
+    - The log is kept as `binding/app-decisions.jsonl`, beside `gateway-evidence.jsonl` and never joined to it, with
+      the same cap and the same refusal of links; `result.json`'s `binding` summary adds `app_evidence_lines` and
+      `app_evidence_truncated` only when the app gateway ran. `collect` records the kept file by digest.
+    - Each call, the lines that share its `request_id`, is one record by `app-gateway`: `harness.<kind>` by the
+      kind its `decision` or `bound` line names, else `harness.refusal`. Its inputs are the app's, the tool's and
+      the arguments' digests; its outputs are each of its lines' digests, and the result's digest when there is one.
+    - Its result is the call's last outcome: refused for a DENY, a bound, a harness that is not run, a result the
+      secrets boundary withheld, or a tool not in the catalog; failed for a harness that failed, or an ALLOW the log
+      never finishes; done for a result.
+    - Up to 2,000 calls are recorded one by one; past that, one `dispatch.collect` record gives the count and the
+      whole log's digest. If `collect` refused before keeping the log, the gateway's own folder is read.
+30. **Drafted sends and deletes** are recorded when drafted, and performing them by the send-and-delete step, with
+    HITL's command as its authority: both are part 5's. Nothing in part 4 performs a send or a delete.
 
 ## 4. Failures
 
@@ -2086,6 +2120,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     such a harness could reach what the gateway's account reaches, the stand-in included. The independent review
     the pin records is what admits a harness (APP-CONTROL-HARNESS-SPEC-001 §4.5). A harness file changed after its
     pin is shown as a line at PR time and refused at run time; it does not fail the credentials check.
+41. **A harness call's record is built from the app gateway's own log (Amendment 030).** The log is written in the
+    runner, by the gateway's account, as the retrieval gateway's is (§3m). A harness hostile by design runs in that
+    process (item 40) and could write that log. The egress proxy's app lines, recorded as `dispatch.egress`
+    (Amendment 028), are written by another process and show every request that reached an app; they are the check
+    that does not depend on the app gateway's log.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2252,3 +2291,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 164 | A harness changed after its pin; missing; importing `socket`, `os`, `urllib.request`, `subprocess` or relatively; exiting at load; with no `run`; exiting in `run` | Never loaded (the digest first); each call refused and logged as `harness`; the last returns nothing |
 | 165 | A listed request from a pinned harness | Sent to `/app/<app>/<host><path>` with the stand-in and the endpoint's `Host`; the answer quarantined; `result` names the harness, its digest and one request; the stand-in in no log |
 | 166 | An unlisted host, path or method; a write from a read tool or a read from a write tool; a path without `/`; a body over 1 MiB; a 21st request; a `{name}` of `..` | Nothing sent; the call fails, `result_error` naming the reason |
+| 167 | The closed lists; a `harness.delete` record of class `write`; `harness.publish` | `delete` is a class; `harness.read` … `harness.delete` each of its own class, `harness.refusal` of `refuse`, only `harness.delete` of `delete`; refused; refused |
+| 168 | A run with both gateways' logs; without the app gateway; a linked log; a log over the cap | Kept as two files, never mixed; the summary as before; the link not followed; cut and marked truncated |
+| 169 | Calls ending in a result, a DENY, a bound, an unknown tool, a harness not run, a failed harness, no ending, a withheld result; each kind; a malformed digest | One record each: done, refused, refused, `harness.refusal`, refused, failed, failed, refused; `harness.<kind>` of its class; the digest left out |
+| 170 | `collect` with both logs; only the gateway's folder; more calls than the limit | `gateway.tool` and `harness.*` records that verify against the files; the folder read; one count record |
+| 171 | An app gateway call | The `decision` names the kind and the arguments' digest, never the arguments; one done `harness.read` record with the result's digest |
