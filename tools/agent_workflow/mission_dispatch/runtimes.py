@@ -20,6 +20,8 @@ With a runtime binding (Amendment 011, ``binding.py``) each runtime is narrowed 
 seat's admitted surface and gets the governed MCP gateway: Claude Code through
 ``--mcp-config`` (``--strict-mcp-config`` stays), Cursor through a dispatcher-written
 ``.cursor/mcp.json`` and ``--approve-mcps``. Without one, every argument is as before.
+When the binding grants app-gateway tools (Amendment 027, ``"app_gateway": "enforce"``) the
+same two routes carry the second server, ``governed-apps``, and its tools.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from secrets_boundary import paths as secret_paths
 
-from .binding import GATEWAY_SERVER as GATEWAY, Bound
+from .binding import APP_GATEWAY_SERVER as APP_GATEWAY, GATEWAY_SERVER as GATEWAY, Bound
 from .blast import CLAUDE_MAX_TURNS
 
 CLAUDE_CODE = "claude-code"
@@ -94,7 +96,10 @@ KEEP_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_AP
 # Set for each runtime's process (MISSION-DISPATCH-001 §3h). Claude Code sends no telemetry, error reports or
 # update checks: AST-5.4 saw it reach a telemetry host, which the egress list does not admit.
 RUNTIME_ENV: Dict[str, Dict[str, str]] = {"claude-code": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}
-_SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|_PAT$|_KEY$|^SSH_AUTH_SOCK$|^GPG_", re.I)
+# A numbered key (an app's APP_KEY_<n>, APP-CONTROL-HARNESS-SPEC-001 §4.2, Amendment 028) is dropped like any key:
+# the proxy alone holds an app's key, never the runtime.
+_SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|_PAT$|_KEY(?:_[0-9]+)?$|^SSH_AUTH_SOCK$|^GPG_",
+                         re.I)
 
 
 class SandboxError(ValueError):
@@ -169,6 +174,7 @@ def cursor_permissions(checkout: Path, home: Path, bound: Optional[Bound] = None
     narrowed: List[str] = []
     if bound is not None:
         allow += [f"Mcp({GATEWAY}:{name})" for name in bound.mcp_tools]
+        allow += [f"Mcp({APP_GATEWAY}:{name})" for name in bound.app_mcp_tools]  # Amendment 027, when granted
         if "Read" not in bound.tools:
             allow.remove(f"Read({ws}/**)")
             narrowed.append(f"Read({ws}/**)")
@@ -202,7 +208,7 @@ def cursor_permissions(checkout: Path, home: Path, bound: Optional[Bound] = None
 
 def cursor_argv(checkout: Path, prompt: str, binary: str = "agent", model: str = "",
                 bound: Optional[Bound] = None) -> List[str]:
-    approve = ("--approve-mcps",) if bound is not None and bound.mcp_tools else ()
+    approve = ("--approve-mcps",) if bound is not None and (bound.mcp_tools or bound.app_mcp_tools) else ()
     return [binary, "-p", "--trust", *approve, "--workspace", _safe(checkout),
             *(("--model", model) if model else ()), prompt]
 

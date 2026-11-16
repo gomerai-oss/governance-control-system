@@ -8,14 +8,24 @@ checkout. It has exactly these fields, and no other key at either level::
                  "base_sha": <40 lowercase hex>, "round": <int >= 1>},
      "resources": [<policy resource id>, ...],
      "issued_at": <epoch seconds>, "expires_at": <epoch seconds>,
-     "catalog": {"sha256": <64 lowercase hex>, "mode": "observe" | "enforce"}}   (optional)
+     "catalog": {"sha256": <64 lowercase hex>, "mode": "observe" | "enforce"},       (optional)
+     "app_catalog": {"sha256": <64 lowercase hex>, "mode": "observe" | "enforce"},   (optional)
+     "kind": "agent" | "service"}                                                     (optional)
 
 ``catalog`` (MISSION-DISPATCH-001 §3k item 1, ring 2) is the gateway catalog the seat was bound against. The gateway
 compares it with the catalog it loads: under ``"enforce"`` a different catalog refuses its start; under
-``"observe"`` the difference is recorded in the evidence log.
+``"observe"`` the difference is recorded in the evidence log. ``app_catalog`` (APP-CONTROL-HARNESS-SPEC-001 §4.1
+Proposal B, MISSION-DISPATCH-001 Amendment 027) is the same pin for the app gateway's catalog; only the app gateway
+reads it.
 
-There is no approval field: the gateway grants nothing on a session's word
-beyond the overlay below, whose approvals are always empty. The gateway never
+``kind`` (§4.3) says whose session it is. A file that names none is an agent's, as every session file before
+Amendment 027 is. ``load(path, root, kind)`` refuses a session whose kind is not the one its caller asked for; both
+gateways ask for ``"agent"`` (the default), so neither serves a ``service`` session, and only the send-and-delete
+step (build part 5) asks for ``"service"``.
+
+There is no approval field: the gateway grants nothing on a session's word.
+The overlay below gives empty approvals, unless its caller passes the app
+register, whose approvals are then the only ones added (see ``overlay``). The gateway never
 mints identity. A session that is missing, unreadable, malformed, expired, has
 an unknown key or another ``authority_ref``, or lies inside the checkout root
 is invalid, and every call under it is DENY with fabric stop 13.
@@ -24,6 +34,11 @@ is invalid, and every call under it is DENY with fabric stop 13.
 ``missions[<mission id>]`` entry and that id appended to
 ``authority_refs["MISSION-ROUTER-001"].missions``. It is built in memory, never
 written, and must pass ``mcp_auth.policy`` validation unchanged.
+
+``overlay(policy, session, register)`` (APP-CONTROL-HARNESS-SPEC-001 §4.3, the app gateway only) adds the app
+register's approvals for each app whose resources are in the session's ``resources``: the app's restricted
+resources that the session names, and the runtime implications its calls declare. Nothing else adds an approval,
+and ``overlay(policy, session)``, as the retrieval gateway calls it, keeps them empty.
 """
 
 from __future__ import annotations
@@ -41,10 +56,11 @@ from mcp_auth.decide import MAX_EPOCH
 
 AUTHORITY_REF = "MISSION-ROUTER-001"
 PRINCIPAL_KIND = "agent"
+SESSION_KINDS = ("agent", "service")
 SESSION_FIELDS = frozenset({"principal", "acting_identity", "role", "mission", "resources",
                             "issued_at", "expires_at"})
 MISSION_FIELDS = frozenset({"id", "authority_ref", "base_sha", "round"})
-OPTIONAL_FIELDS = frozenset({"catalog"})
+OPTIONAL_FIELDS = frozenset({"catalog", "app_catalog", "kind"})
 CATALOG_FIELDS = frozenset({"sha256", "mode"})
 CATALOG_MODES = ("observe", "enforce")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -71,6 +87,9 @@ class Session:
     expires_at: int
     catalog_sha256: str = ""
     catalog_mode: str = ""
+    app_catalog_sha256: str = ""
+    app_catalog_mode: str = ""
+    kind: str = PRINCIPAL_KIND
 
     def live_at(self, now: int) -> bool:
         return self.issued_at <= now < self.expires_at
@@ -105,11 +124,18 @@ def parse(data: bytes) -> Session:
     if not isinstance(doc, dict) or not SESSION_FIELDS <= set(doc) <= SESSION_FIELDS | OPTIONAL_FIELDS:
         raise SessionError(f"session must have exactly the fields {sorted(SESSION_FIELDS)}"
                            f" (and optionally {sorted(OPTIONAL_FIELDS)})")
-    catalog = doc.get("catalog", {"sha256": "", "mode": ""})
-    if "catalog" in doc and (not isinstance(catalog, dict) or set(catalog) != CATALOG_FIELDS
-                             or not isinstance(catalog["sha256"], str) or not _DIGEST.fullmatch(catalog["sha256"])
-                             or catalog["mode"] not in CATALOG_MODES):
-        raise SessionError("session catalog must be {sha256: 64 lowercase hex, mode: observe|enforce}")
+    pins = {}
+    for field in ("catalog", "app_catalog"):
+        pin = doc.get(field, {"sha256": "", "mode": ""})
+        if field in doc and (not isinstance(pin, dict) or set(pin) != CATALOG_FIELDS
+                             or not isinstance(pin["sha256"], str) or not _DIGEST.fullmatch(pin["sha256"])
+                             or pin["mode"] not in CATALOG_MODES):
+            raise SessionError(f"session {field} must be {{sha256: 64 lowercase hex, mode: observe|enforce}}")
+        pins[field] = pin
+    catalog, app_catalog = pins["catalog"], pins["app_catalog"]
+    kind = doc.get("kind", PRINCIPAL_KIND)
+    if kind not in SESSION_KINDS:
+        raise SessionError(f"session kind must be one of {list(SESSION_KINDS)}")
     for field in ("principal", "acting_identity", "role"):
         if not P.is_name(doc[field]):
             raise SessionError(f"session {field} must be a non-empty string")
@@ -137,7 +163,8 @@ def parse(data: bytes) -> Session:
         mission_id=mission["id"], authority_ref=mission["authority_ref"],
         base_sha=mission["base_sha"], round=mission["round"],
         resources=tuple(resources), issued_at=issued, expires_at=expires,
-        catalog_sha256=catalog["sha256"], catalog_mode=catalog["mode"])
+        catalog_sha256=catalog["sha256"], catalog_mode=catalog["mode"],
+        app_catalog_sha256=app_catalog["sha256"], app_catalog_mode=app_catalog["mode"], kind=kind)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -148,8 +175,10 @@ def _inside(path: Path, root: Path) -> bool:
     return True
 
 
-def load(path: Optional[Any], root: Any) -> Session:
-    """Load the session file at ``path``; it must lie outside the checkout ``root``."""
+def load(path: Optional[Any], root: Any, kind: str = PRINCIPAL_KIND) -> Session:
+    """Load the session file at ``path``; it must lie outside the checkout ``root`` and be of ``kind``."""
+    if kind not in SESSION_KINDS:
+        raise SessionError(f"a caller may ask only for a session of kind {list(SESSION_KINDS)}")
     if path is None:
         raise SessionError("no session file was given")
     path, root = Path(path), Path(root)
@@ -165,11 +194,36 @@ def load(path: Optional[Any], root: Any) -> Session:
         raise SessionError(f"session file is unreadable ({exc.strerror})") from None
     if len(data) > MAX_BYTES:
         raise SessionError("session file is too large")
-    return parse(data)
+    session = parse(data)
+    if session.kind != kind:
+        raise SessionError(f"session is of kind {session.kind!r}; this caller serves {kind!r} sessions only")
+    return session
 
 
-def overlay(policy: Mapping, session: Session) -> dict:
-    """The validated shipped policy plus this session's one mission, in memory only."""
+def session_apps(register: Mapping, session: Session) -> Tuple[str, ...]:
+    """The names of the register's apps whose resources are in ``session``'s resources: the one rule for which apps
+    a session names, used for its approvals here and for the keys the egress proxy is given (Amendment 028)."""
+    apps = register.get("apps") if isinstance(register, Mapping) else None
+    if not isinstance(apps, Mapping):
+        raise SessionError("the app register has no apps table")
+    return tuple(name for name, app in apps.items() if any(r in session.resources for r in app["resources"]))
+
+
+def register_approvals(register: Mapping, session: Session) -> dict:
+    """The app register's approvals for the apps whose resources are in ``session``'s resources."""
+    restricted, runtime = [], []
+    named = session_apps(register, session)
+    for name, app in register["apps"].items():
+        if name not in named:
+            continue
+        restricted += [r for r in app["approvals"]["restricted"] if r in session.resources and r not in restricted]
+        runtime += [i for i in app["approvals"]["runtime"] if i not in runtime]
+    return {"restricted": restricted, "credential": [], "runtime": runtime}
+
+
+def overlay(policy: Mapping, session: Session, register: Optional[Mapping] = None) -> dict:
+    """The validated shipped policy plus this session's one mission, in memory only. With ``register`` (the app
+    gateway's validated app register) the mission's approvals are the register's for the session's apps."""
     doc = copy.deepcopy(dict(policy))
     mission_id = session.mission_id
     missions, refs = doc.get("missions"), doc.get("authority_refs")
@@ -184,7 +238,8 @@ def overlay(policy: Mapping, session: Session) -> dict:
     missions[mission_id] = {
         "authority_ref": AUTHORITY_REF,
         "resources": list(session.resources),
-        "approvals": {"restricted": [], "credential": [], "runtime": []},
+        "approvals": ({"restricted": [], "credential": [], "runtime": []} if register is None
+                      else register_approvals(register, session)),
     }
     ref["missions"] = list(ref["missions"]) + [mission_id]
     try:

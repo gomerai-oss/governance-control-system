@@ -202,6 +202,14 @@ def _binding_mode(config: dict) -> str:
         raise DispatchError(str(exc)) from None
 
 
+def _app_mode(config: dict) -> str:
+    """``"app_gateway"`` (Amendment 027): ``"off"`` when absent; an unknown value fails the job."""
+    try:
+        return binding.app_mode(config)
+    except binding.BindingError as exc:
+        raise DispatchError(str(exc)) from None
+
+
 def _permissions_mode(config: dict) -> str:
     """``"permissions"`` (§3k, ring 2); an unknown value fails the job."""
     try:
@@ -274,7 +282,7 @@ def cmd_prepare(args) -> int:
             config["default_branch"], Path(args.checks_report) if args.checks_report else None,
             binding_mode=binding_mode, permissions_mode=_permissions_mode(config),
             supply_mode=_supply_mode(config), verify=verify, log=_log,
-            provenance_dir=Path(args.provenance) if args.provenance else None)
+            provenance_dir=Path(args.provenance) if args.provenance else None, app_mode=_app_mode(config))
     _log(f"{job.key}: checkout ready at {job.base_sha}")
     return 0
 

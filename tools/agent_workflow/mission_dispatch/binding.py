@@ -18,6 +18,12 @@ binding record keeps the digest, the mode and the findings beside the audit.
 Ring 2 part 2 (§3k item 2): under ``"enforce"`` the binder narrows a writer's ``Edit(**)`` to the mission's
 ``build_scope`` (plus the hand-in files) and refuses a scope it cannot render; under ``"observe"`` the rules stay as
 before and the narrowed rules are logged and kept in the binding record (``write_scope``).
+
+The app gateway (MISSION-DISPATCH-001 §3p, Amendment 027) has its own switch, ``"app_gateway"`` in ``config.json``:
+``"off"`` (the default, and the value when absent) or ``"enforce"``. While off, no app tool reaches the run and the
+MCP config holds only the retrieval gateway, whatever the binder admitted. When on, an admitted app tool adds the
+second server, ``governed-apps`` (``python3 -m mcp_gateway.app_gateway``), with its own evidence folder
+(``app-evidence``), so its log never joins the retrieval gateway's.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from mission_dispatch import permissions
 OFF, ENFORCE = "off", "enforce"
 MODES = (OFF, ENFORCE)
 CONFIG_KEY = "runtime_binding"
+APP_CONFIG_KEY = "app_gateway"
 
 BINDING_DIR = "binding"  # under the job root, beside checkout/ and git/
 GIT_DIR = "git"  # the checkout's git dir under the job root (workspace.Checkout.git_dir)
@@ -42,6 +49,12 @@ SESSION_FILE, MCP_FILE, BINDING_FILE, EVIDENCE_DIR = "session.json", "mcp.json",
 CURSOR_MCP = ".cursor/mcp.json"
 GATEWAY_SERVER = "governed-retrieval"
 GATEWAY_MODULE = "mcp_gateway"
+APP_GATEWAY_SERVER = "governed-apps"
+APP_GATEWAY_MODULE = "mcp_gateway.app_gateway"
+APP_EVIDENCE_DIR = "app-evidence"  # under the binding folder, beside the retrieval gateway's evidence folder
+# Where run_agent tells the app gateway the app endpoint's port and the run's stand-in (Amendment 028): written once
+# the proxy listens, before the runtime starts; it holds no key.
+APP_ENDPOINT_FILE = "app-endpoint.json"
 BUILTIN_CEILING: Tuple[str, ...] = ("Read", "Edit", "Write", "Glob", "Grep")
 EVIDENCE_MAX_BYTES = 4 * 1024 * 1024
 OUT_DIR = "binding"  # in collect's output, beside the patch: kept with the run's artifact, never read by publish
@@ -61,9 +74,11 @@ class Bound:
     denied: Tuple[str, ...]  # extra denials, added to the dispatcher's own
     mcp_tools: Tuple[str, ...]  # admitted gateway tools, bare names
     mcp_config: str  # path of the dispatcher-written MCP config, or "" when no gateway tool is admitted
+    app_mcp_tools: Tuple[str, ...] = ()  # admitted app-gateway tools, bare names (only when "app_gateway" is on)
 
     def mcp_rules(self) -> Tuple[str, ...]:
-        return tuple(f"mcp__{GATEWAY_SERVER}__{name}" for name in self.mcp_tools)
+        return (tuple(f"mcp__{GATEWAY_SERVER}__{name}" for name in self.mcp_tools)
+                + tuple(f"mcp__{APP_GATEWAY_SERVER}__{name}" for name in self.app_mcp_tools))
 
     def path_rules(self, workspace_rule: str) -> Tuple[str, ...]:
         """The allowed rules as Claude Code rules; ``workspace_rule`` is the checkout as a path rule."""
@@ -74,6 +89,13 @@ def mode(config: Mapping[str, Any]) -> str:
     value = config.get(CONFIG_KEY, OFF)
     if value not in MODES:
         raise BindingError(f"config {CONFIG_KEY} must be one of {', '.join(MODES)}, not {value!r}")
+    return value
+
+
+def app_mode(config: Mapping[str, Any]) -> str:
+    value = config.get(APP_CONFIG_KEY, OFF)
+    if value not in MODES:
+        raise BindingError(f"config {APP_CONFIG_KEY} must be one of {', '.join(MODES)}, not {value!r}")
     return value
 
 
@@ -111,8 +133,9 @@ def check(tools: Any, allowed: Any, denied: Any, mcp_tools: Any) -> Tuple[tuple,
 
 
 def mcp_config(checkout: Path, session: Path, evidence: Path, git_dir: Optional[Path] = None,
-               canary: str = "") -> dict:
-    """The one MCP server an agent may use, as the dispatcher writes it: the gateway from the tooling tree.
+               canary: str = "", app_evidence: Optional[Path] = None) -> dict:
+    """The MCP servers an agent may use, as the dispatcher writes them: the gateway from the tooling tree, and with
+    ``app_evidence`` the app gateway too (Amendment 027), with that folder for its log.
 
     ``git_dir`` is the checkout's git dir, kept outside the work tree; the gateway's ``trace`` reads history there.
     ``canary`` is the run's canary, which the gateway redacts by value from every result and evidence line.
@@ -121,11 +144,29 @@ def mcp_config(checkout: Path, session: Path, evidence: Path, git_dir: Optional[
             "--evidence-dir", str(evidence.resolve())]
     if git_dir is not None:
         args += ["--git-dir", str(git_dir.resolve())]
-    return {"mcpServers": {GATEWAY_SERVER: {
-        "command": "python3",
-        "args": args,
-        "env": {"PYTHONPATH": str(gateway_root()), **({CANARY_ENV: canary} if canary else {})},
-    }}}
+    env = {"PYTHONPATH": str(gateway_root()), **({CANARY_ENV: canary} if canary else {})}
+    servers = {GATEWAY_SERVER: {"command": "python3", "args": args, "env": dict(env)}}
+    if app_evidence is not None:
+        servers[APP_GATEWAY_SERVER] = {
+            "command": "python3",
+            "args": ["-m", APP_GATEWAY_MODULE, "--root", str(checkout.resolve()), "--session", str(session.resolve()),
+                     "--evidence-dir", str(app_evidence.resolve()),
+                     "--endpoint", str((session.resolve().parent / APP_ENDPOINT_FILE))],
+            "env": dict(env),
+        }
+    return {"mcpServers": servers}
+
+
+def write_app_endpoint(root: Path, port: int, standin: str) -> Path:
+    """The app endpoint's port and the run's stand-in, read-only, where the app gateway reads them at start
+    (Amendment 028). Never a key: the proxy alone holds the apps' keys."""
+    if not (isinstance(port, int) and 0 < port < 65536 and isinstance(standin, str) and standin):
+        raise BindingError("the app endpoint needs a port and a stand-in")
+    path = binding_dir(root) / APP_ENDPOINT_FILE
+    if path.exists() or path.is_symlink():
+        raise BindingError("the app endpoint file already exists")
+    _write_readonly(path, {"port": port, "standin": standin})
+    return path
 
 
 def _write_readonly(path: Path, doc: Any) -> None:
@@ -139,12 +180,9 @@ def _stderr(line: str) -> None:
 
 
 def check_descriptions(mode: str, log: Callable[[str], None] = _stderr) -> list:
-    """§3k item 1 at bind time: the findings for the tooling tree's gateway catalog. Under ``enforce`` any finding
+    """§3k item 1 at bind time: the findings for the tooling tree's gateway catalogs (the app catalog too). Under ``enforce`` any finding
     is a BindingError; under ``observe`` each is logged and the list returned."""
-    try:
-        findings = permissions.description_findings(permissions.read_catalog(gateway_root() / permissions.CATALOG))
-    except permissions.PermissionsError as exc:
-        findings = [str(exc)]
+    findings = permissions.catalogs_findings(gateway_root())  # both catalogs (Amendment 027)
     for finding in findings:
         log(f"permissions: tool description: {finding}" + ("" if mode == permissions.ENFORCE else
                                                          " (observe: not refused)"))
@@ -155,10 +193,14 @@ def check_descriptions(mode: str, log: Callable[[str], None] = _stderr) -> list:
 
 
 def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any = None,
-         permissions_mode: str = permissions.OBSERVE, log: Callable[[str], None] = _stderr) -> Bound:
-    """Bind ``job``'s seat; write the session, the MCP config and the record. Any failure is a BindingError."""
+         permissions_mode: str = permissions.OBSERVE, log: Callable[[str], None] = _stderr,
+         apps: str = OFF) -> Bound:
+    """Bind ``job``'s seat; write the session, the MCP config and the record. Any failure is a BindingError.
+    ``apps`` is the ``"app_gateway"`` mode: while ``"off"`` no app tool is granted."""
     if permissions_mode not in permissions.MODES:
         raise BindingError(f"unknown permissions mode {permissions_mode!r}")
+    if apps not in MODES:
+        raise BindingError(f"unknown app gateway mode {apps!r}")
     findings = check_descriptions(permissions_mode, log)
     if binder is None:
         try:
@@ -181,6 +223,7 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
                              narrow_writes=permissions_mode == permissions.ENFORCE)
         tools, allowed, denied, mcp_tools = check(result.tools, result.allowed_rules, result.denied_rules,
                                                   result.mcp_tools)
+        app_tools = check((), (), (), getattr(result, "app_mcp_tools", ()))[3]
         session, audit = result.session, result.audit
     except BindingError:
         raise
@@ -189,17 +232,24 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
         raise BindingError(f"the tool surface for {job.role} could not be bound ({kind}): {exc}") from None
     if not isinstance(session, dict):
         raise BindingError("the binding produced no session")
-    if job.runtime == "cursor-cli" and mcp_tools and (home / ".cursor" / "mcp.json").exists():
+    if app_tools and apps != ENFORCE:
+        log(f"app gateway: {len(app_tools)} admitted app tool(s) not granted (\"{APP_CONFIG_KEY}\": \"{apps}\")")
+        app_tools = ()
+    if job.runtime == "cursor-cli" and (mcp_tools or app_tools) and (home / ".cursor" / "mcp.json").exists():
         raise BindingError("~/.cursor/mcp.json exists; --approve-mcps would approve its servers too")
     _write_readonly(session_path, session)
     config = ""
-    if mcp_tools:
+    app_evidence = None
+    if app_tools:
+        app_evidence = out / APP_EVIDENCE_DIR
+        app_evidence.mkdir()
+    if mcp_tools or app_tools:
         git_dir, canary_file = Path(root) / GIT_DIR, Path(root) / CANARY_FILE
         canary = "" if canary_file.is_symlink() or not canary_file.is_file() else canary_file.read_text().strip()
         _write_readonly(out / MCP_FILE, mcp_config(checkout, session_path, evidence,
-                                                   git_dir if git_dir.is_dir() else None, canary))
+                                                   git_dir if git_dir.is_dir() else None, canary, app_evidence))
         config = str((out / MCP_FILE).resolve())
-    bound = Bound(tools, allowed, denied, mcp_tools, config)
+    bound = Bound(tools, allowed, denied, mcp_tools, config, app_tools)
     try:
         audit_text = json.dumps(audit, sort_keys=True)
     except (TypeError, ValueError):
@@ -212,7 +262,10 @@ def bind(job: Any, root: Path, checkout: Path, home: Path, now: int, binder: Any
                                            f"would narrow to {', '.join(scoped)}") + " (observe: not applied)")
     catalog = {"sha256": getattr(result, "catalog_sha256", ""), "mode": permissions_mode, "findings": findings}
     log(f"permissions: gateway catalog pinned {catalog['sha256'] or '(not pinned)'} (mode={permissions_mode})")
-    _write_readonly(out / BINDING_FILE, {"bound": asdict(bound), "audit": json.loads(audit_text), "catalog": catalog,
+    record = asdict(bound)
+    if not bound.app_mcp_tools:
+        del record["app_mcp_tools"]  # a run with no app tool keeps the record it had before Amendment 027
+    _write_readonly(out / BINDING_FILE, {"bound": record, "audit": json.loads(audit_text), "catalog": catalog,
                                          "write_scope": write_scope})
     return bound
 
@@ -225,17 +278,18 @@ def load(root: Path) -> Bound:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))["bound"]
         tools, allowed, denied, mcp_tools = check(doc["tools"], doc["allowed"], doc["denied"], doc["mcp_tools"])
+        app_tools = check((), (), (), doc.get("app_mcp_tools", []))[3]
         config = doc["mcp_config"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise BindingError(f"the run's binding cannot be read: {exc}") from None
-    expected = str((binding_dir(root) / MCP_FILE).resolve()) if mcp_tools else ""
+    expected = str((binding_dir(root) / MCP_FILE).resolve()) if (mcp_tools or app_tools) else ""
     if config != expected:
         raise BindingError("the run's binding names an MCP config the dispatcher did not write")
-    return Bound(tools, allowed, denied, mcp_tools, config)
+    return Bound(tools, allowed, denied, mcp_tools, config, app_tools)
 
 
 def write_cursor_mcp(checkout: Path, bound: Bound) -> Optional[Path]:
-    """Copy the dispatcher's MCP config to ``.cursor/mcp.json`` (read-only) when a gateway tool is admitted."""
+    """Copy the dispatcher's MCP config to ``.cursor/mcp.json`` (read-only) when a gateway or app tool is admitted."""
     if not bound.mcp_config:
         return None
     path = checkout / CURSOR_MCP

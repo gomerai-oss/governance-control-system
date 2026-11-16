@@ -7,6 +7,8 @@
   ``description`` in its ``input_schema``) checked with the ring 3 quarantine (§3j item 1): no character the
   quarantine removes, at most ``MAX_DESCRIPTION`` characters, no line on its steering list, and no line on the
   description list below (item 1).
+- ``catalogs_findings(tooling_root)``: ``description_findings`` over both gateway catalogs, the app gateway's too
+  (MISSION-DISPATCH-001 §3p, Amendment 027); ``prepare`` runs it when a seat is bound.
 - ``catalog_digest(catalog)``: the SHA-256 of the catalog's canonical JSON, the value the binding pins in the gateway's
   session (item 1).
 - ``grant_lines(base, head)``: one line per widening between two trees (item 3): a capability a matrix role newly
@@ -36,6 +38,7 @@ MAX_DESCRIPTION = 500
 
 TOOLING = "tools/agent_workflow"
 CATALOG = "mcp_gateway/tools.json"  # under the tooling tree
+APP_CATALOG = "mcp_gateway/app_tools.json"  # the app gateway's (MISSION-DISPATCH-001 §3p, Amendment 027)
 MATRIX = "tool_selection/matrix.json"
 SEATS = "tool_selection/seats.json"
 REGISTRY = "tool_selection/runtime_registry.json"
@@ -129,6 +132,19 @@ def catalog_digest(catalog: object) -> str:
         return signing.sha256_hex(signing.canonical_bytes(catalog))
     except (signing.CanonicalError, TypeError, ValueError, RecursionError) as exc:
         raise PermissionsError(f"the gateway catalog has no canonical form: {exc}") from None
+
+
+def catalogs_findings(tooling_root: Path) -> List[str]:
+    """``description_findings`` over both gateway catalogs under ``tooling_root`` (Amendment 027): the retrieval
+    gateway's, then the app gateway's, each app finding marked as such. An unreadable catalog is a finding."""
+    findings: List[str] = []
+    for rel, label in ((CATALOG, ""), (APP_CATALOG, "app catalog: ")):
+        try:
+            found = description_findings(read_catalog(Path(tooling_root) / rel))
+        except PermissionsError as exc:
+            found = [str(exc)]
+        findings += [label + f for f in found]
+    return findings
 
 
 def read_catalog(path: Path) -> dict:
@@ -272,7 +288,8 @@ def _grant_surface(root: Path, tooling: str, workflows: str) -> dict:
     root = Path(root)
     surface = {"matrix": _load_json(root, f"{tooling}/{MATRIX}"), "seats": _load_json(root, f"{tooling}/{SEATS}"),
                "registry": _names(_load_json(root, f"{tooling}/{REGISTRY}")),
-               "catalog": _names(_load_json(root, f"{tooling}/{CATALOG}")), "workflows": {}}
+               "catalog": _names(_load_json(root, f"{tooling}/{CATALOG}")),
+               "app_catalog": _names(_load_json(root, f"{tooling}/{APP_CATALOG}")), "workflows": {}}
     for name in WORKFLOWS:
         path = root / workflows / name
         if path.is_file():
@@ -305,7 +322,8 @@ def grant_lines(base: Path, head: Path, tooling: str = TOOLING, workflows: str =
                 lines.append(f"matrix role {role} no longer blocks {cap}")
         if before.get("read_only") is True and row.get("read_only") is not True:
             lines.append(f"matrix role {role} is no longer read-only")
-    for kind, label in (("registry", "runtime registry"), ("catalog", "gateway catalog")):
+    for kind, label in (("registry", "runtime registry"), ("catalog", "gateway catalog"),
+                        ("app_catalog", "app catalog")):
         for tool in new[kind]:
             if tool not in old[kind]:
                 lines.append(f"{label} adds tool {tool}")

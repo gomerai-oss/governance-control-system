@@ -31,6 +31,7 @@ from mission_router.router import load_config
 AW = Path(__file__).resolve().parents[1]
 REPO = AW.parents[1]
 CATALOG = AW / "mcp_gateway" / "tools.json"
+APP_CATALOG = AW / "mcp_gateway" / "app_tools.json"
 NOW = 1_800_000_000
 BASE_SHA = "0123456789abcdef0123456789abcdef01234567"
 RB = None  # tool_selection.runtime_binding, imported for this module's tests only (as in test_runtime_binding)
@@ -244,6 +245,7 @@ class DispatcherCheck(unittest.TestCase):  # vector 72, at bind time
         self.addCleanup(tmp.cleanup)
         self.tooling = Path(tmp.name)
         (self.tooling / "mcp_gateway").mkdir()
+        shutil.copy(APP_CATALOG, self.tooling / "mcp_gateway" / "app_tools.json")  # the shipped app catalog
         self.lines = []
 
     def write(self, doc):
@@ -589,6 +591,7 @@ class DispatcherRecord(unittest.TestCase):
         tooling = self.root / "tooling"
         (tooling / "mcp_gateway").mkdir(parents=True)
         shutil.copy(CATALOG, tooling / "mcp_gateway" / "tools.json")
+        shutil.copy(APP_CATALOG, tooling / "mcp_gateway" / "app_tools.json")  # the shipped app catalog
         patcher = mock.patch.object(dispatch_binding, "gateway_root", return_value=tooling)
         patcher.start()
         self.addCleanup(patcher.stop)

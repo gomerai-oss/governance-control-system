@@ -23,6 +23,19 @@ host at an address that passed the same global-address check as a tunnel. The an
 checks hold in both modes; they are what the route is. Each request is one log line (``"route": "model"``: time,
 method, path, decision, reason, status, bytes each way), never a header. With ``exclusive`` (``"model_login":
 "enforce"``) a CONNECT to the model host is refused: the endpoint is the only way to it.
+
+App endpoint (MISSION-DISPATCH-001 §3p, Amendment 028; APP-CONTROL-HARNESS-SPEC-001 §4.4). Started with the app
+register (``--apps``, the tooling tree's ``tool_selection/apps.json``), the proxy refuses a CONNECT to any host the
+register lists, in both modes: an app is reached through its endpoint only. Started also with an app-key file
+(``{"standin", "keys": {<app>: <key>}, "classes": [...]}``, read once and deleted), it serves plain HTTP under
+``/app/<app>/<host>/<path>``. A request is forwarded only when it carries the stand-in exactly, names loopback as its
+host, names an app whose key the file holds and one of that app's hosts, and has a method and path that match one of
+the app's requests in the register (a ``{name}`` segment matches one plain segment), of a class the file admits for
+this run (never ``send`` or ``delete`` in an agent's job). Its query must be plain characters and its body bounded.
+Every authentication header sent is dropped, the app's key is added as ``Authorization: Bearer``, and the request
+goes over TLS, certificate checked, to that host at an address that passed the global-address check. The answer
+comes back unchanged. Each request is one log line (``"route": "app"``: time, app, method, the register's path, class,
+decision, reason, status, bytes each way), never a header, a key or the actual path.
 """
 
 from __future__ import annotations
@@ -55,6 +68,10 @@ MODEL_PREFIX = "/model"
 MAX_MODEL_BODY = 32 * 1024 * 1024  # one model request's body
 MODEL_TIMEOUT = 600.0  # a streamed answer can be long
 LOGIN_KINDS = ("api_key", "oauth")
+APP_PREFIX = "/app"
+MAX_APP_BODY = 1024 * 1024  # one app request's body
+APP_TIMEOUT = 120.0
+APP_CLASSES = ("read", "write", "send", "delete")  # the app register's classes (tool_selection/apps.py)
 OAUTH_BETA = "oauth-2025-04-20"  # sent with an OAuth login, as the runtime itself does (checked by AST-1.6)
 # Request headers never forwarded: the runtime's own credentials, and what the proxy sets itself.
 DROPPED_HEADERS = frozenset({"authorization", "x-api-key", "proxy-authorization", "cookie", "host", "content-length",
@@ -65,6 +82,8 @@ DROPPED_HEADERS = frozenset({"authorization", "x-api-key", "proxy-authorization"
 _NAME = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _ENTRY = re.compile(r"(?:\*\.)?" + _NAME.pattern)
 _REQUEST = re.compile(rb"\A([A-Z]{3,10}) (\S{1,300}) HTTP/1\.[01]\r\n")
+_APP_SEGMENT = re.compile(r"[A-Za-z0-9_.~-]{1,200}")  # one plain path segment, for a register {name}
+_APP_QUERY = re.compile(r"[A-Za-z0-9_=&.%,:~+-]{0,1000}")
 
 Resolver = Callable[[str, int], Sequence[str]]
 
@@ -171,6 +190,77 @@ def read_login_file(path: Path) -> ModelLogin:
     return ModelLogin(doc["kind"], doc["login"], doc["standin"])
 
 
+@dataclass(frozen=True)
+class AppKeys:
+    """What one run's app endpoint holds: the stand-in, each app's key, and the classes the run admits."""
+    standin: str
+    keys: Mapping[str, str]
+    classes: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AppRoute:
+    """One app's hosts and requests, from the app register: ``requests`` is ((method, segments, class), ...)."""
+    hosts: Tuple[str, ...]
+    requests: Tuple[Tuple[str, Tuple[str, ...], str], ...]
+
+    def match(self, method: str, path: str) -> Optional[Tuple[str, str]]:
+        """(the register's path, its class) for the first request ``method path`` matches, or None."""
+        actual = path[1:].split("/")
+        for want, segments, cls in self.requests:
+            if want != method or len(segments) != len(actual):
+                continue
+            if all(s == a if not (s.startswith("{") and s.endswith("}"))
+                   else bool(_APP_SEGMENT.fullmatch(a)) and a not in (".", "..")  # never a step out of the path
+                   for s, a in zip(segments, actual)):
+                return "/" + "/".join(segments), cls
+        return None
+
+
+def load_app_routes(register: Mapping) -> Dict[str, AppRoute]:
+    """Each registered app's route, from a validated app register (``tool_selection.apps.validate``)."""
+    return {name: AppRoute(tuple(app["hosts"]),
+                           tuple((r["method"], tuple(r["path"][1:].split("/")), r["class"]) for r in app["requests"]))
+            for name, app in register["apps"].items()}
+
+
+def read_app_register(path: Path) -> Dict[str, AppRoute]:
+    """The app register at ``path``, validated as ``tool_selection.apps`` does, as routes."""
+    from tool_selection import apps as apps_mod  # the tooling tree's copy, as the proxy itself
+    try:
+        return load_app_routes(apps_mod.load_file(path))
+    except apps_mod.AppsError as exc:
+        raise PolicyError(f"the app register cannot be read: {exc}") from None
+
+
+def _secret_ok(value: object) -> bool:
+    return isinstance(value, str) and len(value) >= 16 and value.isprintable() and " " not in value
+
+
+def read_app_keys_file(path: Path) -> AppKeys:
+    """The app-key file the dispatcher wrote for this run, read once and deleted."""
+    try:
+        if path.is_symlink():
+            raise PolicyError("the app-key file is a symlink")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PolicyError(f"the app-key file cannot be read: {exc}") from None
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    keys = doc.get("keys") if isinstance(doc, dict) else None
+    classes = doc.get("classes") if isinstance(doc, dict) else None
+    if not (isinstance(doc, dict) and set(doc) == {"standin", "keys", "classes"} and _secret_ok(doc["standin"])
+            and isinstance(keys, dict) and keys and all(isinstance(k, str) and _secret_ok(v) and v != doc["standin"]
+                                                        for k, v in keys.items())
+            and isinstance(classes, list) and classes and len(set(classes)) == len(classes)
+            and all(c in APP_CLASSES for c in classes)):
+        raise PolicyError("the app-key file must hold standin, keys and classes")
+    return AppKeys(doc["standin"], dict(keys), tuple(classes))
+
+
 def listed(host: str, hosts: Sequence[str]) -> bool:
     return any(host == h or (h.startswith("*.") and host.endswith(h[1:])) for h in hosts)
 
@@ -221,7 +311,8 @@ class Egress:
     def __init__(self, hosts: Sequence[str], mode: str, log: Path, resolver: Resolver = resolve,
                  max_total: int = MAX_TOTAL_BYTES, model: Optional[ModelEndpoint] = None,
                  login: Optional[ModelLogin] = None, exclusive: bool = False,
-                 tls: Optional[ssl.SSLContext] = None) -> None:
+                 tls: Optional[ssl.SSLContext] = None, apps: Optional[Mapping[str, AppRoute]] = None,
+                 app_keys: Optional[AppKeys] = None) -> None:
         if mode not in MODES:
             raise PolicyError(f"unknown egress mode {mode!r}")
         if (model is None) != (login is None):
@@ -229,7 +320,14 @@ class Egress:
         if exclusive and model is None:
             raise PolicyError("an exclusive model endpoint needs a login")
         self.hosts, self.mode, self.log_path, self.resolver, self.max_total = tuple(hosts), mode, log, resolver, max_total
+        if app_keys is not None and apps is None:
+            raise PolicyError("the app endpoint needs the app register")
+        if app_keys is not None and set(app_keys.keys) - set(apps or {}):
+            raise PolicyError(f"the app-key file names apps the register does not list: "
+                              f"{sorted(set(app_keys.keys) - set(apps or {}))}")
         self.model, self.login, self.exclusive = model, login, exclusive
+        self.apps, self.app_keys = dict(apps or {}), app_keys
+        self.app_hosts = frozenset(h for route in self.apps.values() for h in route.hosts)
         self.tls = tls if tls is not None else ssl.create_default_context()
         self.total = 0
         self.lock = threading.Lock()
@@ -247,6 +345,8 @@ class Egress:
             problem = f"{method} is not CONNECT"
         elif self.exclusive and self.model is not None and host == self.model.host:
             problem = "the model host is reached through the model endpoint only"
+        elif host in self.app_hosts:
+            problem = "an app's host is reached through the app endpoint only"
         elif port != PORT:
             problem = f"port {port or raw!r} is not {PORT}"
         else:
@@ -263,7 +363,8 @@ class Egress:
             problem = f"the run has used its {self.max_total} bytes"
         if problem is None:
             return host, port, Decision(True, "listed", on_list, addresses)
-        if self.mode == OBSERVE and method == "CONNECT" and port and not problem.startswith("the model host"):
+        if (self.mode == OBSERVE and method == "CONNECT" and port and not problem.startswith("the model host")
+                and not problem.startswith("an app's host")):
             return host, port, Decision(True, f"observe: would refuse ({problem})", on_list, addresses)
         return host, port, Decision(False, problem, on_list, addresses)
 
@@ -334,6 +435,70 @@ class Egress:
         with self.lock, open(self.log_path, "a", encoding="utf-8") as log:
             log.write(line + "\n")
 
+    def app_decide(self, method: str, target: str, headers: Mapping[str, str],
+                   port: int) -> Tuple[str, str, str, str, str, Decision]:
+        """Whether the app route forwards this request: (app, host, upstream path with query, the register's path,
+        class, decision)."""
+        keys = self.app_keys
+        if keys is None:
+            return "", "", "", "", "", Decision(False, "no app endpoint in this run", False)
+        rest, _, query = target[len(APP_PREFIX) + 1:].partition("?")
+        app, _, rest = rest.partition("/")
+        host, _, tail = rest.partition("/")
+        path = "/" + tail
+        given = headers.get("authorization", "")
+        bearer = given[7:] if given[:7].lower() == "bearer " else ""
+        offered = bearer or headers.get("x-api-key", "")
+        if not hmac.compare_digest(offered.encode("utf-8", "replace"), keys.standin.encode("utf-8")):
+            return app, "", "", "", "", Decision(False, "the request does not carry this run's stand-in", False)
+        if headers.get("host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            return app, "", "", "", "", Decision(False, "the request names a host other than this endpoint", False)
+        if app not in keys.keys or app not in self.apps:
+            return app[:40], "", "", "", "", Decision(False, "no key for that app in this run", False)
+        route = self.apps[app]
+        if host not in route.hosts:
+            return app, "", "", "", "", Decision(False, "that host is not listed for the app", False)
+        found = route.match(method, path)
+        if found is None:
+            return app, host, "", "", "", Decision(False, f"{method} is not a listed request of the app", True)
+        template, cls = found
+        if cls not in keys.classes:
+            return app, host, "", template, cls, Decision(False, f"the {cls!r} class is not admitted in this run",
+                                                          True)
+        if not _APP_QUERY.fullmatch(query):
+            return app, host, "", template, cls, Decision(False, "the query is not plain characters", True)
+        if "transfer-encoding" in headers or not headers.get("content-length", "0").isdigit():
+            return app, host, "", template, cls, Decision(False, "an app request must give its length", True)
+        if int(headers.get("content-length", "0")) > MAX_APP_BODY:
+            return app, host, "", template, cls, Decision(False, f"the request is larger than {MAX_APP_BODY} bytes",
+                                                          True)
+        if self.spent():
+            return app, host, "", template, cls, Decision(False, f"the run has used its {self.max_total} bytes", True)
+        return app, host, path + (f"?{query}" if query else ""), template, cls, Decision(True, "listed app request",
+                                                                                          True)
+
+    def app_upstream_head(self, app: str, method: str, host: str, path: str, headers: Mapping[str, str],
+                          length: int) -> bytes:
+        """The request line and headers sent to the app's host: the caller's own, minus every credential, plus the
+        app's key as a bearer token."""
+        assert self.app_keys is not None
+        lines = [f"{method} {path} HTTP/1.1", f"Host: {host}", f"Content-Length: {length}", "Connection: close"]
+        for name, value in headers.items():
+            if name in DROPPED_HEADERS:
+                continue
+            lines.append(f"{name}: {value}")
+        lines.append(f"Authorization: Bearer {self.app_keys.keys[app]}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+    def record_app(self, app: str, method: str, template: str, cls: str, decision: Decision, status: int = 0,
+                   up: int = 0, down: int = 0) -> None:
+        line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "route": "app",
+                           "app": app[:40], "method": method[:10], "path": template[:300], "class": cls,
+                           "decision": "allowed" if decision.allowed else "refused", "reason": decision.reason,
+                           "status": status, "bytes_up": up, "bytes_down": down}, sort_keys=True)
+        with self.lock, open(self.log_path, "a", encoding="utf-8") as log:
+            log.write(line + "\n")
+
     def record(self, host: str, port: int, decision: Decision, up: int = 0, down: int = 0) -> None:
         line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "host": host[:300],
                            "port": port, "decision": "allowed" if decision.allowed else "refused",
@@ -376,6 +541,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if method != "CONNECT" and egress.model is not None and (target == MODEL_PREFIX
                                                                    or target.startswith(MODEL_PREFIX + "/")):
             self._model(method, target, head)
+            return
+        if method != "CONNECT" and egress.app_keys is not None and target.startswith(APP_PREFIX + "/"):
+            self._app(method, target, head)
             return
         host, port, decision = egress.decide(method, target)
         if not decision.allowed:
@@ -488,6 +656,91 @@ class _Handler(socketserver.BaseRequestHandler):
             tls.close()
             egress.record_model(method, path, decision, status, len(out), down)
 
+    def _app(self, method: str, target: str, head: bytes) -> None:
+        """The app endpoint: one listed request of one app, the key added here, the answer back unchanged."""
+        egress = self.server.egress
+        raw_head, _, rest = head.partition(b"\r\n\r\n")
+        headers: Dict[str, str] = {}
+        for raw in raw_head.split(b"\r\n")[1:]:
+            name, sep, value = raw.decode("latin-1").partition(":")
+            if (not sep or not name.strip() or name != name.strip() or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", name)
+                    or any(c in value for c in "\r\n\0")):
+                egress.record_app("", method, "", "", Decision(False, "a malformed header", False))
+                self._refuse(400, "a malformed header")
+                return
+            key = name.strip().lower()
+            if key in headers:
+                egress.record_app("", method, "", "", Decision(False, f"header {key} given twice", False))
+                self._refuse(400, "a repeated header")
+                return
+            headers[key] = value.strip()
+        app, host, path, template, cls, decision = egress.app_decide(method, target, headers, self.server.port)
+        if not decision.allowed:
+            egress.record_app(app, method, template, cls, decision)
+            self._refuse(403, decision.reason)
+            return
+        length = int(headers.get("content-length", "0"))
+        body = rest
+        try:
+            while len(body) < length:
+                part = self.request.recv(min(CHUNK, length - len(body)))
+                if not part:
+                    break
+                body += part
+        except OSError:
+            pass
+        if len(body) != length:
+            egress.record_app(app, method, template, cls, Decision(False, "the request body ended early", True))
+            self._refuse(400, "the request body ended early")
+            return
+        try:
+            addresses = tuple(egress.resolver(host, PORT))
+        except (OSError, UnicodeError):
+            addresses = ()
+        problem = address_problem(addresses)
+        out = egress.app_upstream_head(app, method, host, path, headers, length) + body
+        if problem is None and not egress.count(len(out)):
+            problem = f"the run has used its {egress.max_total} bytes"
+        if problem is not None:
+            egress.record_app(app, method, template, cls, Decision(False, f"the app's host: {problem}", True))
+            self._refuse(502, "the app's host cannot be reached")
+            return
+        upstream = self._connect(addresses, PORT)
+        if upstream is None:
+            egress.record_app(app, method, template, cls, Decision(False, "the app's host could not be reached", True))
+            self._refuse(502, "the app's host could not be reached")
+            return
+        status, down = 0, 0
+        try:
+            tls = egress.tls.wrap_socket(upstream, server_hostname=host)
+        except (OSError, ssl.SSLError) as exc:
+            upstream.close()
+            egress.record_app(app, method, template, cls,
+                              Decision(False, f"TLS to the app's host failed ({type(exc).__name__})", True))
+            self._refuse(502, "TLS to the app's host failed")
+            return
+        try:
+            tls.settimeout(APP_TIMEOUT)
+            tls.sendall(out)
+            first = True
+            while True:
+                data = tls.recv(CHUNK)
+                if not data:
+                    break
+                if first:
+                    found = re.match(rb"HTTP/1\.[01] (\d{3})", data)
+                    status = int(found.group(1)) if found else 0
+                    first = False
+                if not egress.count(len(data)):
+                    break
+                self.request.sendall(data)
+                down += len(data)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            tls.close()
+            egress.record_app(app, method, template, cls, decision, status, len(out), down)
+
     def _connect(self, addresses: Sequence[str], port: int) -> Optional[socket.socket]:
         for address in addresses:  # the addresses decide() checked, never a fresh lookup
             try:
@@ -546,9 +799,12 @@ class Server(socketserver.ThreadingTCPServer):
 
 def serve(policy: Mapping[str, Sequence[str]], runtime: str, mode: str, log: Path, ready: Path,
           models: Optional[Mapping[str, ModelEndpoint]] = None, login_file: Optional[Path] = None,
-          exclusive: bool = False) -> None:
+          exclusive: bool = False, apps_file: Optional[Path] = None, app_keys_file: Optional[Path] = None) -> None:
     """Run until killed. Writes the port to ``ready`` once listening. With ``login_file`` the model endpoint is
-    served for ``runtime`` (its file is read and deleted before the port is written)."""
+    served for ``runtime`` (its file is read and deleted before the port is written). With ``apps_file`` (the app
+    register) every app host's tunnel is refused, and with ``app_keys_file`` too the app endpoint is served."""
+    if app_keys_file is not None and apps_file is None:
+        raise PolicyError("the app endpoint needs the app register")
     if runtime not in policy:
         raise PolicyError(f"the egress policy lists no hosts for runtime {runtime!r}")
     model = login = None
@@ -557,7 +813,10 @@ def serve(policy: Mapping[str, Sequence[str]], runtime: str, mode: str, log: Pat
         model = (models or {}).get(runtime)
         if model is None:
             raise PolicyError(f"the egress policy lists no model endpoint for runtime {runtime!r}")
-    server = Server(Egress(policy[runtime], mode, log, model=model, login=login, exclusive=exclusive))
+    apps = read_app_register(apps_file) if apps_file is not None else None
+    app_keys = read_app_keys_file(app_keys_file) if app_keys_file is not None else None
+    server = Server(Egress(policy[runtime], mode, log, model=model, login=login, exclusive=exclusive,
+                           apps=apps, app_keys=app_keys))
     tmp = ready.with_name(ready.name + ".tmp")
     tmp.write_text(str(server.port), encoding="utf-8")
     tmp.replace(ready)

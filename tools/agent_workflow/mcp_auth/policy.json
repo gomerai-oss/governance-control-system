@@ -1,6 +1,6 @@
 {
   "schema": "mcp-auth-policy-v1",
-  "policy_version": "MCP-AUTH-POLICY-2026-11-11.1",
+  "policy_version": "MCP-AUTH-POLICY-2026-11-15.1",
   "session": {
     "max_ttl_seconds": 3600
   },
@@ -20,7 +20,11 @@
     "epap.artifact_update": {"kind": "write"},
     "epap.index_update": {"kind": "write"},
     "epap.closure_publish": {"kind": "write"},
-    "tool.execute": {"kind": "execute"}
+    "tool.execute": {"kind": "execute"},
+    "app.read": {"kind": "read"},
+    "app.write": {"kind": "write"},
+    "app.send": {"kind": "send"},
+    "app.delete": {"kind": "delete"}
   },
   "classes": {
     "rag": {
@@ -30,6 +34,10 @@
     "epap": {
       "read": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
       "mutation": ["epap.artifact_create", "epap.artifact_update", "epap.index_update", "epap.closure_publish"]
+    },
+    "app": {
+      "read": ["app.read"],
+      "mutation": ["app.write", "app.send", "app.delete"]
     }
   },
   "authority_refs": {

@@ -55,3 +55,12 @@ There is no `__init__.py`: `mcp_gateway` is a namespace package, like the earlie
 - **Optional session field.** A session may carry `catalog` `{"sha256", "mode"}`, written by the runtime binding; any other shape makes the session invalid (every call DENY, stop 13), like any other session defect. A session without it is read as before.
 - **Compared at start.** The gateway computes the canonical SHA-256 of the catalog file it loads (`catalog_digest`, the same `epap.signing` form the binding's audit uses). When the session pins another digest: under `"enforce"` the gateway refuses to start (exit 2); under `"observe"` it starts and appends one `catalog_pin` entry (`expected`, `loaded`, `mode`) to `decisions.jsonl`.
 - **Import closure.** `epap.signing` was already in the closure through `mcp_auth.records` and `retrieval.retrieve`; the gateway now imports it directly too. No new module joins the closure.
+
+## The app gateway (MISSION-DISPATCH-001 §3p, Amendment 027; APP-CONTROL-HARNESS build part 2a)
+
+- **A module of its own.** `app_gateway.py` is the second server, `governed-apps`. `server.py`, `protocol.py` and `__main__.py` are unchanged and pinned by digest (`tests/test_app_harness.py`). Its endpoint subclasses `protocol.Endpoint` and overrides only `initialize`'s `serverInfo`, so the framing (`decode`, `encode`, `result`, `error`, `serve`) is shared as it is.
+- **Empty catalog allowed.** Unlike `tools.json`, `app_tools.json` may list no tool: it ships empty until part 6 adds the first harness. A tool's arguments are plain strings only.
+- **Truth over convenience.** The request says the connector holds no credential and that the call implicates `external_exposure`; approvals come only from the app register, through `session.overlay(policy, session, register)`. A resource restricted in only one of the policy and the register refuses the start instead of being quietly approved or quietly denied.
+- **No harness yet.** The call path ends at a `runner`, which build part 3 supplies for pinned harnesses. Until then an allowed call is refused ("no harness is pinned"); tests pass a runner to drive the result path.
+- **Bounds.** Calls are counted per gateway (one per run) before the fabric is asked, so a refused call over the bound costs no decision; minutes run from the gateway's start.
+- **Own evidence folder.** `app-decisions.jsonl` in `binding/app-evidence`, never the retrieval gateway's folder, which `collect` records as `gateway.tool`. Part 4 adds the `harness.*` evidence actions that record it.
