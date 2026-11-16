@@ -377,7 +377,8 @@ class ShippedPolicy(unittest.TestCase):
     def test_shipped_policy_is_valid_and_binds_only_mission_seats(self):
         policy = P.load_file()
         self.assertEqual(policy["classes"]["rag"]["mutation"], [])
-        self.assertEqual(sorted(policy["principals"]), ["a2", "a3", "ar"])  # ar: the AR seat (Amendment 021)
+        # ar: the AR seat (Amendment 021); mission-perform: the perform step's service principal (Amendment 032)
+        self.assertEqual(sorted(policy["principals"]), ["a2", "a3", "ar", "mission-perform"])
         self.assertEqual(policy["missions"], {})
         for grant in policy["grants"]:
             self.assertIn(grant["authority_ref"], policy["authority_refs"])

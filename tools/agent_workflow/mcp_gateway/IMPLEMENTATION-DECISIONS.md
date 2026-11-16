@@ -82,3 +82,9 @@ There is no `__init__.py`: `mcp_gateway` is a namespace package, like the earlie
 - **The list is a file of its own, not log lines.** `app-drafts.json` is rewritten whole on each draft (a `.part` file, then a rename), so it is always one well-formed list whose digest HITL can name. The log keeps only the list's digest, never the arguments.
 - **Refused rather than redacted.** Arguments in which the secrets boundary finds a secret are not drafted at all: a redacted call would be a different call from the one the agent asked for, and a list holding a secret would be posted.
 - **Short enough to read whole.** 20 calls of at most 2,000 characters of arguments each keep the posted list well under a GitHub comment's limit, so HITL never names the digest of a list it could not see.
+
+## Service sessions (MISSION-DISPATCH-001 §3p items 38 to 46, Amendment 032; APP-CONTROL-HARNESS build part 5b)
+
+- **The same gateway, another session kind.** `AppGateway(kind="service")` loads only a `service` session and is served exactly the entries an agent's gateway drafts, each with its own action and no `performs`. Reads and direct writes are not served there: the perform step makes drafted calls and nothing else. The request names the session's kind, so the fabric checks the `service` principal against its own entry.
+- **Never an MCP server.** `main` builds the gateway with the default kind, so the stdio server an agent's runtime starts never loads a `service` session; only the perform step builds one, in its own process.
+- **`perform(call)` checks the call against the catalog as it is now.** A drafted call names its app, class, action and resource; any that differs from the served tool's is refused and logged as a `refusal`, so a catalog changed after drafting never makes a call other than the one HITL read. The call itself goes through `call_tool`, unchanged: bounds, the fabric, the pinned harness, the quarantine and the secrets boundary.
