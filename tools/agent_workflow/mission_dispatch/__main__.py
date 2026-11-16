@@ -39,6 +39,7 @@ from router_spec002.policy import load_tables, normalize_path
 
 from . import binding, blast, login, permissions, provenance, quarantine, registry, supply_chain
 from evidence import producer as evidence_producer
+from mcp_gateway import app_gateway as mcp_app_gateway
 from .runtimes import BINARIES
 from .dispatch import (
     BOUNDARY_OUT,
@@ -418,10 +419,57 @@ def cmd_land(args) -> int:
     return 0
 
 
+DRAFTS_MARKER = "<!-- mission-dispatch:drafts:{digest}:{run}:{mission}:{role}:{round} -->"
+
+
+def drafts_comment(job, doc: dict, digest: str, run_id: str) -> str:
+    """The tracking issue's comment for a run's drafted list (Amendment 031): each call's app, tool and class, and its
+    arguments as escaped JSON in a quarantined block, with the list's digest and the command that performs it.
+
+    The arguments are shown with every non-ASCII character and backtick escaped, so what HITL reads is exactly what is
+    performed and a hidden character shows as its escape. A ``/mission`` line in them is broken (§3j)."""
+    calls = doc["calls"]
+    lines = [DRAFTS_MARKER.format(digest=digest, run=run_id, mission=job.mission_id, role=job.role, round=job.round),
+             f"**{job.mission_id} {job.role} round {job.round} drafted {len(calls)} app "
+             f"call{'s' if len(calls) != 1 else ''}.** Nothing has been sent, deleted or written in an app. The calls "
+             "are made only if HITL performs this exact list, in this order.", ""]
+    for n, call in enumerate(calls, 1):
+        shown = json.dumps(call["arguments"], sort_keys=True, indent=1, ensure_ascii=True).replace("`", "\\u0060")
+        held = quarantine.quarantine(shown, f"the {job.role} agent", f"drafted call {n} of run {run_id}",
+                                     4 * mcp_app_gateway.MAX_DRAFT_ARGUMENTS, github=True)
+        lines += [f"**Call {n}:** `{call['action']}` with tool `{call['tool']}` in app `{call['app']}` "
+                  f"(resource `{call['resource']}`). Its arguments:", "", held.text, ""]
+    lines += ["To perform exactly these calls, a HITL login comments on its own line:", "",
+              "```", f"/mission perform {digest}", "```", "",
+              "A list that changed has another digest, so a command for this one performs nothing else."]
+    return "\n".join(lines)
+
+
+def post_drafts(gh, router, job, path: str) -> None:
+    """Post the run's drafted list, when it has one (Amendment 031). A malformed list is reported, never posted."""
+    if not path or not Path(path).exists():
+        return
+    issue = record_issue(router, job.mission_id, job.role)
+    if issue is None:
+        raise DispatchError(f"{job.mission_id} has drafted calls and no tracking issue to post them on")
+    try:
+        doc, digest = mcp_app_gateway.read_drafts(path)
+    except mcp_app_gateway.GatewayError as exc:
+        text = (f"**{job.mission_id} {job.role} round {job.round}: the run's drafted list is malformed** "
+                f"({quarantine.inline(str(exc), 200)}). It is not posted and cannot be performed.")
+    else:
+        text = drafts_comment(job, doc, digest, os.environ.get("GITHUB_RUN_ID", ""))
+        _NOTE.update(drafts=evidence_producer.text_digest(digest))
+    _NOTE.update(drafts_comment=evidence_producer.text_digest(text))
+    gh.comment(int(issue["number"]), text)
+    _log(f"{job.key}: drafted list reported on #{issue['number']}")
+
+
 def cmd_report(args) -> int:
     job = _job()
     gh = GitHub(_env("GITHUB_TOKEN"), args.repo)
     survey, router = live_survey(gh, _log)
+    post_drafts(gh, router, job, getattr(args, "drafts", "") or "")
     reason = outcome(job, survey, gh.pulls_from)
     if reason is None:
         _log(f"{job.key}: nothing to report")
@@ -461,7 +509,8 @@ STEP_ACTIONS = {"prepare": "dispatch.prepare", "run": "dispatch.run", "collect":
 DISPATCH_ACTOR, CHECKS_ACTOR, GATEWAY_ACTOR, EGRESS_ACTOR = "mission-dispatch", "mission-checks", "mcp-gateway", "egress-proxy"
 APP_GATEWAY_ACTOR = "app-gateway"
 HARNESS_KINDS = ("read", "write", "send", "delete")  # a harness call is recorded as harness.<kind> (Amendment 030)
-HARNESS_ENTRIES = ("refusal", "bound", "decision", "harness", "result_error", "result", "boundary")
+HARNESS_ENTRIES = ("refusal", "bound", "decision", "harness", "result_error", "result", "boundary", "draft",
+                   "draft_refused")
 
 
 def _hex64(value: object) -> bool:
@@ -494,6 +543,8 @@ def harness_calls(log: Path):
             call["app"] = str(entry["app"])
         if entry.get("kind") in HARNESS_KINDS:
             call["kind"] = entry["kind"]
+        if kind == "decision" and entry.get("draft") is True:
+            call["draft"] = True  # a draft tool's call (Amendment 031): it writes the drafted list, never the app
         if kind == "refusal":
             call.update(result="refused", outcome="not in the catalog")
         elif kind == "bound":
@@ -515,12 +566,17 @@ def harness_calls(log: Path):
             call.update(result="done", outcome=f"ALLOW, {entry.get('requests', 0)} requests")
             if _hex64(entry.get("result_sha256")):
                 call["outputs"]["result"] = entry["result_sha256"]
+        elif kind == "draft":
+            call.update(result="done", outcome=f"drafted as call {entry.get('index', '?')} of the run's list")
+        elif kind == "draft_refused":
+            call.update(result="refused", outcome=f"not drafted: {entry.get('reason', '')}")
         elif kind == "boundary":
             record = entry.get("record") if isinstance(entry.get("record"), dict) else {}
             if record.get("allow") is not True:
                 call.update(result="refused", outcome="the secrets boundary withheld the result")
     for call in calls.values():
-        action = f"harness.{call['kind']}" if call["kind"] else "harness.refusal"
+        action = ("harness.draft" if call.get("draft") and call["kind"] else
+                  f"harness.{call['kind']}" if call["kind"] else "harness.refusal")
         if action == "harness.refusal":
             call["result"] = "refused"
         inputs = {"app": evidence_producer.text_digest(call["app"]),
@@ -596,11 +652,12 @@ def record_step(recorder, args, result: str, reason: str) -> None:
                                                        f"{binding.OUT_DIR}/{binding.BINDING_FILE}",
                                                        f"{binding.OUT_DIR}/gateway-evidence.jsonl",
                                                        f"{binding.OUT_DIR}/{binding.APP_DECISIONS_OUT}",
+                                                       f"{binding.OUT_DIR}/{binding.APP_DRAFTS_OUT}",
                                                        blast.EGRESS_LOG])
     elif step == "publish":
         outputs = {"commit": evidence_producer.text_digest(str(_NOTE["commit"]))} if _NOTE.get("commit") else {}
-    elif step == "report" and _NOTE.get("comment"):
-        outputs = {"comment": _NOTE["comment"]}
+    elif step == "report":
+        outputs = {k: _NOTE[k] for k in ("comment", "drafts_comment", "drafts") if _NOTE.get(k)}
     actor = job.login if step == "publish" and job.login else DISPATCH_ACTOR
     pr = _NOTE.get("pr") if step == "publish" else None
     recorder.record(actor=actor, account_id=None, action=STEP_ACTIONS[step], result=result,
@@ -650,6 +707,7 @@ def main(argv=None) -> int:
         sub.choices[name].add_argument("--refusal", default="", help="where to record why this step refused")
     sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
+    sub.choices["report"].add_argument("--drafts", default="", help="the run's drafted list (Amendment 031)")
     args = parser.parse_args(argv)
     steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land}

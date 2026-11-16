@@ -56,6 +56,7 @@ ACTIONS: Mapping[str, str] = {
     "harness.write": "write",
     "harness.send": "send",
     "harness.delete": "delete",
+    "harness.draft": "write",  # Amendment 031: a drafted call writes the run's drafted list, never the app
     "harness.refusal": "refuse",
     "checks.check": "decide",
     "credentials.finding": "decide",

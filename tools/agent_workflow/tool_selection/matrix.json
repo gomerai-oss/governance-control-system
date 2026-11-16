@@ -1,6 +1,6 @@
 {
   "schema": "tool-selection-matrix-v1",
-  "matrix_version": "doctrine-s4-v3",
+  "matrix_version": "doctrine-s4-v4",
   "spec": "GOVERNED-TOOL-SELECTION-SPEC-001",
   "admission_threshold": "1.0",
   "capabilities": {
@@ -33,7 +33,8 @@
     "app_read": "read",
     "app_write": "write",
     "app_send": "send",
-    "app_delete": "delete"
+    "app_delete": "delete",
+    "app_draft": "write"
   },
   "roles": {
     "writer": {
@@ -69,6 +70,7 @@
         "credential_access": "credential access is not on the reviewer surface",
         "epap_write": "EPAP write/update is not on the reviewer surface",
         "app_write": "app writes are not on the reviewer surface",
+        "app_draft": "drafting an app call for HITL is not on the reviewer surface",
         "app_send": "no agent sends in an app: it drafts the call, and the send-and-delete step performs it after HITL's command",
         "app_delete": "no agent deletes in an app: it drafts the call, and the send-and-delete step performs it after HITL's command"
       }
@@ -86,6 +88,7 @@
         "epap_write": "artifact mutation is not on the router surface",
         "index_update": "index update needs elevated authorization outside the router surface",
         "app_write": "app writes are not on the router surface",
+        "app_draft": "drafting an app call for HITL is not on the router surface",
         "app_send": "no agent sends in an app: it drafts the call, and the send-and-delete step performs it after HITL's command",
         "app_delete": "no agent deletes in an app: it drafts the call, and the send-and-delete step performs it after HITL's command"
       }

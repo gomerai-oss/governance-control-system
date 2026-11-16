@@ -366,6 +366,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Keep the run's drafted app calls for HITL's command (MISSION-DISPATCH-001 Amendment 031)
+        if: steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: drafts-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/out/binding/app-drafts.json
+          if-no-files-found: ignore  # none unless the agent drafted a call
+          retention-days: 90
+
       - name: Hand a refusal to the report job (it names what was refused)
         if: failure() && steps.due.outputs.due == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -563,12 +572,20 @@ jobs:
           name: refusal-publish-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/refusal-publish
 
-      - name: Record a job that did not end in an open PR
+      - name: Fetch the run's drafted app calls
+        continue-on-error: true  # none unless the agent drafted a call (Amendment 031)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: drafts-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/drafts
+
+      - name: Post the drafted calls, and record a job that did not end in an open PR
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           python3 -m mission_dispatch report --repo "$GITHUB_REPOSITORY" --capacity "$RUNNER_TEMP/capacity/capacity.json"
           --refusal "$RUNNER_TEMP/refusal-collect/refusal.txt" --refusal "$RUNNER_TEMP/refusal-publish/refusal.txt"
+          --drafts "$RUNNER_TEMP/drafts/app-drafts.json"
 
       - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
         if: always()

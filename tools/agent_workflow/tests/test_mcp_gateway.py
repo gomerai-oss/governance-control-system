@@ -505,7 +505,7 @@ class SecretsBoundaryTests(GatewayCase):
 class ShippedDataTests(unittest.TestCase):
     def test_policy_adds_mission_seats_and_read_only_mission_grants(self):
         policy = P.load_file()
-        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-15.1")
+        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-16.1")
         self.assertEqual(policy["authority_refs"]["MISSION-ROUTER-001"],
                          {"kind": "HITL", "source": "tools/agent_workflow/specs/MISSION-ROUTER-001.md",
                           "missions": []})
