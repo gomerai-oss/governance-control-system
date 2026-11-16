@@ -19,7 +19,7 @@ from evidence import EvidenceError
 from mission_dispatch.quarantine import inline
 
 SCHEMA = "evidence-record-v1"
-CLASSES = ("read", "write", "send", "decide", "refuse", "withdraw")
+CLASSES = ("read", "write", "send", "delete", "decide", "refuse", "withdraw")  # delete: Amendment 030
 RESULTS = ("done", "refused", "failed")
 AUTHORITY_KINDS = ("plan", "hitl_command", "spec_rule")
 REASON_LIMIT = 300
@@ -51,6 +51,12 @@ ACTIONS: Mapping[str, str] = {
     "dispatch.refusal": "refuse",
     # the gateway, the checks job and the credentials check
     "gateway.tool": "decide",
+    # the app gateway (Amendment 030): one record per harness tool call, by the tool's class
+    "harness.read": "read",
+    "harness.write": "write",
+    "harness.send": "send",
+    "harness.delete": "delete",
+    "harness.refusal": "refuse",
     "checks.check": "decide",
     "credentials.finding": "decide",
     # withdrawal (§3m item 4)

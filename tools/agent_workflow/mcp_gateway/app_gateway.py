@@ -44,6 +44,9 @@ Each line of ``app-decisions.jsonl`` in the evidence directory is one JSON objec
 harness that is not run), ``result`` and ``result_error`` (after an ALLOW), ``boundary``, and ``catalog_pin``
 (``"observe"`` only). The directory is the
 app gateway's own, never the retrieval gateway's, so ``collect`` never records a harness call as a retrieval call.
+A ``decision`` and a ``bound`` entry name the tool's ``kind``, and a ``decision`` the digest of the call's arguments
+(``arguments_sha256``), never the arguments: ``collect`` records each call as one ``harness.<kind>`` record from them
+(Amendment 030).
 """
 
 from __future__ import annotations
@@ -223,6 +226,13 @@ def catalog_digest(path: Any) -> str:
         return signing.sha256_hex(signing.canonical_bytes(json.loads(Path(path).read_text(encoding="utf-8"))))
     except (OSError, UnicodeDecodeError, ValueError, TypeError, RecursionError, signing.CanonicalError) as exc:
         raise GatewayError(f"app catalog has no canonical form: {exc}") from None
+
+
+def arguments_digest(arguments: object) -> str:
+    """The SHA-256 of a call's arguments as canonical JSON (sorted keys, no spaces): its record's input (Amendment
+    030). The log keeps the digest, never the arguments."""
+    text = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=repr)
+    return signing.sha256_hex(text.encode("utf-8"))
 
 
 def argument_problem(schema: Mapping, arguments: Any) -> Optional[str]:
@@ -500,7 +510,8 @@ class AppGateway:
             over = self.bound_problem(tool, now)
             if over:
                 self._append({"entry": "bound", "request_id": request_id, "tool": tool.name, "app": tool.app,
-                              "mission": self._mission(), "timestamp": _timestamp(now), "reason": over})
+                              "kind": tool.kind, "mission": self._mission(), "timestamp": _timestamp(now),
+                              "reason": over})
                 return _refused(request_id, tool.name, over)
             self._calls += 1
             self._app_calls[tool.app] = self._app_calls.get(tool.app, 0) + 1
@@ -508,6 +519,7 @@ class AppGateway:
             capabilities = {t.action for t in listed if t.resource == tool.resource} | {tool.action}
             request, decision = self.evaluate(tool, capabilities, now, request_id)
             self._append({"entry": "decision", "request_id": request_id, "tool": tool.name, "app": tool.app,
+                          "kind": tool.kind, "arguments_sha256": arguments_digest(arguments),
                           "mission": self._mission(),
                           "session": self.session.session_id if self.session else None,
                           "request": request, "record": decision.record,

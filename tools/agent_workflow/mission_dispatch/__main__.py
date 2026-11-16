@@ -459,6 +459,94 @@ _NOTE: dict = {}
 STEP_ACTIONS = {"prepare": "dispatch.prepare", "run": "dispatch.run", "collect": "dispatch.collect",
                 "publish": "dispatch.publish", "report": "dispatch.report", "registry-check": "dispatch.refusal"}
 DISPATCH_ACTOR, CHECKS_ACTOR, GATEWAY_ACTOR, EGRESS_ACTOR = "mission-dispatch", "mission-checks", "mcp-gateway", "egress-proxy"
+APP_GATEWAY_ACTOR = "app-gateway"
+HARNESS_KINDS = ("read", "write", "send", "delete")  # a harness call is recorded as harness.<kind> (Amendment 030)
+HARNESS_ENTRIES = ("refusal", "bound", "decision", "harness", "result_error", "result", "boundary")
+
+
+def _hex64(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def harness_calls(log: Path):
+    """The app gateway's kept log (``binding/app-decisions.jsonl``) as one ``(action, result, reason, inputs,
+    outputs)`` per call, in the order the calls began (Amendment 030).
+
+    A call's lines share its ``request_id``. Its class is the ``kind`` its ``decision`` or ``bound`` line names; a
+    call of a tool not in the catalog has none and is ``harness.refusal``. Its result is its last outcome: refused
+    for a DENY, a bound, a harness that is not run or a result the secrets boundary withheld; failed for a harness
+    that failed, or an ALLOW the log never finishes; done for a result. Inputs are the app's, the tool's and the
+    arguments' digests; outputs each line's digest, and the result's digest when there is one."""
+    calls = {}
+    for n, line, entry in evidence_producer.log_lines(log):
+        if not isinstance(entry, dict) or entry.get("entry") not in HARNESS_ENTRIES:
+            continue  # catalog_pin, and anything else, is not a call
+        kind = entry["entry"]
+        rid = entry.get("request_id")
+        key = rid if isinstance(rid, str) and rid else f"line-{n}"
+        call = calls.get(key)
+        if call is None:
+            call = calls[key] = {"tool": str(entry.get("tool", "")), "app": str(entry.get("app", "")),
+                                 "kind": None, "result": "failed", "outcome": "no outcome logged",
+                                 "inputs": {}, "outputs": {}}
+        call["outputs"][f"{kind}_line"] = evidence_producer.text_digest(line)
+        if entry.get("app") and not call["app"]:
+            call["app"] = str(entry["app"])
+        if entry.get("kind") in HARNESS_KINDS:
+            call["kind"] = entry["kind"]
+        if kind == "refusal":
+            call.update(result="refused", outcome="not in the catalog")
+        elif kind == "bound":
+            call.update(result="refused", outcome=str(entry.get("reason", "over the run's bounds")))
+        elif kind == "decision":
+            record = entry.get("record") if isinstance(entry.get("record"), dict) else {}
+            disposition = str(record.get("disposition", "?"))
+            if disposition == "ALLOW":
+                call.update(result="failed", outcome="ALLOW, and no result logged")
+            else:
+                call.update(result="refused", outcome=disposition)
+            if _hex64(entry.get("arguments_sha256")):
+                call["inputs"]["arguments"] = entry["arguments_sha256"]
+        elif kind == "harness":
+            call.update(result="refused", outcome=f"harness not run: {entry.get('reason', '')}")
+        elif kind == "result_error":
+            call.update(result="failed", outcome=f"harness failed: {entry.get('detail') or entry.get('reason', '')}")
+        elif kind == "result":
+            call.update(result="done", outcome=f"ALLOW, {entry.get('requests', 0)} requests")
+            if _hex64(entry.get("result_sha256")):
+                call["outputs"]["result"] = entry["result_sha256"]
+        elif kind == "boundary":
+            record = entry.get("record") if isinstance(entry.get("record"), dict) else {}
+            if record.get("allow") is not True:
+                call.update(result="refused", outcome="the secrets boundary withheld the result")
+    for call in calls.values():
+        action = f"harness.{call['kind']}" if call["kind"] else "harness.refusal"
+        if action == "harness.refusal":
+            call["result"] = "refused"
+        inputs = {"app": evidence_producer.text_digest(call["app"]),
+                  "tool": evidence_producer.text_digest(call["tool"]), **call["inputs"]}
+        yield action, call["result"], f"{call['app']} {call['tool']}".strip() + f": {call['outcome']}", inputs, \
+            call["outputs"]
+
+
+def record_harness_calls(recorder, log: Path, base: dict) -> int:
+    """One record per harness call (``harness_calls``), up to ``LOG_RECORDS_MAX``; past that, one ``dispatch.collect``
+    record gives the count and the whole log's digest. Returns how many calls were recorded one by one."""
+    written = skipped = 0
+    for action, result, reason, inputs, outputs in harness_calls(log):
+        if written >= evidence_producer.LOG_RECORDS_MAX:
+            skipped += 1
+            continue
+        if recorder.record(actor=APP_GATEWAY_ACTOR, account_id=None, action=action, result=result, reason=reason,
+                           inputs=inputs, outputs=outputs, **base) is None:
+            return written
+        written += 1
+    if skipped:
+        recorder.record(actor=DISPATCH_ACTOR, account_id=None, action="dispatch.collect", result="done",
+                        reason=f"{skipped} more harness calls of {log.name} not recorded one by one "
+                               f"(limit {evidence_producer.LOG_RECORDS_MAX})",
+                        outputs={log.name: evidence_producer.file_digest(log)}, **base)
+    return written
 
 
 def record_step(recorder, args, result: str, reason: str) -> None:
@@ -506,7 +594,9 @@ def record_step(recorder, args, result: str, reason: str) -> None:
         out = Path(args.out)
         outputs = evidence_producer.file_digests(out, [PATCH_FILE, MESSAGE_OUT, BOUNDARY_OUT, RESULT_FILE,
                                                        f"{binding.OUT_DIR}/{binding.BINDING_FILE}",
-                                                       f"{binding.OUT_DIR}/gateway-evidence.jsonl", blast.EGRESS_LOG])
+                                                       f"{binding.OUT_DIR}/gateway-evidence.jsonl",
+                                                       f"{binding.OUT_DIR}/{binding.APP_DECISIONS_OUT}",
+                                                       blast.EGRESS_LOG])
     elif step == "publish":
         outputs = {"commit": evidence_producer.text_digest(str(_NOTE["commit"]))} if _NOTE.get("commit") else {}
     elif step == "report" and _NOTE.get("comment"):
@@ -522,6 +612,10 @@ def record_step(recorder, args, result: str, reason: str) -> None:
                                                                    .glob("*.jsonl"))
         for log in logs:
             recorder.from_log(log, "gateway.tool", GATEWAY_ACTOR, evidence_producer.gateway_result, base)
+        app_log = out / binding.OUT_DIR / binding.APP_DECISIONS_OUT
+        for log in [app_log] if app_log.is_file() else sorted((binding.binding_dir(root) / binding.APP_EVIDENCE_DIR)
+                                                               .glob("*.jsonl")):
+            record_harness_calls(recorder, log, base)
         egress_log = out / blast.EGRESS_LOG if (out / blast.EGRESS_LOG).is_file() else root / blast.EGRESS_LOG
         recorder.from_log(egress_log, "dispatch.egress", EGRESS_ACTOR, evidence_producer.egress_result, base)
 

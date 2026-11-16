@@ -52,6 +52,7 @@ GATEWAY_MODULE = "mcp_gateway"
 APP_GATEWAY_SERVER = "governed-apps"
 APP_GATEWAY_MODULE = "mcp_gateway.app_gateway"
 APP_EVIDENCE_DIR = "app-evidence"  # under the binding folder, beside the retrieval gateway's evidence folder
+APP_DECISIONS_OUT = "app-decisions.jsonl"  # the app gateway's log as collect keeps it, in OUT_DIR (Amendment 030)
 # Where run_agent tells the app gateway the app endpoint's port and the run's stand-in (Amendment 028): written once
 # the proxy listens, before the runtime starts; it holds no key.
 APP_ENDPOINT_FILE = "app-endpoint.json"
@@ -309,7 +310,10 @@ def remove_cursor_mcp(checkout: Path) -> None:
 
 
 def keep_evidence(root: Path, out_dir: Path) -> dict:
-    """Copy the binding record and the gateway's evidence log next to collect's output. Returns a summary."""
+    """Copy the binding record and the gateways' evidence logs next to collect's output. Returns a summary.
+
+    The retrieval gateway's log is kept as ``gateway-evidence.jsonl``, and the app gateway's, from its own folder, as
+    ``APP_DECISIONS_OUT`` (Amendment 030), so the two are never mixed."""
     src = binding_dir(root)
     if not src.is_dir():
         return {}
@@ -318,15 +322,26 @@ def keep_evidence(root: Path, out_dir: Path) -> dict:
     record = src / BINDING_FILE
     if record.is_file() and not record.is_symlink():
         shutil.copyfile(record, dest / BINDING_FILE)
+    lines, cut = _keep_log(src / EVIDENCE_DIR, dest / "gateway-evidence.jsonl")
+    kept = {"evidence_lines": lines, "evidence_truncated": cut}
+    if (src / APP_EVIDENCE_DIR).is_dir():
+        lines, cut = _keep_log(src / APP_EVIDENCE_DIR, dest / APP_DECISIONS_OUT)
+        kept.update(app_evidence_lines=lines, app_evidence_truncated=cut)
+    return kept
+
+
+def _keep_log(folder: Path, dest: Path) -> tuple:
+    """Join a folder's ``*.jsonl`` logs into ``dest``, up to ``EVIDENCE_MAX_BYTES``; links are skipped. Returns
+    ``(lines, truncated)``."""
     lines, size = 0, 0
-    with open(dest / "gateway-evidence.jsonl", "w", encoding="utf-8") as log:
-        for part in sorted((src / EVIDENCE_DIR).glob("*.jsonl")):
+    with open(dest, "w", encoding="utf-8") as log:
+        for part in sorted(folder.glob("*.jsonl")):
             if part.is_symlink() or not part.is_file():
                 continue
             for line in part.read_text(encoding="utf-8", errors="replace").splitlines():
                 size += len(line.encode("utf-8")) + 1
                 if size > EVIDENCE_MAX_BYTES:
-                    return {"evidence_lines": lines, "evidence_truncated": True}
+                    return lines, True
                 log.write(line + "\n")
                 lines += 1
-    return {"evidence_lines": lines, "evidence_truncated": False}
+    return lines, False
