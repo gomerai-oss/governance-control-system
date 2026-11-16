@@ -205,6 +205,16 @@ digest and the command that would perform it. Nothing is performed: the command,
 part 5b's. Nothing an agent can do changes: the shipped policy grants `app.draft` to no role, no matrix row admits
 `app_draft`, the app catalog is empty and `"app_gateway"` is off. §3p items 31 to 37; vectors 172 to 181; §7 item 42.
 
+**Amendment 032 (2026-11-16, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 5b; APP-CONTROL-HARNESS-SPEC-001 as
+revised 2026-11-16):** performing. HITL's `/mission perform <digest>` on the tracking issue is read by a new step,
+`mission_dispatch/perform.py`, in a new `perform` job of `mission-agent.yml`. It checks the command, the report and
+the run's artifact, claims the list so it is performed at most once, and makes exactly the listed calls through the
+app gateway in a `service` session, as a new `service` principal, `mission-perform`, with a role of its own,
+`APP_PERFORM`. No step of the job holds both the GitHub token and an app's key. Each command is one
+`dispatch.perform` record and each call one `harness.<kind>` record with authority `hitl_command`. Nothing can be
+performed: the shipped policy grants nothing to `APP_PERFORM`, the app catalog is empty, no app key is set and
+`"app_gateway"` is off. The router is unchanged. §3p items 38 to 46; vectors 182 to 190; §7 item 43.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1687,7 +1697,7 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
-### 3p. The app-control harness (Amendments 026 to 031)
+### 3p. The app-control harness (Amendments 026 to 032)
 
 **What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
 server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
@@ -1938,7 +1948,74 @@ Part 5a (Amendment 031): drafting, the drafted list, and its report.
     character and backtick escaped, in a quarantined block (§3j), so what HITL reads is exactly what would be
     performed and a `/mission` line in it is broken; and the command `/mission perform <digest>`. A malformed list is
     reported as malformed and not posted. `report`'s record holds both comments' digests and the list's.
-    Nothing reads that command yet: part 5b's perform step does.
+    The perform step reads that command (item 38).
+
+Part 5b (Amendment 032): HITL's command, the perform step and its job.
+
+38. **HITL's command** is `/mission perform <digest>`, on its own line, in a comment on the mission's tracking issue:
+    one command per comment, the digest 64 lowercase hex. The router does not read it and is unchanged; the perform
+    step reads it, as the dispatcher reads `/mission retry`.
+39. **The perform job** (`.github/workflows/mission-agent.yml` `perform`) starts only on an issue comment holding
+    that command, on the default branch, one run at a time (`mission-agent-perform`), in `mission-runtime`. It is
+    given no model login, runs no agent, and reads nothing in the event: the comment only starts it. It runs
+    `python3 -m mission_dispatch perform` in three stages, so that no stage holds both the workflow's token and an
+    app's key:
+    - `check` and `report` hold the workflow's token (`actions: read`, `issues: write`) and no app key;
+    - `call` holds only the app keys (build part 6 adds each registered app's `APP_KEY_<n>` to its step) and no
+      token.
+40. **`check`** (`perform.check_command`) re-derives every unfinished mission with the router's read-only survey,
+    the account guard included. Each command comment the bot has not answered (`HANDLED_MARKER`) is answered once.
+    It is refused, and nothing is performed, unless:
+    - its author is a HITL user account (`hitl_logins`), and it holds exactly one command naming a digest;
+    - `"app_gateway"` is not `"off"`;
+    - the mission is not halted (`model.hitl_halt`, the router's own function) and is open (`AWAIT_A2`, `AWAIT_A3`
+      or `BLOCKED`, as the router derives it; a landed, cancelled, paused or halted mission is not);
+    - no claim (`CLAIM_MARKER`) by the bot names the digest;
+    - a report comment by the bot (`DRAFTS_MARKER`, item 37), older than the command, names that digest for this
+      mission, with its run, role and round;
+    - that run is a run of `mission-agent.yml` on the default branch, and its `drafts-<mission>-<role>-r<round>`
+      artifact is there and not expired (it is kept 90 days, item 36);
+    - the artifact holds a well-formed list (`check_drafts`) for this mission whose digest is the command's. A list
+      that changed after HITL read it has another digest and matches nothing.
+41. **The claim.** The first command in a run that passes is claimed: the bot comments `CLAIM_MARKER` with the
+    digest before any call is made, and `check` writes the plan (`perform-plan-v1`: the digest, the mission, its
+    run, role and round, the command and the list) for `call`. So a list is performed at most once, even by a run
+    that stops half way. Any other command the run passes is refused; HITL gives it again. A refusal is one comment
+    naming why, its quoted text on one line (§3j). A marker (the report's, the claim's or an answer's) counts only
+    as a whole line of a bot comment: the bot quotes an agent's arguments as indented JSON, so a marker an agent
+    drafted never claims a list, answers a command or names a report.
+42. **The service principal** (`mcp_auth/policy.json`, `MCP-AUTH-POLICY-2026-11-16.2`): `mission-perform`, of kind
+    `service`, holding only the role `APP_PERFORM`, which no agent principal holds. Grants are per role, so a send or
+    delete grant names only that role, one action and one resource, with an evidence obligation (the fabric's
+    rule for mutation grants, `mcp_auth/policy.py`). The shipped policy grants `APP_PERFORM` nothing.
+43. **`call`** (`perform.make_calls`) re-checks that the plan's list is of its digest, and reads the key of each app
+    the list names from its register slot; a missing key makes no call. It then:
+    - starts the egress proxy (`blast.AgentEgress`) with those keys only and the classes of the listed calls only,
+      by file as for an agent's run (Amendment 028); the egress policy, unchanged, lists hosts by runtime only, so
+      the proxy is started under `claude-code`'s list, and nothing in the job tunnels through it;
+    - takes every `APP_KEY_<n>` out of its environment and drops its own copy of the keys once the proxy has read
+      its file, before the gateway starts;
+    - writes a session of its own, of kind `service`, as `mission-perform` for the list's mission and round, naming
+      the listed calls' resources, issued now and expiring after the register's minutes, and the app endpoint file;
+    - builds the app gateway with `kind="service"`, which loads only a `service` session;
+    - makes each call in order with `AppGateway.perform`; the first call that is not ALLOWed and done stops the
+      rest. The outcome (`perform-outcome-v1`) lists the calls performed, the one that stopped them and why, and
+      those not reached.
+44. **The app gateway in a `service` session** (`mcp_gateway/app_gateway.py`). Only the perform step builds it,
+    in its own process; `main`, the MCP server, serves agents only. It is served exactly the catalog tools an agent
+    drafts (a send, a delete, or a write of an app whose writes are `drafted`), each as itself, and no other tool.
+    `perform(call)` refuses, and logs a `refusal`, a call whose tool, app, class, action or resource is not the
+    catalog's now; otherwise the call is made as any call: bounds, the fabric's decision as its own action for the
+    `service` principal (the request names the session's kind), the pinned harness, the quarantine and the secrets
+    boundary.
+45. **`report`** posts the outcome on the tracking issue: the calls performed, the call that was denied or refused
+    and why, those not reached, or that the step ended without an outcome. The list stays claimed either way.
+46. **Evidence.** Each command answered is one `dispatch.perform` record (`decide`, `evidence/record.py`): done
+    when accepted, refused otherwise, with the list's digest as input and the comment's digest as output; authority
+    `hitl_command` for a HITL author, `spec_rule` for anyone else. Each performed call is one `harness.<kind>` record
+    built from the gateway's log (item 29), with authority `hitl_command` naming the command, so a performed call is
+    told from an agent's call by its authority. The job keeps its evidence chain, the gateway's log and the proxy's
+    log for 90 days.
 
 ## 4. Failures
 
@@ -2180,6 +2257,12 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     the posted list before naming its digest, and the perform step (part 5b) performs only the list of that digest.
     A draft whose log line cannot be written after the list was written stays in the list, and the agent is told it
     was refused; HITL sees it in the list.
+43. **The perform job checks once, then performs (Amendment 032).** `check` reads the halt and the mission's state
+    before it claims the list; a `/mission halt` given while `call` runs does not stop the calls already started.
+    The harness of each call runs in the perform step's process (item 40). That step holds no GitHub token, and the
+    listed apps' keys are in the proxy only, out of its environment, before the gateway starts. The claim is posted
+    before any call, so a run that stops half way leaves its list claimed: the calls not made are drafted again by
+    an agent, never performed twice.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2361,3 +2444,12 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 179 | `report` with a list holding a backtick, a `/mission perform` line and a hidden character; no list; a malformed list; nothing else to report | One comment: the marker, each call, the arguments escaped, the only command the list's own; nothing posted; reported malformed, no command; the list still posted |
 | 180 | The workflow | The agent job keeps `drafts-…` for 90 days; the report job fetches it and passes `--drafts` |
 | 181 | The router | Byte-identical; it matches no `/mission perform` |
+| 182 | The shipped policy and evidence actions | `mission-perform` (`service`) holds only `APP_PERFORM`, held by no agent; no grant names it, or `app.send` or `app.delete`; `dispatch.perform` is `decide` |
+| 183 | The app gateway's catalog for a `service` session; an agent's session there; a service session in an agent's gateway | Only the drafted tools, each as itself; a direct write and a read are not served; each gateway refuses the other's session; the request names kind `service` |
+| 184 | `perform` of a listed call: granted; not granted; naming another action, resource, tool or app; bad arguments; in an agent's gateway | Its harness runs, decided as its own action; DENY; refused and logged; refused; refused |
+| 185 | Command comments; the bot's markers; report comments; markers an agent drafted into its arguments | One command per comment, naming one digest; only the bot's markers count; the report must be the bot's, for this mission, older than the command; a drafted marker counts for nothing |
+| 186 | `/mission perform` from a non-HITL account; with the app gateway off; while halted; for a closed mission; for a claimed digest; with no report; for a list changed after its report; from another workflow's run, branch or an expired artifact | Each refused before any claim; nothing performed (AST-H.11) |
+| 187 | `call` with two listed calls; a denied second call; no grant; a missing key; a proxy that did not start; no tooling commit | Both made in order, the proxy given only the listed apps' keys and classes, the keys out of the environment; call 2 stops call 3; no call; no proxy; no gateway; no call |
+| 188 | The claim, refusal and outcome comments | The claim and answer markers; quoted text on one line, so no `/mission` line |
+| 189 | `check` with two commands for one list and one already answered | The first claimed and planned, the second refused, the third not answered again; one `dispatch.perform` record each |
+| 190 | The perform job | Only on the command, on the default branch, one at a time, in `mission-runtime`; no model login; the token in `check` and `report` only, never in `call` |

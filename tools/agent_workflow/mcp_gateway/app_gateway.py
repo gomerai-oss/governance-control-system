@@ -15,10 +15,10 @@ agent-writable checkout:
   app, one ``app`` class action of kind ``read`` or ``write`` and one resource of that app. A ``send`` or ``delete``
   action is refused: no agent sends or deletes (Proposal C). So is a ``write`` action for an app whose writes are
   ``drafted``, and any action of a class the app's register entry does not list;
-- the launcher's session (kind ``agent`` only), and from it the overlay with the register's approvals for the
-  session's apps (``session.overlay``). An invalid session does not stop the gateway; it makes every call DENY with
-  stop 13. A session that pins the app catalog (``app_catalog``) and a different catalog: under ``"enforce"`` the
-  gateway refuses to start; under ``"observe"`` the difference is logged.
+- the launcher's session (kind ``agent``, unless the perform step asks for ``service``), and from it the overlay
+  with the register's approvals for the session's apps (``session.overlay``). An invalid session does not stop the
+  gateway; it makes every call DENY with stop 13. A session that pins the app catalog (``app_catalog``) and a
+  different catalog: under ``"enforce"`` the gateway refuses to start; under ``"observe"`` the difference is logged.
 
 Every call is decided by the fabric with the truth about it: the connector holds no credential (the egress proxy
 holds each app's key, §4.2), and every call implicates ``external_exposure``, because it reaches a service outside
@@ -49,6 +49,13 @@ Drafting (Amendment 031, Proposal C): no agent sends, deletes or makes a drafted
 as a draft tool, decided by the fabric as ``app.draft`` on the tool's resource; on ALLOW the gateway checks the
 arguments and adds the exact call to the run's drafted list, ``app-drafts.json`` beside the log, at most
 ``MAX_DRAFTS`` calls, and sends nothing. The harness does not run.
+
+Performing (Amendment 032): only the perform step builds the gateway with ``kind="service"``, in its own process,
+never as an MCP server (``main`` serves agents only). It loads a ``service`` session and is served exactly the tools
+an agent drafts, each as itself (``app.send``, ``app.delete`` or a drafted ``app.write``), and no other tool.
+``perform(call)`` makes one call of HITL's performed list after checking that it names its tool exactly as the
+catalog has it; the call is then bounded, decided by the fabric as the ``service`` principal, and run, like any
+other.
 
 A ``decision`` and a ``bound`` entry name the tool's ``kind``, and a ``decision`` the digest of the call's arguments
 (``arguments_sha256``), never the arguments: ``collect`` records each call as one ``harness.<kind>`` record from them
@@ -96,6 +103,7 @@ CAN_PRODUCE = ("audit_record",)
 IMPLICATES = ("external_exposure",)  # every harness call reaches a service outside the pipeline
 APP_CLASS = "app"
 SERVED_KINDS = ("read", "write")  # the agent's gateway: never send or delete (Proposal C)
+SERVICE_KIND = "service"  # the perform step's session (Amendment 032): it is served only the tools agents draft
 # Drafting (Amendment 031): a send, a delete or a drafted write is served to an agent as a draft tool, decided by the
 # fabric as DRAFT_ACTION. Its call is added to the run's drafted list, DRAFTS_FILE, and nothing is sent.
 DRAFT_ACTION = "app.draft"
@@ -186,8 +194,13 @@ def check_register(policy: Mapping, register: Mapping) -> None:
                                    "the app register")
 
 
-def load_catalog(path: Any, policy: Mapping, register: Mapping) -> List[AppTool]:
-    """The validated app catalog (it may be empty); any defect refuses to start."""
+def load_catalog(path: Any, policy: Mapping, register: Mapping,
+                 session_kind: str = session_mod.PRINCIPAL_KIND) -> List[AppTool]:
+    """The validated app catalog (it may be empty); any defect refuses to start. For an agent's session (``kind``
+    ``"agent"``) each send, delete and drafted write is a draft tool; for the perform step's ``service`` session
+    (Amendment 032) exactly those tools are served as themselves, and no other tool is served."""
+    if session_kind not in session_mod.SESSION_KINDS:
+        raise GatewayError(f"a session kind is one of {list(session_mod.SESSION_KINDS)}")
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as exc:
@@ -233,10 +246,15 @@ def load_catalog(path: Any, policy: Mapping, register: Mapping) -> List[AppTool]
             raise GatewayError(f"{where}: resource {resource!r} is not an app resource known to policy")
         if resource not in app["resources"]:
             raise GatewayError(f"{where}: resource {resource!r} is not one of app {entry['app']!r}'s")
+        schema = _check_input_schema(entry["input_schema"], where)
+        if session_kind == SERVICE_KIND:
+            if drafted:  # the perform step makes only the calls an agent can draft, each as itself
+                tools.append(AppTool(name=name, description=entry["description"], app=entry["app"], action=action,
+                                     kind=kind, resource=resource, input_schema=schema))
+            continue
         tools.append(AppTool(name=name, description=entry["description"], app=entry["app"],
                              action=DRAFT_ACTION if drafted else action, kind=kind, resource=resource,
-                             input_schema=_check_input_schema(entry["input_schema"], where),
-                             performs=action if drafted else ""))
+                             input_schema=schema, performs=action if drafted else ""))
     return tools
 
 
@@ -401,7 +419,10 @@ class AppGateway:
                  policy_path: Any = P.DEFAULT_PATH, catalog_path: Any = DEFAULT_CATALOG,
                  register_path: Any = apps_mod.DEFAULT_PATH, clock: Optional[Callable[[], int]] = None,
                  runner: Optional[Runner] = None, endpoint_path: Any = None, pins_path: Any = DEFAULT_PINS,
-                 tooling: Any = TOOLING):
+                 tooling: Any = TOOLING, kind: str = session_mod.PRINCIPAL_KIND):
+        if kind not in session_mod.SESSION_KINDS:
+            raise GatewayError(f"a session kind is one of {list(session_mod.SESSION_KINDS)}")
+        self.kind = kind  # "agent" for the MCP server (main), "service" only for the perform step (Amendment 032)
         self.root = Path(root)
         if not self.root.is_dir():
             raise GatewayError("--root is not a directory")
@@ -426,7 +447,7 @@ class AppGateway:
         except apps_mod.AppsError as exc:
             raise GatewayError(f"app register is unavailable or malformed: {exc}") from None
         check_register(self.shipped_policy, self.register)
-        self.tools = load_catalog(catalog_path, self.shipped_policy, self.register)
+        self.tools = load_catalog(catalog_path, self.shipped_policy, self.register, kind)
         self._by_name = {t.name: t for t in self.tools}
         try:
             pinned = supply_chain.read_pins(Path(pins_path))["harnesses"]
@@ -448,7 +469,7 @@ class AppGateway:
         self.policy: Optional[dict] = None
         self.session_problem: Optional[str] = None
         try:
-            session = session_mod.load(session_path, self.root)
+            session = session_mod.load(session_path, self.root, kind=kind)
             self.policy = session_mod.overlay(self.shipped_policy, session, self.register)
             self.session = session
         except session_mod.SessionError as exc:
@@ -493,7 +514,7 @@ class AppGateway:
         s = self.session
         return {
             "request_id": request_id,
-            "principal": {"id": s.principal, "kind": session_mod.PRINCIPAL_KIND},
+            "principal": {"id": s.principal, "kind": s.kind},
             "acting_identity": s.acting_identity,
             "session": {"id": s.session_id, "principal": s.principal, "acting_identity": s.acting_identity,
                         "mission": s.mission_id, "issued_at": s.issued_at, "expires_at": s.expires_at},
@@ -693,6 +714,33 @@ class AppGateway:
         structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name, "app": tool.app,
                       "grant": grant["id"], "drafted": len(self._drafts), "result": note}
         return self._admitted(request_id, tool, structured, now)
+
+    def perform(self, call: Mapping) -> dict:
+        """Make one call of a drafted list, in a ``service`` session only (Amendment 032). The call must name a
+        served tool exactly as the catalog has it now (its app, class, action and resource); it is then made as
+        any call is: bounds, the fabric's decision as its own action, the pinned harness, the quarantine and the
+        secrets boundary. A call that names anything else is refused and logged as a ``refusal``."""
+        if self.kind != SERVICE_KIND:
+            raise GatewayError("only the perform step's service session makes a drafted call")
+        name = str(call.get("tool", "")) if isinstance(call, Mapping) else ""
+        tool = self._by_name.get(name)
+        if tool is None or (tool.app, tool.kind, tool.action, tool.resource) != tuple(
+                call.get(k) for k in ("app", "kind", "action", "resource")):
+            now = self.clock()
+            request_id = self._request_id(f"call-{self._calls + 1}")
+            reason = ("the drafted call names no tool this gateway performs" if tool is None
+                      else "the drafted call does not match its tool in the app catalog")
+            try:
+                self._append({"entry": "refusal", "request_id": request_id, "tool": name, "mission": self._mission(),
+                              "timestamp": _timestamp(now), "reason": reason})
+            except OSError:
+                pass
+            return _refused(request_id, name, reason)
+        arguments = call.get("arguments")
+        try:
+            return self.call_tool(tool.name, arguments if isinstance(arguments, Mapping) else {})
+        except protocol.RpcError as exc:
+            return _refused(self._request_id(f"call-{self._calls}"), tool.name, str(exc))
 
     def _harness_request(self, tool: AppTool, sent: List[int]) -> Callable[..., Tuple[int, str]]:
         """The one way a harness reaches its app, for one call of ``tool``: ``request(method, host, path, query="",

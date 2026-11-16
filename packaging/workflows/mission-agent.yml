@@ -31,6 +31,10 @@ name: Mission Agent
 #   the PR from the stack branch into the default branch as an A3 agent's App
 #   (environment mission-agent-<agent>). No agent content runs there; the router
 #   checks the stack and merges it.
+# - perform: only on HITL's /mission perform. Checks the command and the run's drafted
+#   list with the read token, claims the list, then makes exactly those calls through the
+#   app gateway as the service principal in a step with no token, only the listed apps'
+#   keys (environment mission-runtime, no model login, no agent). Amendment 032.
 # - No agent App may hold the Workflows permission, so no agent can change this file.
 
 on:
@@ -649,3 +653,83 @@ jobs:
           AGENT_SLUG: ${{ steps.token.outputs.app-slug }}
           APP_ID: ${{ vars.APP_ID }}
         run: python3 -m mission_dispatch land --repo "$GITHUB_REPOSITORY"
+
+  # HITL's /mission perform <digest> (MISSION-DISPATCH-001 Amendment 032): performs exactly a run's drafted app
+  # calls. The comment only starts the job; check re-derives every mission and reads the command, the report and
+  # the run's artifact from the API. No step holds both the token and an app's key: check and report have the token,
+  # call has only the app keys. No model login is given and no agent runs.
+  perform:
+    name: perform
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request && contains(github.event.comment.body, '/mission perform')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One at a time, so a list is claimed by one run only.
+    concurrency:
+      group: mission-agent-perform
+      cancel-in-progress: false
+    environment: mission-runtime
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6)
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence" "$RUNNER_TEMP/perform-plan" "$RUNNER_TEMP/perform"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-perform" >> "$GITHUB_ENV"
+
+      - name: Check HITL's command and the drafted list, and claim it
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m mission_dispatch perform --stage check --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/perform-plan"
+
+      # No GitHub token here. Build part 6 adds each registered app's key (APP_KEY_<n>) to this step's env only.
+      - name: Make the listed calls through the app gateway, as the service principal
+        if: steps.check.outputs.perform == 'true'
+        run: python3 -m mission_dispatch perform --stage call --plan "$RUNNER_TEMP/perform-plan" --out "$RUNNER_TEMP/perform"
+
+      - name: Report which calls were made
+        if: always() && steps.check.outputs.perform == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m mission_dispatch perform --stage report --repo "$GITHUB_REPOSITORY"
+          --plan "$RUNNER_TEMP/perform-plan" --out "$RUNNER_TEMP/perform"
+
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-perform-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Keep the app gateway's log and the proxy's log
+        if: always() && steps.check.outputs.perform == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perform-logs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/perform/binding/app-evidence/app-decisions.jsonl
+            ${{ runner.temp }}/perform/egress.jsonl
+          if-no-files-found: ignore
+          retention-days: 90

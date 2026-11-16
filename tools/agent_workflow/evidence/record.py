@@ -49,6 +49,7 @@ ACTIONS: Mapping[str, str] = {
     "dispatch.publish": "write",
     "dispatch.report": "send",
     "dispatch.refusal": "refuse",
+    "dispatch.perform": "decide",  # Amendment 032: HITL's /mission perform, accepted or refused by the perform step
     # the gateway, the checks job and the credentials check
     "gateway.tool": "decide",
     # the app gateway (Amendment 030): one record per harness tool call, by the tool's class

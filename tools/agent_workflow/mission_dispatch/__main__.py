@@ -8,6 +8,10 @@
     PYTHONPATH=tools/agent_workflow python3 -m mission_dispatch collect --root DIR --out DIR
     PYTHONPATH=tools/agent_workflow python3 -m mission_dispatch publish --repo OWNER/REPO --root DIR --artifact DIR
     PYTHONPATH=tools/agent_workflow python3 -m mission_dispatch report  --repo OWNER/REPO
+    PYTHONPATH=tools/agent_workflow python3 -m mission_dispatch perform --stage check  --repo OWNER/REPO --out DIR
+    PYTHONPATH=tools/agent_workflow python3 -m mission_dispatch perform --stage call   --plan DIR --out DIR
+    PYTHONPATH=tools/agent_workflow python3 -m mission_dispatch perform --stage report --repo OWNER/REPO \
+        --plan DIR --out DIR
 
 Environment, per step (each step gets only what it needs):
     plan, due, prepare, report
@@ -17,6 +21,9 @@ Environment, per step (each step gets only what it needs):
     publish, land          READ_TOKEN (the workflow's token), AGENT_TOKEN, AGENT_SLUG and APP_ID (the agent App;
                            APP_ID must be the registry's, Amendment 013)
     collect                the runtime's model login, only to refuse a change that contains it
+    perform                check and report: GITHUB_TOKEN (the workflow's token: reads the missions, the run's
+                           artifact, and comments on the tracking issue); call: only the listed apps' APP_KEY_<n>,
+                           never a GitHub token (Amendment 032)
     all but plan           JOB: the job description plan() produced, as JSON
     publish, report        RUN_URL (optional): this workflow run, linked from the PR or the failure note
 """
@@ -37,7 +44,7 @@ from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast, login, permissions, provenance, quarantine, registry, supply_chain
+from . import binding, blast, login, perform, permissions, provenance, quarantine, registry, supply_chain
 from evidence import producer as evidence_producer
 from mcp_gateway import app_gateway as mcp_app_gateway
 from .runtimes import BINARIES
@@ -485,6 +492,122 @@ def cmd_report(args) -> int:
     return 0
 
 
+def _perform_record(recorder, comment: dict, mission: str, round_n: int, result: str, reason: str, text: str,
+                    hitl: set) -> None:
+    """One ``dispatch.perform`` record (``decide``) for one command (Amendment 032): its digest as input."""
+    login_name = str((comment.get("user") or {}).get("login", ""))
+    try:
+        digest = perform.command_digest(comment)
+    except perform.PerformError:
+        digest = ""
+    by_hitl = (comment.get("user") or {}).get("type") == "User" and login_name.casefold() in hitl
+    recorder.record(actor=DISPATCH_ACTOR, account_id=None, action="dispatch.perform", result=result, reason=reason,
+                    inputs={"list": digest} if digest else {},
+                    outputs={"comment": evidence_producer.text_digest(text)}, mission=mission, round_n=round_n,
+                    authority_kind="hitl_command" if by_hitl else "spec_rule",
+                    authority_ref=f"/mission perform by {login_name} (comment {comment.get('id')})")
+
+
+def perform_check(args) -> int:
+    """``perform --stage check``: answer every unanswered ``/mission perform``; claim and plan the first that passes."""
+    token = _env("GITHUB_TOKEN")
+    gh = GitHub(token, args.repo)
+    config = load_config()
+    router = MissionRouter(gh, config, classify_or_raise(load_tables(), normalize_path), dry_run=True, log=_log)
+    hitl = {login_name.casefold() for login_name in config["hitl_logins"]}
+    bot, app_mode = config["bot_login"], _app_mode(config)
+    recorder = evidence_producer.Recorder.from_env(os.environ)
+
+    def download(url: str) -> bytes:
+        if not url.startswith("https://api.github.com/"):
+            raise perform.PerformError("the artifact's download address is not GitHub's API")
+        try:
+            return provenance._download(url, token)
+        except provenance.ProvenanceError as exc:
+            raise DispatchError(f"the drafts artifact could not be downloaded: {exc}") from None
+
+    planned = None
+    for mid, ctx in sorted(router.survey().items()):
+        issue = router.tracking_issue(mid)
+        if issue is None:
+            continue
+        comments = router.issue_comments(issue["number"])
+        answered = perform.handled(comments, bot)
+        for comment in perform.commands(comments):
+            if comment["id"] in answered:
+                continue
+            try:
+                if planned is not None:
+                    raise perform.PerformError("another list is performed in this run; give the command again")
+                plan = perform.check_command(comment, mid, ctx.state.stage, comments, hitl, bot, app_mode, gh,
+                                             download, config["default_branch"])
+            except perform.PerformError as exc:
+                text = perform.refusal_text(comment, str(exc))
+                gh.comment(int(issue["number"]), text)
+                _perform_record(recorder, comment, mid, ctx.state.round, "refused", str(exc), text, hitl)
+                _log(f"{mid}: /mission perform (comment {comment['id']}) refused: {exc}")
+                continue
+            text = perform.claim_text(plan)
+            gh.comment(int(issue["number"]), text)  # the claim, before any call is made
+            plan["issue"] = int(issue["number"])
+            perform.write_json(Path(args.out) / perform.PLAN_FILE, plan)
+            planned = plan
+            _perform_record(recorder, comment, mid, plan["round"], "done",
+                            f"accepted: {len(plan['list']['calls'])} calls to perform", text, hitl)
+            _log(f"{mid}: /mission perform (comment {comment['id']}) accepted for list {plan['digest'][:12]}")
+    _output("perform", "true" if planned else "false")
+    return 0
+
+
+def perform_call(args) -> int:
+    """``perform --stage call``: make the planned calls; no GitHub credential is read here."""
+    path = Path(args.plan) / perform.PLAN_FILE
+    if not path.is_file():
+        _log("nothing to perform")
+        return 0
+    try:
+        plan = perform.read_plan(path)
+    except perform.PerformError as exc:
+        raise DispatchError(str(exc)) from None
+    result = perform.make_calls(plan, Path(args.out), os.environ)
+    perform.write_json(Path(args.out) / perform.OUTCOME_FILE, result)
+    _log(f"performed {len(result['performed'])} of {len(plan['list']['calls'])} calls")
+    return 0
+
+
+def perform_report(args) -> int:
+    """``perform --stage report``: post the outcome and record each call with HITL's command as its authority."""
+    path = Path(args.plan) / perform.PLAN_FILE
+    if not path.is_file():
+        return 0
+    try:
+        plan = perform.read_plan(path)
+    except perform.PerformError as exc:
+        raise DispatchError(str(exc)) from None
+    gh = GitHub(_env("GITHUB_TOKEN"), args.repo)
+    result = perform.read_outcome(Path(args.out) / perform.OUTCOME_FILE, plan)
+    text = perform.outcome_text(plan, result, os.environ.get("RUN_URL", ""))
+    gh.comment(int(plan["issue"]), text)
+    recorder = evidence_producer.Recorder.from_env(os.environ)
+    sha = os.environ.get("GITHUB_SHA", "")
+    base = dict(mission=plan["mission"], round_n=plan["round"],
+                commit=sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None,
+                authority_kind="hitl_command",
+                authority_ref=f"/mission perform {plan['digest']} by {plan['command']['login']} "
+                              f"(comment {plan['command']['id']})")
+    log = binding.binding_dir(Path(args.out)) / binding.APP_EVIDENCE_DIR / mcp_app_gateway.DECISIONS_FILE
+    if log.is_file():
+        record_harness_calls(recorder, log, base)
+    recorder.record(actor=DISPATCH_ACTOR, account_id=None, action="dispatch.report", result="done",
+                    reason=f"the outcome of list {plan['digest'][:12]}",
+                    outputs={"comment": evidence_producer.text_digest(text)}, **base)
+    return 0
+
+
+def cmd_perform(args) -> int:
+    return {"check": perform_check, "call": perform_call, "report": perform_report}[args.stage](args)
+
+
 def read_refusals(paths) -> list:
     """The ``--refusal`` records the collect and publish steps left (missing ones are skipped)."""
     out = []
@@ -708,9 +831,14 @@ def main(argv=None) -> int:
     sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
     sub.choices["report"].add_argument("--drafts", default="", help="the run's drafted list (Amendment 031)")
+    performing = sub.add_parser("perform", help="HITL's /mission perform (Amendment 032)")
+    performing.add_argument("--stage", required=True, choices=("check", "call", "report"))
+    performing.add_argument("--repo", default="")
+    performing.add_argument("--out", required=True, help="the stage's work folder")
+    performing.add_argument("--plan", default="", help="where check wrote the plan")
     args = parser.parse_args(argv)
     steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
-             "publish": cmd_publish, "report": cmd_report, "land": cmd_land}
+             "publish": cmd_publish, "report": cmd_report, "land": cmd_land, "perform": cmd_perform}
     recorder = evidence_producer.Recorder.from_env(os.environ)
     _NOTE.clear()
     try:
