@@ -75,3 +75,10 @@ There is no `__init__.py`: `mcp_gateway` is a namespace package, like the earlie
 - **The gateway owns the way out.** A harness gets a `request` function, never a socket, a stand-in or a port. The function applies the register's requests with the proxy's own matcher (`egress.proxy.AppRoute`), narrowed to the calling tool's class, before anything is sent; the proxy checks again.
 - **The import list is a guard, not a sandbox.** It stops a harness that imports a network, file or process module by plain mistake. It does not stop one that is hostile by design; the independent review does (§7 item 40).
 - **`runner` stays a test hook.** Tests may still pass a `runner` to drive the result path; the gateway's command line never does.
+
+## Draft tools (MISSION-DISPATCH-001 §3p items 31 to 37, Amendment 031; APP-CONTROL-HARNESS build part 5a)
+
+- **One tool, two ways to serve it.** A send, a delete or a drafted write stays one catalog entry with its own action. To an agent the gateway serves it as a draft tool: `AppTool.action` is `app.draft`, the action the fabric decides, and `AppTool.performs` keeps the tool's own action for the drafted call. The decision path (`evaluate`, `listed_tools`, bounds) is unchanged, so a draft is decided, bounded and logged like any other call. Part 5b's `service` session serves the same entry as itself.
+- **The list is a file of its own, not log lines.** `app-drafts.json` is rewritten whole on each draft (a `.part` file, then a rename), so it is always one well-formed list whose digest HITL can name. The log keeps only the list's digest, never the arguments.
+- **Refused rather than redacted.** Arguments in which the secrets boundary finds a secret are not drafted at all: a redacted call would be a different call from the one the agent asked for, and a list holding a secret would be posted.
+- **Short enough to read whole.** 20 calls of at most 2,000 characters of arguments each keep the posted list well under a GitHub comment's limit, so HITL never names the digest of a list it could not see.

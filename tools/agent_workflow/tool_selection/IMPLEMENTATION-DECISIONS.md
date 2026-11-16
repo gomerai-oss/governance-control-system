@@ -47,7 +47,7 @@ There is no `__init__.py`: `tool_selection` is a namespace package.
 | `runtime_binding.py` | `bind(seat, runtime, mission, checkout, session_path, evidence_dir, gateway_root, now) -> Binding`, `BindingRefused` |
 | `seats.json` | Seat → role, mission type, fabric role, principal, gateway resources (`mission-seats-v1`) |
 | `runtime_registry.json` | The `tool-registry-v1` registry of runtime tools the dispatcher can grant |
-| `matrix.json` | `doctrine-s4-v3`: HITL decision D2, and the app capabilities (decision 28) |
+| `matrix.json` | `doctrine-s4-v4`: HITL decision D2, the app capabilities (decision 28), and `app_draft` (decision 29) |
 | `apps.py`, `apps.json` | The app register (`app-register-v1`), shipped empty (decision 28) |
 | `../tests/test_runtime_binding.py` | Vectors P1-P7 (with P4a, P5a) as `test_vector…`, plus hardening cases |
 
@@ -74,3 +74,8 @@ There is no `__init__.py`: `tool_selection` is a namespace package.
     read-only row denies the new classes by its separation rule, and `_scope_kind` gives them the write scope.
     `apps.py` validates `apps.json` strictly (`matrix.read_file`), and nothing reads the register at run time
     until part 2. Vector P7 now pins v1 + D2 + Amendment 026.
+29. **Matrix v4: `app_draft` (MISSION-DISPATCH-001 §3p item 31, Amendment 031; app-control harness part 5a).**
+    `matrix_version` is `doctrine-s4-v4`. The capabilities gain `app_draft`, of class `write`, so that a read-only
+    row cannot admit it; no row admits it, and the reviewer and router rows block it. It is the capability of a draft
+    tool, whose call adds an app call to the run's drafted list and sends nothing. Vector P7 now pins v1 + D2 +
+    Amendments 026 and 031.

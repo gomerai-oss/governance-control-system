@@ -41,9 +41,15 @@ records is what admits it (APP-CONTROL-HARNESS-SPEC-001 §4.5).
 
 Each line of ``app-decisions.jsonl`` in the evidence directory is one JSON object with an ``entry`` field:
 ``decision``, ``refusal`` (a tool not in the catalog), ``bound`` (a call over the run's bounds), ``harness`` (a
-harness that is not run), ``result`` and ``result_error`` (after an ALLOW), ``boundary``, and ``catalog_pin``
-(``"observe"`` only). The directory is the
+harness that is not run), ``result`` and ``result_error`` (after an ALLOW), ``draft`` and ``draft_refused`` (a
+draft tool's call, Amendment 031), ``boundary``, and ``catalog_pin`` (``"observe"`` only). The directory is the
 app gateway's own, never the retrieval gateway's, so ``collect`` never records a harness call as a retrieval call.
+
+Drafting (Amendment 031, Proposal C): no agent sends, deletes or makes a drafted write. Such a catalog tool is served
+as a draft tool, decided by the fabric as ``app.draft`` on the tool's resource; on ALLOW the gateway checks the
+arguments and adds the exact call to the run's drafted list, ``app-drafts.json`` beside the log, at most
+``MAX_DRAFTS`` calls, and sends nothing. The harness does not run.
+
 A ``decision`` and a ``bound`` entry name the tool's ``kind``, and a ``decision`` the digest of the call's arguments
 (``arguments_sha256``), never the arguments: ``collect`` records each call as one ``harness.<kind>`` record from them
 (Amendment 030).
@@ -90,6 +96,16 @@ CAN_PRODUCE = ("audit_record",)
 IMPLICATES = ("external_exposure",)  # every harness call reaches a service outside the pipeline
 APP_CLASS = "app"
 SERVED_KINDS = ("read", "write")  # the agent's gateway: never send or delete (Proposal C)
+# Drafting (Amendment 031): a send, a delete or a drafted write is served to an agent as a draft tool, decided by the
+# fabric as DRAFT_ACTION. Its call is added to the run's drafted list, DRAFTS_FILE, and nothing is sent.
+DRAFT_ACTION = "app.draft"
+DRAFTS_FILE = "app-drafts.json"
+DRAFTS_SCHEMA = "app-drafts-v1"
+DRAFT_FIELDS = frozenset({"schema", "mission", "session", "calls"})
+CALL_FIELDS = frozenset({"app", "tool", "kind", "action", "resource", "arguments"})
+MAX_DRAFTS = 20  # per run
+MAX_DRAFT_ARGUMENTS = 2000  # characters of a drafted call's arguments as JSON, so HITL reads every call whole
+DRAFT_NOTE = "Drafts this call for HITL; it is not made, and nothing is sent until HITL performs the run's list. "
 SESSION_STOP = 13
 KNOWN_SECRET_ENV = ("MISSION_RUN_CANARY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_API_KEY")
 
@@ -128,9 +144,10 @@ class AppTool:
     kind: str
     resource: str
     input_schema: dict
+    performs: str = ""  # a draft tool's own action (app.send, app.delete or app.write); "" for a served tool
 
     def listing(self) -> dict:
-        return {"name": self.name, "description": self.description,
+        return {"name": self.name, "description": (DRAFT_NOTE if self.performs else "") + self.description,
                 "inputSchema": json.loads(json.dumps(self.input_schema))}
 
 
@@ -201,22 +218,25 @@ def load_catalog(path: Any, policy: Mapping, register: Mapping) -> List[AppTool]
         action = entry["action"]
         if not isinstance(action, str) or action not in app_class["read"] + app_class["mutation"]:
             raise GatewayError(f"{where}: action {action!r} is not an action of the fabric's app class")
+        if action == DRAFT_ACTION:
+            raise GatewayError(f"{where}: {DRAFT_ACTION} is the drafting action, not a tool's own")
         kind = policy["actions"][action]["kind"]
-        if kind not in SERVED_KINDS:
-            raise GatewayError(f"{where}: action {action!r} is of kind {kind!r}; no agent sends or deletes")
         if kind not in app["classes"]:
             raise GatewayError(f"{where}: app {entry['app']!r} does not list the {kind!r} class")
-        if kind == "write" and app["writes"] != "direct":
-            raise GatewayError(f"{where}: app {entry['app']!r} has drafted writes; an agent does not perform them")
+        # Proposal C: no agent sends, deletes or makes a drafted write. Such a tool is served as a draft tool.
+        drafted = kind not in SERVED_KINDS or (kind == "write" and app["writes"] != "direct")
+        if drafted and DRAFT_ACTION not in app_class["mutation"]:
+            raise GatewayError(f"{where}: the fabric has no {DRAFT_ACTION!r} action to draft {action!r} with")
         resource = entry["resource"]
         res = policy["resources"].get(resource) if isinstance(resource, str) else None
         if res is None or res["class"] != APP_CLASS:
             raise GatewayError(f"{where}: resource {resource!r} is not an app resource known to policy")
         if resource not in app["resources"]:
             raise GatewayError(f"{where}: resource {resource!r} is not one of app {entry['app']!r}'s")
-        tools.append(AppTool(name=name, description=entry["description"], app=entry["app"], action=action,
-                             kind=kind, resource=resource,
-                             input_schema=_check_input_schema(entry["input_schema"], where)))
+        tools.append(AppTool(name=name, description=entry["description"], app=entry["app"],
+                             action=DRAFT_ACTION if drafted else action, kind=kind, resource=resource,
+                             input_schema=_check_input_schema(entry["input_schema"], where),
+                             performs=action if drafted else ""))
     return tools
 
 
@@ -226,6 +246,49 @@ def catalog_digest(path: Any) -> str:
         return signing.sha256_hex(signing.canonical_bytes(json.loads(Path(path).read_text(encoding="utf-8"))))
     except (OSError, UnicodeDecodeError, ValueError, TypeError, RecursionError, signing.CanonicalError) as exc:
         raise GatewayError(f"app catalog has no canonical form: {exc}") from None
+
+
+def drafts_digest(doc: Mapping) -> str:
+    """The digest of a drafted list: the SHA-256 of its canonical JSON. HITL's command names it (Amendment 031)."""
+    return signing.sha256_hex(signing.canonical_bytes(doc))
+
+
+def check_drafts(doc: object) -> List[str]:
+    """What makes ``doc`` not a well-formed drafted list; empty when it is one."""
+    if not (isinstance(doc, dict) and set(doc) == DRAFT_FIELDS and doc["schema"] == DRAFTS_SCHEMA):
+        return [f"a drafted list must be {DRAFTS_SCHEMA!r} with exactly {sorted(DRAFT_FIELDS)}"]
+    out = []
+    if not (isinstance(doc["mission"], str) and doc["mission"] and isinstance(doc["session"], str) and doc["session"]):
+        out.append("a drafted list names its mission and session")
+    calls = doc["calls"]
+    if not (isinstance(calls, list) and 0 < len(calls) <= MAX_DRAFTS):
+        return out + [f"a drafted list holds 1 to {MAX_DRAFTS} calls"]
+    for n, call in enumerate(calls, 1):
+        if not (isinstance(call, dict) and set(call) == CALL_FIELDS
+                and all(isinstance(call[k], str) and call[k] for k in CALL_FIELDS - {"arguments"})
+                and isinstance(call["arguments"], dict)
+                and all(isinstance(k, str) and isinstance(v, str) for k, v in call["arguments"].items())):
+            out.append(f"call {n} must have exactly {sorted(CALL_FIELDS)}, its arguments plain strings")
+        elif call["action"] not in ("app.send", "app.delete", "app.write") or call["kind"] != call["action"][4:]:
+            out.append(f"call {n}: a drafted call is a send, a delete or a write, of its action's kind")
+        elif len(json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False)) > MAX_DRAFT_ARGUMENTS:
+            out.append(f"call {n}: its arguments are longer than {MAX_DRAFT_ARGUMENTS} characters")
+    return out
+
+
+def read_drafts(path: Any) -> Tuple[dict, str]:
+    """A drafted list file and its digest; ``GatewayError`` when it is a link, unreadable or malformed."""
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise GatewayError("the drafted list is not a regular file")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise GatewayError(f"the drafted list is unreadable or not JSON: {exc}") from None
+    found = check_drafts(doc)
+    if found:
+        raise GatewayError("; ".join(found))
+    return doc, drafts_digest(doc)
 
 
 def arguments_digest(arguments: object) -> str:
@@ -392,6 +455,19 @@ class AppGateway:
             self.session_problem = str(exc)
         self._calls = 0
         self._app_calls: dict = {}
+        # The run's drafted list (Amendment 031), beside the log. A gateway started again in the same session keeps
+        # the list it finds; any other list there, or a malformed one, refuses every draft.
+        self.drafts_path = evidence / DRAFTS_FILE
+        self._drafts: List[dict] = []
+        self.drafts_problem: Optional[str] = None
+        if self.drafts_path.exists() or self.drafts_path.is_symlink():
+            try:
+                found, _ = read_drafts(self.drafts_path)
+                if self.session is None or found["session"] != self.session.session_id:
+                    raise GatewayError("the drafted list there is another session's")
+                self._drafts = list(found["calls"])
+            except GatewayError as exc:
+                self.drafts_problem = str(exc)
         # The app endpoint (Amendment 028): its port and this run's stand-in, written by run_agent before the runtime
         # started. A harness reaches its app only through it (_harness_request); while it is missing or malformed,
         # the gateway still starts, and no harness request could leave.
@@ -520,7 +596,7 @@ class AppGateway:
             request, decision = self.evaluate(tool, capabilities, now, request_id)
             self._append({"entry": "decision", "request_id": request_id, "tool": tool.name, "app": tool.app,
                           "kind": tool.kind, "arguments_sha256": arguments_digest(arguments),
-                          "mission": self._mission(),
+                          "draft": bool(tool.performs), "mission": self._mission(),
                           "session": self.session.session_id if self.session else None,
                           "request": request, "record": decision.record,
                           "link": auth_records.link_material(decision.record)})
@@ -531,6 +607,8 @@ class AppGateway:
         problem = argument_problem(tool.input_schema, arguments)
         if problem:
             raise protocol.RpcError(protocol.INVALID_PARAMS, f"invalid params: {problem}")
+        if tool.performs:
+            return self._draft(request_id, tool, arguments, decision, now)
         harness, harness_sha, run, problem = (None, None, None, None) if self.runner else self.harnesses[tool.app]
         if problem:
             try:
@@ -569,6 +647,51 @@ class AppGateway:
         grant = decision.record["answers"]["sot_authority"]["grant"]
         structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name, "app": tool.app,
                       "grant": grant["id"], "result": held.text}
+        return self._admitted(request_id, tool, structured, now)
+
+    def _draft(self, request_id: str, tool: AppTool, arguments: Mapping, decision: decide.Decision, now: int) -> dict:
+        """Add the exact call to the run's drafted list (Amendment 031). Nothing is sent and the harness does not
+        run: the perform step makes the call only after HITL's command names the list's digest."""
+        call = {"app": tool.app, "tool": tool.name, "kind": tool.kind, "action": tool.performs,
+                "resource": tool.resource, "arguments": dict(arguments)}
+        text = json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False)
+        problem = self.drafts_problem
+        if problem is None and len(self._drafts) >= MAX_DRAFTS:
+            problem = f"a run drafts at most {MAX_DRAFTS} calls"
+        if problem is None and len(text) > MAX_DRAFT_ARGUMENTS:
+            problem = f"a drafted call's arguments are at most {MAX_DRAFT_ARGUMENTS} characters"
+        if problem is None:
+            admitted = boundary.admit_context(text, self.known)
+            if not admitted.allow or admitted.text != text:
+                problem = "the secrets boundary found a secret in the arguments; nothing is drafted"
+        if problem is None and self.session is None:
+            problem = "no session"
+        if problem is None:
+            doc = {"schema": DRAFTS_SCHEMA, "mission": self.session.mission_id, "session": self.session.session_id,
+                   "calls": self._drafts + [call]}
+            try:
+                partial = self.drafts_path.with_name(DRAFTS_FILE + ".part")
+                partial.write_text(json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=False) + "\n",
+                                   encoding="utf-8")
+                os.replace(partial, self.drafts_path)
+            except OSError:
+                problem = "the drafted list cannot be written"
+        try:
+            if problem is not None:
+                self._append({"entry": "draft_refused", "request_id": request_id, "tool": tool.name,
+                              "app": tool.app, "mission": self._mission(), "reason": problem})
+                return _refused(request_id, tool.name, problem)
+            self._drafts.append(call)
+            self._append({"entry": "draft", "request_id": request_id, "tool": tool.name, "app": tool.app,
+                          "mission": self._mission(), "index": len(self._drafts),
+                          "drafts_sha256": drafts_digest(doc)})
+        except OSError:
+            return _refused(request_id, tool.name, "the evidence log cannot be written")
+        grant = decision.record["answers"]["sot_authority"]["grant"]
+        note = (f"Drafted as call {len(self._drafts)} of this run's list. Nothing was sent: HITL performs the "
+                "list only by a command naming its digest.")
+        structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name, "app": tool.app,
+                      "grant": grant["id"], "drafted": len(self._drafts), "result": note}
         return self._admitted(request_id, tool, structured, now)
 
     def _harness_request(self, tool: AppTool, sent: List[int]) -> Callable[..., Tuple[int, str]]:

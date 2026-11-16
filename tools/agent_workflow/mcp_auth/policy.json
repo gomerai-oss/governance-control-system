@@ -1,6 +1,6 @@
 {
   "schema": "mcp-auth-policy-v1",
-  "policy_version": "MCP-AUTH-POLICY-2026-11-15.1",
+  "policy_version": "MCP-AUTH-POLICY-2026-11-16.1",
   "session": {
     "max_ttl_seconds": 3600
   },
@@ -24,7 +24,8 @@
     "app.read": {"kind": "read"},
     "app.write": {"kind": "write"},
     "app.send": {"kind": "send"},
-    "app.delete": {"kind": "delete"}
+    "app.delete": {"kind": "delete"},
+    "app.draft": {"kind": "write"}
   },
   "classes": {
     "rag": {
@@ -37,7 +38,7 @@
     },
     "app": {
       "read": ["app.read"],
-      "mutation": ["app.write", "app.send", "app.delete"]
+      "mutation": ["app.write", "app.send", "app.delete", "app.draft"]
     }
   },
   "authority_refs": {

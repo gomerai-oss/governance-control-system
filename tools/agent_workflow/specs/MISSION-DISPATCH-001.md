@@ -197,6 +197,14 @@ arguments' digests as inputs and the result's digest as output. Nothing an agent
 empty and `"app_gateway"` is off, so there is no app gateway log to record. §3p items 27 to 30; vectors 167 to 171;
 §7 item 41.
 
+**Amendment 031 (2026-11-16, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 5a; APP-CONTROL-HARNESS-SPEC-001 as
+revised 2026-11-16):** drafting. A send, a delete or a drafted write is served to an agent only as a draft tool,
+decided by the fabric as a new action, `app.draft`, and its exact call is added to the run's drafted list. `collect`
+keeps the list and records each draft as `harness.draft`; `report` posts the list on the tracking issue with its
+digest and the command that would perform it. Nothing is performed: the command, the perform step and its job are
+part 5b's. Nothing an agent can do changes: the shipped policy grants `app.draft` to no role, no matrix row admits
+`app_draft`, the app catalog is empty and `"app_gateway"` is off. §3p items 31 to 37; vectors 172 to 181; §7 item 42.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1278,9 +1286,9 @@ on" below).
      - `run` records the agent log and the egress log by digest.
      - `collect` records the patch, the message, the secrets-boundary record, the gateway's log and the egress log
        by digest. It then writes one `gateway.tool` record per gateway decision or refusal, one `harness.<kind>`
-       record per app gateway call (Amendment 030, §3p item 29), and one `dispatch.egress` record per egress
-       decision, each holding its log line's digest, up to 2,000 per log; past
-       that, one record gives the count and the whole log's digest.
+       record per app gateway call (Amendment 030, §3p item 29; a draft as `harness.draft`, Amendment 031), and
+       one `dispatch.egress` record per egress decision, each holding its log line's digest, up to 2,000 per log;
+       past that, one record gives the count and the whole log's digest.
      - `publish` is recorded as the agent's App, with its PR number and its commit's digest.
      - `report` records its comment's digest.
      - The checks job writes one `checks.check` per check, with its exit code.
@@ -1679,7 +1687,7 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
-### 3p. The app-control harness (Amendments 026, 027, 028, 029 and 030)
+### 3p. The app-control harness (Amendments 026 to 031)
 
 **What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
 server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
@@ -1889,6 +1897,48 @@ Part 4 (Amendment 030): the harness evidence actions and the `delete` class.
       whole log's digest. If `collect` refused before keeping the log, the gateway's own folder is read.
 30. **Drafted sends and deletes** are recorded when drafted, and performing them by the send-and-delete step, with
     HITL's command as its authority: both are part 5's. Nothing in part 4 performs a send or a delete.
+
+Part 5a (Amendment 031): drafting, the drafted list, and its report.
+
+31. **The drafting action and capability.** The fabric's `app` class gains `app.draft` (kind `write`) in its
+    `mutation` list (`mcp_auth/policy.json`, `MCP-AUTH-POLICY-2026-11-16.1`). It is granted per role and resource
+    like any mutation, with an evidence obligation; the shipped policy grants it to no role. The matrix gains
+    `app_draft` (class `write`, `tool_selection/matrix.json`, `doctrine-s4-v4`): no row admits it, and the reviewer
+    and router rows block it, so only the writer row could.
+32. **Draft tools** (`mcp_gateway/app_gateway.py` `load_catalog`). A catalog tool whose action is `app.send` or
+    `app.delete`, or `app.write` for an app whose register entry marks writes `drafted`, is served to an agent as a
+    draft tool: same name and arguments, its description prefixed with `DRAFT_NOTE`, and decided by the fabric as
+    `app.draft` on its own resource. `app.draft` is no tool's own action. A policy without `app.draft` refuses such a
+    catalog, so the gateway does not start.
+33. **A draft tool's call** (`AppGateway._draft`). On ALLOW, and once the arguments pass the tool's schema, the
+    gateway adds the exact call (`app`, `tool`, `kind`, `action`, `resource`, `arguments`) to the run's drafted list,
+    `app-drafts.json` beside its log, written whole each time (`app-drafts-v1`: `schema`, `mission`, `session`,
+    `calls`). Nothing is sent, and the harness does not run. It refuses, and logs `draft_refused`:
+    - a 21st call (`MAX_DRAFTS`);
+    - arguments longer than 2,000 characters as JSON, so that HITL reads every call whole;
+    - arguments in which the secrets boundary finds a secret, so no secret is ever drafted or posted;
+    - while the folder holds another session's list, or a malformed one, which it leaves as it is.
+
+    A gateway started again in the same session keeps that session's list. A draft is logged as `draft`, with the
+    call's place in the list and the list's digest, and its `decision` entry names `"draft": true`.
+34. **The list's digest** is the SHA-256 of its canonical JSON (`app_gateway.drafts_digest`).
+    `app_gateway.read_drafts` refuses a link, and `check_drafts` a list that is not exactly the schema, holds no call
+    or more than 20, a call that is not a send, delete or write of its action's kind, an argument that is not text,
+    or arguments over the limit.
+35. **`collect` keeps and records it** (`binding.keep_evidence`, `mission_dispatch/__main__.py`). The list is kept as
+    `binding/app-drafts.json` when it is a regular file under the cap, never a link, and `collect` records it by
+    digest. Each draft tool's call is one `harness.draft` record (`write`, `evidence/record.py`): done when drafted,
+    refused when the fabric denied it or the gateway refused to draft it.
+36. **The agent job keeps the list for 90 days**, as the artifact `drafts-<mission>-<role>-r<round>`, apart from the
+    change, which is kept for 7 (`.github/workflows/mission-agent.yml`).
+37. **`report` posts the list** (`mission_dispatch/__main__.py` `post_drafts`, `drafts_comment`). The report job
+    fetches the artifact and passes it with `--drafts`. For a well-formed list, `report` posts one comment on the
+    mission's tracking issue, whatever else it reports: a hidden marker naming the digest, the run, the mission,
+    the role and the round; each call's action, tool, app and resource; its arguments as JSON with every non-ASCII
+    character and backtick escaped, in a quarantined block (§3j), so what HITL reads is exactly what would be
+    performed and a `/mission` line in it is broken; and the command `/mission perform <digest>`. A malformed list is
+    reported as malformed and not posted. `report`'s record holds both comments' digests and the list's.
+    Nothing reads that command yet: part 5b's perform step does.
 
 ## 4. Failures
 
@@ -2125,6 +2175,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     process (item 40) and could write that log. The egress proxy's app lines, recorded as `dispatch.egress`
     (Amendment 028), are written by another process and show every request that reached an app; they are the check
     that does not depend on the app gateway's log.
+42. **The drafted list is written by the app gateway's process (Amendment 031),** so a harness hostile by design
+    could change it (item 40). It is not a record of what the agent asked for; it is what HITL is shown. HITL reads
+    the posted list before naming its digest, and the perform step (part 5b) performs only the list of that digest.
+    A draft whose log line cannot be written after the list was written stays in the list, and the agent is told it
+    was refused; HITL sees it in the list.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2296,3 +2351,13 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 169 | Calls ending in a result, a DENY, a bound, an unknown tool, a harness not run, a failed harness, no ending, a withheld result; each kind; a malformed digest | One record each: done, refused, refused, `harness.refusal`, refused, failed, failed, refused; `harness.<kind>` of its class; the digest left out |
 | 170 | `collect` with both logs; only the gateway's folder; more calls than the limit | `gateway.tool` and `harness.*` records that verify against the files; the folder read; one count record |
 | 171 | An app gateway call | The `decision` names the kind and the arguments' digest, never the arguments; one done `harness.read` record with the result's digest |
+| 172 | The shipped policy and matrix; `app_draft` admitted by the writer row; by the reviewer row | `app.draft` (`write`) granted to no role; `app_draft` (`write`) admitted nowhere, blocked by the reviewer and router rows; validates; refused |
+| 173 | A send, a delete, a drafted write; `app.draft` as a tool's own action; a policy without `app.draft`; a draft tool granted and not granted | Each served as a draft tool, decided as `app.draft`; refused; refused; listed with `DRAFT_NOTE` only where granted |
+| 174 | A draft tool's call; two in order; without a grant; a read tool | The exact call in `app-drafts.json`, nothing sent, the harness not run, logged `decision` (`draft`), `draft`, `boundary`; kept in order; DENY and no list; the harness runs as before |
+| 175 | A 21st draft; arguments over 2,000 characters; a known secret; another session's list or a malformed one | Each refused and logged `draft_refused`; the secret in no file; the other list left as it was |
+| 176 | The gateway started again in the same session | The list kept and added to |
+| 177 | A drafted list; one with another field, no calls, 21 calls, a read, a draft, a kind not the action's, an argument not text, long arguments, no session; a link | Read, with the canonical digest; each refused |
+| 178 | `collect` with a drafted list and draft entries; a linked list | Kept and recorded by digest, `harness.draft` (`write`) done or refused, verified against the files; the link not kept |
+| 179 | `report` with a list holding a backtick, a `/mission perform` line and a hidden character; no list; a malformed list; nothing else to report | One comment: the marker, each call, the arguments escaped, the only command the list's own; nothing posted; reported malformed, no command; the list still posted |
+| 180 | The workflow | The agent job keeps `drafts-…` for 90 days; the report job fetches it and passes `--drafts` |
+| 181 | The router | Byte-identical; it matches no `/mission perform` |

@@ -53,6 +53,7 @@ APP_GATEWAY_SERVER = "governed-apps"
 APP_GATEWAY_MODULE = "mcp_gateway.app_gateway"
 APP_EVIDENCE_DIR = "app-evidence"  # under the binding folder, beside the retrieval gateway's evidence folder
 APP_DECISIONS_OUT = "app-decisions.jsonl"  # the app gateway's log as collect keeps it, in OUT_DIR (Amendment 030)
+APP_DRAFTS_OUT = "app-drafts.json"  # the run's drafted list as collect keeps it, in OUT_DIR (Amendment 031)
 # Where run_agent tells the app gateway the app endpoint's port and the run's stand-in (Amendment 028): written once
 # the proxy listens, before the runtime starts; it holds no key.
 APP_ENDPOINT_FILE = "app-endpoint.json"
@@ -327,6 +328,10 @@ def keep_evidence(root: Path, out_dir: Path) -> dict:
     if (src / APP_EVIDENCE_DIR).is_dir():
         lines, cut = _keep_log(src / APP_EVIDENCE_DIR, dest / APP_DECISIONS_OUT)
         kept.update(app_evidence_lines=lines, app_evidence_truncated=cut)
+        drafts = src / APP_EVIDENCE_DIR / APP_DRAFTS_OUT  # the app gateway's DRAFTS_FILE
+        if drafts.is_file() and not drafts.is_symlink() and drafts.stat().st_size <= EVIDENCE_MAX_BYTES:
+            shutil.copyfile(drafts, dest / APP_DRAFTS_OUT)
+            kept["app_drafts"] = True
     return kept
 
 
