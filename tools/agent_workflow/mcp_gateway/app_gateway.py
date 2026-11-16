@@ -23,19 +23,34 @@ agent-writable checkout:
 Every call is decided by the fabric with the truth about it: the connector holds no credential (the egress proxy
 holds each app's key, §4.2), and every call implicates ``external_exposure``, because it reaches a service outside
 the pipeline. A call over the run's bounds (the register's ``bounds``, or the app's own lower ones) is refused before
-the fabric is asked. On ALLOW the tool's harness runs; until build part 3 pins harnesses, none exists, and an allowed
-call returns a refusal that says so. A harness's result passes ``quarantine.quarantine``, labelled with the app and
-the tool, and then the secrets boundary, before the agent reads it (§4.4).
+the fabric is asked. On ALLOW the tool's harness runs. A harness's result passes ``quarantine.quarantine``, labelled
+with the app and the tool, and then the secrets boundary, before the agent reads it (§4.4).
+
+**Harnesses** (§3p, Amendment 029). A harness is pinned before its tools enter the catalog: the gateway refuses to
+start if a catalog tool's app has no harness in the ``harnesses`` section of ``credentials_check/pins.json``
+(``mission_dispatch.supply_chain``), read from the gateway's own tree. At start it reads each such harness's file,
+``mcp_gateway/harnesses/<name>.py`` in the same tree, once. The file must match its pin's SHA-256 and import only
+``HARNESS_IMPORTS``. The gateway then runs exactly the bytes it checked, never a fresh import of the path. A harness
+that fails any of these is not run: its tools' calls are refused, and each refusal is logged as ``harness``. A
+harness defines ``run(tool, arguments, request) -> str``. ``request(method, host, path, query="", body=None)`` is
+its only way to its app: the gateway lets through only a request the app register lists for the app, of the
+calling tool's own class, to one of the app's hosts, at most ``MAX_HARNESS_REQUESTS`` per call, and sends it to the
+app endpoint (Amendment 028) with the run's stand-in, which the harness is not given. The import list catches a plain
+mistake, not a hostile harness: the harness runs in the gateway's process, so the independent review its pin
+records is what admits it (APP-CONTROL-HARNESS-SPEC-001 §4.5).
 
 Each line of ``app-decisions.jsonl`` in the evidence directory is one JSON object with an ``entry`` field:
-``decision``, ``refusal`` (a tool not in the catalog), ``bound`` (a call over the run's bounds), ``result`` and
-``result_error`` (after an ALLOW), ``boundary``, and ``catalog_pin`` (``"observe"`` only). The directory is the
+``decision``, ``refusal`` (a tool not in the catalog), ``bound`` (a call over the run's bounds), ``harness`` (a
+harness that is not run), ``result`` and ``result_error`` (after an ALLOW), ``boundary``, and ``catalog_pin``
+(``"observe"`` only). The directory is the
 app gateway's own, never the retrieval gateway's, so ``collect`` never records a harness call as a retrieval call.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import http.client
 import json
 import os
 import re
@@ -46,6 +61,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Tuple
 
+from egress import proxy as egress_proxy
 from epap import signing
 from mcp_auth import decide
 from mcp_auth import policy as P
@@ -53,6 +69,7 @@ from mcp_auth import records as auth_records
 from mcp_gateway import protocol
 from mcp_gateway import session as session_mod
 from mission_dispatch import quarantine
+from mission_dispatch import supply_chain
 from secrets_boundary import detector as boundary_detector
 from secrets_boundary import gate as boundary
 from secrets_boundary import records as boundary_records
@@ -62,6 +79,8 @@ SERVER_NAME = "governed-apps"
 SERVER_VERSION = "APP-CONTROL-HARNESS-SPEC-001"
 CATALOG_SCHEMA = "mcp-app-gateway-tools-v1"
 DEFAULT_CATALOG = Path(__file__).resolve().with_name("app_tools.json")
+TOOLING = Path(__file__).resolve().parents[1]  # the gateway's own tree: its pins table and harness files
+DEFAULT_PINS = TOOLING / supply_chain.PINS_TABLE
 DECISIONS_FILE = "app-decisions.jsonl"
 CONNECTOR_ID = SERVER_NAME
 CAN_PRODUCE = ("audit_record",)
@@ -78,11 +97,23 @@ _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_RESULT_CHARS = 64 * 1024  # the most of one result the quarantine passes on
 
-Runner = Callable[["AppTool", Mapping[str, str]], str]
+# The modules a harness may import (Amendment 029): none reaches the network, a file or a process.
+HARNESS_IMPORTS = frozenset({"__future__", "json", "re", "typing", "dataclasses", "datetime", "urllib.parse", "html",
+                             "string"})
+MAX_HARNESS_REQUESTS = 20  # per tool call
+MAX_HARNESS_BODY = 1024 * 1024  # the proxy's own cap (egress/proxy.py MAX_APP_BODY)
+MAX_HARNESS_ANSWER = 1024 * 1024
+HARNESS_TIMEOUT = 60
+
+Runner = Callable[["AppTool", Mapping[str, str]], str]  # a test's stand-in for a pinned harness
 
 
 class GatewayError(RuntimeError):
     """The app gateway refuses to start."""
+
+
+class HarnessError(RuntimeError):
+    """A harness's request the gateway does not send, or an endpoint that did not answer."""
 
 
 @dataclass(frozen=True)
@@ -216,6 +247,56 @@ def argument_problem(schema: Mapping, arguments: Any) -> Optional[str]:
     return None
 
 
+# -- harnesses ------------------------------------------------------------
+
+
+def harness_import_problem(tree: ast.AST) -> Optional[str]:
+    """Why a harness's imports are refused, or None: only ``HARNESS_IMPORTS``, never a relative import."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                return "it makes a relative import"
+            names = [node.module or ""]
+        else:
+            continue
+        for name in names:
+            if name not in HARNESS_IMPORTS:
+                return f"it imports {name!r}"
+    return None
+
+
+def load_harness(tooling: Path, name: str, row: Mapping) -> Tuple[Optional[Callable], Optional[str]]:
+    """``(run, None)`` for the pinned harness ``name``, or ``(None, why it is not run)``. The file is read once; what
+    runs is the bytes whose digest matched the pin."""
+    path = supply_chain.harness_path(tooling, name)
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None, f"harness {name!r} has no file"
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, f"harness {name!r} is unreadable ({type(exc).__name__})"
+    if supply_chain.file_sha256(data) != row["sha256"]:
+        return None, f"harness {name!r} does not match its pin"
+    try:
+        tree = ast.parse(data, filename=str(path))
+    except (SyntaxError, ValueError):
+        return None, f"harness {name!r} does not parse"
+    problem = harness_import_problem(tree)
+    if problem:
+        return None, f"harness {name!r} is refused: {problem}"
+    namespace: dict = {"__name__": f"mcp_gateway.harnesses.{name}", "__file__": str(path)}
+    try:
+        exec(compile(tree, str(path), "exec"), namespace)  # noqa: S102 -- the pinned, reviewed bytes only
+    except (Exception, SystemExit) as exc:  # fail closed: a harness that cannot load is not run
+        return None, f"harness {name!r} failed to load ({type(exc).__name__})"
+    run = namespace.get("run")
+    if not callable(run):
+        return None, f"harness {name!r} defines no run(tool, arguments, request)"
+    return run, None
+
+
 # -- the gateway ---------------------------------------------------------
 
 
@@ -246,7 +327,8 @@ class AppGateway:
     def __init__(self, root: Any, session_path: Any, evidence_dir: Any, *,
                  policy_path: Any = P.DEFAULT_PATH, catalog_path: Any = DEFAULT_CATALOG,
                  register_path: Any = apps_mod.DEFAULT_PATH, clock: Optional[Callable[[], int]] = None,
-                 runner: Optional[Runner] = None, endpoint_path: Any = None):
+                 runner: Optional[Runner] = None, endpoint_path: Any = None, pins_path: Any = DEFAULT_PINS,
+                 tooling: Any = TOOLING):
         self.root = Path(root)
         if not self.root.is_dir():
             raise GatewayError("--root is not a directory")
@@ -261,7 +343,7 @@ class AppGateway:
                            if len(v) >= boundary_detector.MIN_KNOWN)
         self.clock = clock or (lambda: int(time.time()))
         self.started = self.clock()
-        self.runner = runner  # build part 3 pins harnesses; until then no tool has one
+        self.runner = runner  # tests only: stands in for every pinned harness
         try:
             self.shipped_policy = P.load_file(Path(policy_path))
         except P.PolicyError as exc:
@@ -273,6 +355,22 @@ class AppGateway:
         check_register(self.shipped_policy, self.register)
         self.tools = load_catalog(catalog_path, self.shipped_policy, self.register)
         self._by_name = {t.name: t for t in self.tools}
+        try:
+            pinned = supply_chain.read_pins(Path(pins_path))["harnesses"]
+        except (OSError, supply_chain.SupplyChainError) as exc:
+            raise GatewayError(f"the pins table is unavailable or malformed: {exc}") from None
+        by_app = {row["app"]: (name, row) for name, row in pinned.items()}
+        for t in self.tools:
+            if t.app not in by_app:
+                raise GatewayError(f"tool {t.name!r}: app {t.app!r} has no pinned harness; a harness is pinned before "
+                                   "its tools enter the catalog")
+        self.routes = egress_proxy.load_app_routes(self.register)
+        # app -> (harness name, its pinned SHA-256, run or None, why it is not run)
+        self.harnesses: dict = {}
+        for app in sorted({t.app for t in self.tools}):
+            name, row = by_app[app]
+            run, problem = load_harness(Path(tooling), name, row)
+            self.harnesses[app] = (name, row["sha256"], run, problem)
         self.session: Optional[session_mod.Session] = None
         self.policy: Optional[dict] = None
         self.session_problem: Optional[str] = None
@@ -285,8 +383,8 @@ class AppGateway:
         self._calls = 0
         self._app_calls: dict = {}
         # The app endpoint (Amendment 028): its port and this run's stand-in, written by run_agent before the runtime
-        # started. A harness reaches its app only through it (build part 3); while it is missing or malformed, the
-        # gateway still starts, and no harness call could leave.
+        # started. A harness reaches its app only through it (_harness_request); while it is missing or malformed,
+        # the gateway still starts, and no harness request could leave.
         self.endpoint, self.endpoint_problem = read_endpoint(endpoint_path, self.root)
         if self.session is not None and self.session.app_catalog_sha256:
             loaded = catalog_digest(catalog_path)
@@ -421,23 +519,38 @@ class AppGateway:
         problem = argument_problem(tool.input_schema, arguments)
         if problem:
             raise protocol.RpcError(protocol.INVALID_PARAMS, f"invalid params: {problem}")
-        if self.runner is None:
-            return _refused(request_id, tool.name, f"no harness is pinned for {tool.name!r}")
+        harness, harness_sha, run, problem = (None, None, None, None) if self.runner else self.harnesses[tool.app]
+        if problem:
+            try:
+                self._append({"entry": "harness", "request_id": request_id, "tool": tool.name, "app": tool.app,
+                              "mission": self._mission(), "harness": harness, "reason": problem})
+            except OSError:
+                pass
+            return _refused(request_id, tool.name, problem)
+        sent = [0]
         try:
-            text = self.runner(tool, dict(arguments))
+            if self.runner is not None:
+                text = self.runner(tool, dict(arguments))
+            else:
+                text = run(tool.name, dict(arguments), self._harness_request(tool, sent))
             if not isinstance(text, str):
                 raise TypeError("a harness result must be text")
-        except Exception as exc:  # fail closed: a harness defect returns nothing
+        except (Exception, SystemExit) as exc:  # fail closed: a harness defect returns nothing
+            entry = {"entry": "result_error", "request_id": request_id, "tool": tool.name, "app": tool.app,
+                     "mission": self._mission(), "harness": harness, "requests": sent[0],
+                     "reason": type(exc).__name__}
+            if isinstance(exc, HarnessError):
+                entry["detail"] = str(exc)  # the gateway's own words, never the app's
             try:
-                self._append({"entry": "result_error", "request_id": request_id, "tool": tool.name, "app": tool.app,
-                              "mission": self._mission(), "reason": type(exc).__name__})
+                self._append(entry)
             except OSError:
                 pass
             return _refused(request_id, tool.name, f"the harness failed ({type(exc).__name__})")
         held = quarantine.quarantine(text, f"app {tool.app}", f"harness tool {tool.name}", MAX_RESULT_CHARS)
         try:
             self._append({"entry": "result", "request_id": request_id, "tool": tool.name, "app": tool.app,
-                          "mission": self._mission(), "result_sha256": signing.sha256_hex(text.encode("utf-8")),
+                          "mission": self._mission(), "harness": harness, "harness_sha256": harness_sha,
+                          "requests": sent[0], "result_sha256": signing.sha256_hex(text.encode("utf-8")),
                           "steering_lines": len(held.hits), "hidden_removed": held.removed, "cut": held.cut})
         except OSError:
             return _refused(request_id, tool.name, "the evidence log cannot be written; the result is withheld")
@@ -445,6 +558,53 @@ class AppGateway:
         structured = {"disposition": decide.ALLOW, "request_id": request_id, "tool": tool.name, "app": tool.app,
                       "grant": grant["id"], "result": held.text}
         return self._admitted(request_id, tool, structured, now)
+
+    def _harness_request(self, tool: AppTool, sent: List[int]) -> Callable[..., Tuple[int, str]]:
+        """The one way a harness reaches its app, for one call of ``tool``: ``request(method, host, path, query="",
+        body=None) -> (status, text)``. Only a request the register lists for the tool's app, of the tool's own
+        class, to one of the app's hosts, is sent, to the app endpoint with the run's stand-in."""
+        route = self.routes[tool.app]
+
+        def request(method: str, host: str, path: str, query: str = "", body: Optional[str] = None) -> Tuple[int, str]:
+            if sent[0] >= MAX_HARNESS_REQUESTS:
+                raise HarnessError(f"a call makes at most {MAX_HARNESS_REQUESTS} requests")
+            if not (all(isinstance(v, str) for v in (method, host, path, query))
+                    and (body is None or isinstance(body, str)) and path.startswith("/")):
+                raise HarnessError("method, host, path and query must be text, the path starting with /")
+            if host not in route.hosts:
+                raise HarnessError("that host is not listed for the app")
+            found = route.match(method, path)
+            if found is None:
+                raise HarnessError(f"{method} is not a listed request of the app")
+            if found[1] != tool.kind:
+                raise HarnessError(f"a {tool.kind} tool makes only {tool.kind} requests, not {found[1]}")
+            if self.endpoint is None:
+                raise HarnessError(f"no app endpoint in this run ({self.endpoint_problem})")
+            payload = b"" if body is None else body.encode("utf-8")
+            if len(payload) > MAX_HARNESS_BODY:
+                raise HarnessError(f"the request is larger than {MAX_HARNESS_BODY} bytes")
+            port, standin = self.endpoint
+            headers = {"Host": f"127.0.0.1:{port}", "Authorization": f"Bearer {standin}",
+                       "Content-Length": str(len(payload))}
+            if body is not None:
+                headers["Content-Type"] = "application/json; charset=utf-8"
+            sent[0] += 1
+            target = f"{egress_proxy.APP_PREFIX}/{tool.app}/{host}{path}" + (f"?{query}" if query else "")
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=HARNESS_TIMEOUT)
+            try:
+                connection.request(method, target, body=payload, headers=headers)
+                answer = connection.getresponse()
+                data = answer.read(MAX_HARNESS_ANSWER + 1)
+                status = answer.status
+            except (OSError, http.client.HTTPException) as exc:
+                raise HarnessError(f"the app endpoint did not answer ({type(exc).__name__})") from None
+            finally:
+                connection.close()
+            if len(data) > MAX_HARNESS_ANSWER:
+                raise HarnessError(f"the answer is larger than {MAX_HARNESS_ANSWER} bytes")
+            return status, data.decode("utf-8", "replace")
+
+        return request
 
     def _admitted(self, request_id: str, tool: AppTool, structured: dict, now: int) -> dict:
         """The secrets boundary's context check: every secret in a result is redacted before the agent sees it."""

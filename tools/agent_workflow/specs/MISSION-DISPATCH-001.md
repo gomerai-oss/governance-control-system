@@ -185,6 +185,11 @@ the runtime's environment dropped `…_KEY` but not `APP_KEY_<n>`. Nothing an ag
 is off, so no run has an app tool, no key is planned and no endpoint is served; the register is empty, so no tunnel
 is newly refused. §3p items 13 to 20; vectors 152 to 160; §7 item 39.
 
+**Amendment 029 (2026-11-16, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 3):** the `harnesses` section of the
+pins table, the independent review that admits a pin, and the app gateway's way of running a pinned harness. Nothing
+an agent can do changes: the section ships empty and the app catalog is empty, so no harness is loaded or run, and
+`"app_gateway"` is off. §3p items 21 to 26; vectors 161 to 166; §7 item 40.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -997,6 +1002,9 @@ HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass. **Switched on:** t
    gh` steps in the VRT workflows are listed as findings by the part PR, which proposes their removal; HITL decides.
    Under `"enforce"` each finding fails the check.
 
+   **Amended (Amendment 029):** the table has a third section, `harnesses`, for the harnesses the app gateway may
+   run (§3p items 21 to 26). It ships empty.
+
    **Clarified in part 1:**
    - **What was already held.** A unit test already failed on any `uses:` not pinned by a full commit SHA
      (`test_router_spec002`, `test_every_workflow_action_is_pinned_to_a_commit`, stress test F8), so the threat's
@@ -1663,7 +1671,7 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
-### 3p. The app-control harness (Amendments 026, 027 and 028)
+### 3p. The app-control harness (Amendments 026, 027, 028 and 029)
 
 **What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
 server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
@@ -1729,10 +1737,9 @@ Part 2a (Amendment 027):
      app's key, part 2b), and every call implicates `external_exposure`.
    - A call over the run's bounds (the register's, or the app's own lower ones: calls, and minutes since the gateway
      started) is refused and logged before the fabric is asked.
-   - On ALLOW the tool's harness runs. No harness exists until build part 3 pins one, so an allowed call is refused
-     with "no harness is pinned". A harness's result passes `quarantine.quarantine` (labelled with the app and the
-     tool), then the secrets boundary, before the agent reads it; its log entry keeps the result's digest, never the
-     text.
+   - On ALLOW the tool's harness runs: the app's pinned harness (item 23, Amendment 029). A harness's result
+     passes `quarantine.quarantine` (labelled with the app and the tool), then the secrets boundary, before the agent
+     reads it; its log entry keeps the result's digest, never the text.
    - It logs to `app-decisions.jsonl` in an evidence folder of its own, so `collect` never records a harness call as
      a retrieval call. Keeping and recording that log is part 4's.
 9. **The binding** (`tool_selection/runtime_binding.py`). App tools are registry entries named
@@ -1797,6 +1804,57 @@ Part 2a (Amendment 027):
     - The workflow passes no `APP_KEY_<n>` yet: part 6 adds the first slot.
     - `collect`'s check for an app's key in a patch or message (the model login's `encodings_found`) is added in
       part 6 too, with the first key that could leak.
+
+Part 3 (Amendment 029): the harnesses pin section and its review.
+
+21. **The `harnesses` section** of `credentials_check/pins.json` (`mission_dispatch/supply_chain.py`
+    `check_harnesses`). The table's keys are now exactly `schema`, `spec`, `actions`, `runtimes` and `harnesses`;
+    `read_pins` refuses any other set, as before. The section may be empty, and ships empty. Each pin is named by a
+    lowercase identifier, and its file is `mcp_gateway/harnesses/<name>.py` in the tooling tree (SPEC-002
+    `AUTHORITY`, with the rest of `mcp_gateway/`). A pin has exactly:
+    - `app`: the app register name it serves. At most one harness per app;
+    - `sha256`: the SHA-256 of the file's bytes;
+    - `commit`: the full SHA of the commit reviewed;
+    - `built_by`: `{seat, vendor, model}`;
+    - `review`: `{seat, vendor, model, commit, date, report}`.
+22. **The review that admits a pin** (APP-CONTROL-HARNESS-BUILD-PLAN-001 §2). A pin is refused unless its review is
+    of the commit pinned, by a seat other than the builder's, on another vendor's model (both compared without case
+    or surrounding spaces), dated, with an `https://` link to the review itself. HITL's own reading is the hand
+    merge of the PR that adds the pin. The table cannot show that the reviewed commit holds the pinned bytes; the
+    review report says so, and the PR shows both.
+23. **A harness is pinned before its tools enter the catalog** (`mcp_gateway/app_gateway.py`). The app gateway reads
+    the pins table from its own tree, never the checkout's, and refuses to start if the table is malformed, or if a
+    catalog tool's app has no pinned harness. For each app with catalog tools it reads the harness's file once, at
+    start. The file is not run unless:
+    - it is a regular file, not a link, and its SHA-256 is the pin's;
+    - it parses, and imports only the modules in `HARNESS_IMPORTS` (`json`, `re`, `typing`, `dataclasses`,
+      `datetime`, `urllib.parse`, `html`, `string`, `__future__`), with no relative import;
+    - it loads without an error and defines `run(tool, arguments, request)`.
+
+    What runs is the bytes whose digest was checked, compiled from them, never a fresh import of the path. The digest
+    is checked before anything in the file runs. A harness that fails any of these does not stop the gateway: each
+    call of its tools is refused with the reason and logged as a `harness` entry.
+24. **A harness's only way to its app** is the `request(method, host, path, query="", body=None)` the gateway gives
+    each call. The gateway sends a request only if:
+    - the host is one of the app's register hosts;
+    - the method and path match one of the app's register requests (the proxy's own rule, `AppRoute.match`,
+      so a `{name}` is never `.` or `..`);
+    - that request's class is the calling tool's own: a read tool makes only read requests, even in a run that
+      admits writes;
+    - the call has made fewer than `MAX_HARNESS_REQUESTS` (20) requests, and the body is at most 1 MiB.
+
+    It sends it to the app endpoint (item 13) with the run's stand-in and the endpoint's `Host`, and returns the
+    status and the answer as text; an answer over 1 MiB fails the call. The stand-in is not given to the harness. Without a valid
+    endpoint file (item 17) nothing is sent. A refused request, or an endpoint that does not answer, fails the call:
+    the agent gets nothing, and the `result_error` entry names the harness, the requests sent, and the gateway's own
+    reason. The proxy checks every request again (item 13).
+25. **The record of a harness call.** A `result` entry names the harness, its pinned SHA-256 and the number of
+    requests sent, besides the result's digest. Part 4's `harness.*` actions record them.
+26. **A pin change is listed** (`supply_chain.pin_lines`, §3l item 3). On a PR, the credentials check prints a
+    `PIN-CHANGE` line for each harness pin added (with its reviewer), removed or changed, each owing AST-H.6 before
+    merging. It also prints a line for each pinned harness whose file, at the PR's head, is missing or does not match
+    its pin. These are lines, not findings, like every other pin change: the app gateway refuses to run that harness
+    (item 23).
 
 ## 4. Failures
 
@@ -2022,6 +2080,12 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     serves only the run's admitted classes, and a bound seat holds no tool that reaches the network (no `Bash`,
     `WebFetch` or `WebSearch`), so the agent cannot call the endpoint around the fabric. AST-H.10 tests that on every
     runtime of the bench.
+40. **A harness runs in the app gateway's process (Amendment 029).** The pin, the digest and the import list keep an
+    unreviewed or changed harness from running, and its request is checked by the gateway and again by the proxy.
+    They do not confine a harness that is hostile by design: Python has no sandbox for code in its own process, so
+    such a harness could reach what the gateway's account reaches, the stand-in included. The independent review
+    the pin records is what admits a harness (APP-CONTROL-HARNESS-SPEC-001 §4.5). A harness file changed after its
+    pin is shown as a line at PR time and refused at run time; it does not fail the credentials check.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2166,7 +2230,7 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 142 | The retrieval overlay; the app gateway's overlay with the register; a session naming none of the app's resources | Empty approvals; the register's approvals for the session's apps only; empty |
 | 143 | The shipped app gateway; a catalog with a send, delete or drafted-write action, an unlisted tool, a foreign resource or a non-string argument | Serves nothing; each catalog refuses to load |
 | 144 | A resource restricted in only one of the policy and the register | The app gateway refuses to start |
-| 145 | An allowed call; a call the register gives no runtime approval; an unknown tool; an expired session | Request states no credential and `external_exposure`; stop 9; refusal; stop 13. No harness runs: "no harness is pinned" |
+| 145 | An allowed call; a call the register gives no runtime approval; an unknown tool; an expired session | Request states no credential and `external_exposure`; stop 9; refusal; stop 13. With no endpoint file the pinned harness sends nothing (Amendment 029) |
 | 146 | A harness result with steering text or a secret; a failing harness | Quarantined and labelled, the secret redacted, the log holding the digest only; nothing returned |
 | 147 | A call past the app's call bound, or past the minutes bound | Refused and logged as `bound` before the fabric is asked |
 | 148 | A session pinning a different app catalog, under enforce and observe | Start refused; `catalog_pin` logged |
@@ -2182,3 +2246,9 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 158 | The endpoint file | 0444, exactly port and stand-in, never written twice; named only in the app gateway's MCP args; read at start, refused when inside the checkout, with another field, or missing |
 | 159 | An app line in `egress.jsonl`, at `collect` | Recorded as `app <app> <method> <register path>` |
 | 160 | `APP_KEY_1` and `APP_KEY_99` in the job's environment | Not in the runtime's; the runtime's own login kept |
+| 161 | The shipped pins table; a harness pin: well formed, without the section, with another field, a second harness for one app, a short digest, a tag for a commit, a review of another commit, by the builder's seat or vendor, undated, without a link | `harnesses` is empty; the pin reads; each other refused |
+| 162 | A harness pin added, changed, removed; a pinned file changed or missing at the head | A `PIN-CHANGE` line each, an added or changed pin owing AST-H.6; never a finding |
+| 163 | A catalog tool whose app has no pinned harness; a malformed pins table; the shipped gateway | Start refused; start refused; no harness loaded |
+| 164 | A harness changed after its pin; missing; importing `socket`, `os`, `urllib.request`, `subprocess` or relatively; exiting at load; with no `run`; exiting in `run` | Never loaded (the digest first); each call refused and logged as `harness`; the last returns nothing |
+| 165 | A listed request from a pinned harness | Sent to `/app/<app>/<host><path>` with the stand-in and the endpoint's `Host`; the answer quarantined; `result` names the harness, its digest and one request; the stand-in in no log |
+| 166 | An unlisted host, path or method; a write from a read tool or a read from a write tool; a path without `/`; a body over 1 MiB; a 21st request; a `{name}` of `..` | Nothing sent; the call fails, `result_error` naming the reason |
