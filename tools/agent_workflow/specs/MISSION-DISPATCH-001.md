@@ -171,6 +171,20 @@ and nothing reads the register at run time until part 2. Design: `APP-CONTROL-HA
 
 §3p; vectors 132 to 139.
 
+**Amendment 027 (2026-11-15, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 2a, as revised by governance #1323):**
+the app gateway, the fabric's `app` class, the session's app catalog pin and kind, the overlay's approvals from the
+app register, and the binding's second server behind `"app_gateway"`. Nothing an agent can do changes: the switch is
+off, the app catalog and the app register are empty, and no grant names an app action. Part 2b (the proxy's app
+endpoint) follows.
+
+§3p items 6 to 12; vectors 140 to 151.
+
+**Amendment 028 (2026-11-15, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 2b):** the egress proxy's app endpoint,
+the app keys' way to it, and the endpoint file the app gateway reads. It also closes a gap the spec stated wrongly:
+the runtime's environment dropped `…_KEY` but not `APP_KEY_<n>`. Nothing an agent can do changes: `"app_gateway"`
+is off, so no run has an app tool, no key is planned and no endpoint is served; the register is empty, so no tunnel
+is newly refused. §3p items 13 to 20; vectors 152 to 160; §7 item 39.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1649,7 +1663,7 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
-### 3p. The app-control harness (Amendment 026)
+### 3p. The app-control harness (Amendments 026, 027 and 028)
 
 **What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
 server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
@@ -1683,6 +1697,106 @@ server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven h
    by name; `apps.py` ships with the folder's modules.
 5. **What part 1 leaves unchanged.** The files the spec's table marks unchanged are pinned by digest in
    `tests/test_app_harness.py`, and `KEEP_ENV` (`mission_dispatch/runtimes.py`) still keeps only the model logins.
+
+Part 2a (Amendment 027):
+
+6. **The fabric's `app` class** (`mcp_auth/policy.py`, `mcp_auth/policy.json`, `MCP-AUTH-POLICY-2026-11-15.1`).
+   - One action per class, shared by every app: `app.read` (kind `read`), `app.write` (`write`), `app.send`
+     (`send`) and `app.delete` (`delete`). `send` and `delete` join the fabric's action kinds.
+   - The kind rule: a class's `read` list takes kind `read` only; its `mutation` list takes kind `write` only, except
+     the `app` class's, which also takes `send` and `delete`. The fabric needs a read action in every class, so the
+     `app` class ships with `app.read`. No resource is of class `app` and no grant names an app action; a new app
+     adds its resources and grants (part 6), never actions.
+   - `mcp_auth/decide.py` is unchanged: a resource's class and an action's kind reach it as data.
+7. **The session** (`mcp_gateway/session.py`), changed only by additions.
+   - `app_catalog` (`{sha256, mode}`, optional): the app catalog the seat was bound against. Only the app gateway
+     reads it; under `"enforce"` a different catalog refuses its start, under `"observe"` it is logged.
+   - `kind` (`agent` or `service`, optional, `agent` when absent). `load(path, root, kind)` refuses a session of
+     another kind than its caller asks for. Both gateways ask for `agent`, so neither serves a `service` session.
+   - `overlay(policy, session, register)`: with the app register, the mission's approvals are the register's for the
+     apps whose resources are in the session: those apps' restricted resources that the session names, and the
+     runtime implications their calls declare. Without it, as the retrieval gateway calls it, approvals stay empty.
+8. **The app gateway** (`mcp_gateway/app_gateway.py`, `python3 -m mcp_gateway.app_gateway`; server name
+   `governed-apps`), beside the retrieval gateway, which is unchanged.
+   - It reads the fabric policy, the app register and its own catalog (`mcp_gateway/app_tools.json`,
+     `mcp-app-gateway-tools-v1`, shipped empty) from the tooling tree, never from the checkout.
+   - Its catalog refuses to load: a `send` or `delete` action (no agent sends or deletes); a `write` action for an
+     app whose writes are drafted, or whose classes lack `write`; a tool the register does not list for its app; a
+     resource that is not one of that app's `app` resources; an argument that is not a plain string.
+   - It refuses to start when a resource is restricted in only one of the policy and the register, so it never
+     under-declares a resource to get a call through.
+   - Every call is a fabric decision that states the truth: its connector holds no credential (the proxy holds each
+     app's key, part 2b), and every call implicates `external_exposure`.
+   - A call over the run's bounds (the register's, or the app's own lower ones: calls, and minutes since the gateway
+     started) is refused and logged before the fabric is asked.
+   - On ALLOW the tool's harness runs. No harness exists until build part 3 pins one, so an allowed call is refused
+     with "no harness is pinned". A harness's result passes `quarantine.quarantine` (labelled with the app and the
+     tool), then the secrets boundary, before the agent reads it; its log entry keeps the result's digest, never the
+     text.
+   - It logs to `app-decisions.jsonl` in an evidence folder of its own, so `collect` never records a harness call as
+     a retrieval call. Keeping and recording that log is part 4's.
+9. **The binding** (`tool_selection/runtime_binding.py`). App tools are registry entries named
+   `mcp__governed-apps__<tool>`. An admitted one must be in the app catalog, and with `catalog_mode` the session pins
+   the app catalog (`app_catalog`) and the audit takes it as a material (`app_catalogs`). A seat with no app tool
+   admitted, which is every seat today, is bound exactly as before.
+10. **The switch** (`mission_dispatch/binding.py`). `"app_gateway"` in `config.json`: `"off"` (the default, and the
+    value when absent) or `"enforce"`; any other value fails the job. While off, an admitted app tool is logged and
+    not granted, and the MCP config holds only `governed-retrieval`. When on, the MCP config adds `governed-apps`
+    with its evidence folder (`binding/app-evidence`), which `run_agent` hands to the agent's account with the
+    retrieval gateway's; both runtimes' allow rules name the app tools (`mission_dispatch/runtimes.py`). Part 7 sets
+    the switch.
+11. **The description check** (§3k item 1) at bind time covers both catalogs (`permissions.catalogs_findings`); a
+    missing or unreadable app catalog is a finding. A new app-catalog tool is a `GRANT` line (`app catalog adds
+    tool <name>`). The credentials check's own description scan (`credentials_check/__main__.py`, not a row of the
+    spec's table) still reads only the retrieval catalog.
+12. **Release.** `app_tools.json` ships to Core and GCS in both sync manifests, by name; `app_gateway.py` ships with
+    the folder's modules. The binding reads the app catalog on every bind, so a release without it would refuse
+    every enforced binding.
+13. **The app endpoint** (`egress/proxy.py`, Amendment 028). Started with an app-key file, the proxy serves plain
+    HTTP on loopback under `/app/<app>/<host>/<path>`. It forwards a request only when all of these hold:
+    - it carries the run's stand-in exactly (`Authorization: Bearer` or `x-api-key`), and names this endpoint
+      (`127.0.0.1` or `localhost` and its port) as its `Host`;
+    - the file holds a key for the app, and the host is one of the app's register hosts;
+    - its method and path match one of the app's register requests, where a `{name}` segment matches one plain
+      segment and never `.` or `..`;
+    - the request's class is one the file admits for the run;
+    - its query is plain characters, it gives its length, and its body is at most 1 MiB.
+
+    It drops every authentication header and cookie it was sent, adds the app's key as `Authorization: Bearer`, and
+    goes over TLS, certificate checked, to that host at an address that passed the global-address check (§3h item
+    3). The answer comes back unchanged; the app gateway quarantines it (item 8). Each request is one line of
+    `egress.jsonl`, `"route": "app"`: the app, the method, the register's path (never the actual path), the class,
+    the decision, the status and the bytes. Never a header, a key or the stand-in.
+14. **No tunnel to an app host.** The proxy is always given the tooling tree's app register (`--apps`), never the
+    checkout's, and refuses a `CONNECT` to any host it lists, in both modes. The endpoint is the only way to an
+    app. The egress policy file is unchanged.
+15. **The app keys' way to the proxy** (`mission_dispatch/blast.py`, `egress/__main__.py`). `AgentEgress` writes
+    `{"standin", "keys", "classes"}` to a 0600 file in a fresh 0700 folder of the runner's, as for the model login
+    (§3i item 6). The proxy reads it once and deletes it before it reports its port, and the folder is removed. A
+    key is never on a command line or in an environment. A file that is malformed, or that names an app the
+    register does not list, stops the proxy.
+16. **Which keys and classes** (`mission_dispatch/dispatch.py` `app_keys_plan`). Only for a run granted an app tool
+    (so never while `"app_gateway"` is off):
+    - the apps are those of the admitted app tools that the session also names (`session.session_apps`, the rule
+      the session's approvals use);
+    - each app's key is read from its register slot, `APP_KEY_<n>`, in the job's environment, and a missing key
+      refuses the run before any agent starts;
+    - the classes are those of the admitted tools, never `send` or `delete` (Proposal C).
+17. **The endpoint file** (`mission_dispatch/binding.py`). Once the proxy listens, `run_agent` writes
+    `binding/app-endpoint.json`: exactly the port and the stand-in, read-only, never a key, and never twice. The
+    MCP config gives the app gateway its path (`--endpoint`), and the app gateway reads it at start
+    (`app_gateway.read_endpoint`): it must lie outside the checkout and hold exactly those two fields. Without a
+    valid file the app gateway still starts, and no harness call could leave. If the file cannot be written, the
+    proxy is stopped like any other failed start.
+18. **No app key in the runtime** (`mission_dispatch/runtimes.py`). The rule that drops secrets from the runtime's
+    environment now drops a numbered key (`…_KEY_<n>`) too, so an `APP_KEY_<n>` the job holds never reaches the
+    runtime. `KEEP_ENV`, the runtime's own logins, is unchanged.
+19. **Evidence** (`evidence/producer.py`). `collect` records an app line by the app, the method and the register's
+    path. The action stays `dispatch.egress`; part 4 adds the harness actions.
+20. **Left for later parts.**
+    - The workflow passes no `APP_KEY_<n>` yet: part 6 adds the first slot.
+    - `collect`'s check for an app's key in a patch or message (the model login's `encodings_found`) is added in
+      part 6 too, with the first key that could leak.
 
 ## 4. Failures
 
@@ -1904,6 +2018,10 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     HITL approves it; a note comes later and is never challenged. Within the plan, A2 decides how to follow a note,
     and A3 judges the build. A note that should change what is built belongs in the plan. A note cannot widen any
     grant (§3o item 4), so the limit is one of judgement, not of reach.
+39. **The app endpoint's stand-in is readable by the agent's account (Amendment 028),** like the model's. The endpoint
+    serves only the run's admitted classes, and a bound seat holds no tool that reaches the network (no `Bash`,
+    `WebFetch` or `WebSearch`), so the agent cannot call the endpoint around the fabric. AST-H.10 tests that on every
+    runtime of the bench.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2043,3 +2161,24 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 137 | A writer or reviewer selection offered the four app tools | Each denied at `role_admission`: not admitted (`app_read`, writer `app_write`), blocked (writer `app_send`, `app_delete`), or the reviewer's separation rule |
 | 138 | The files the spec's table marks unchanged | Byte-identical to `main` at the spec's revision |
 | 139 | `KEEP_ENV` | Still only the three model logins; no `APP_KEY_*` |
+| 140 | The shipped fabric policy; `send` outside the `app` mutation list; an `app` class with no read action; a send grant naming two actions | The `app` class with its four actions and no app resource or grant; each refused |
+| 141 | A session with no `kind`, `kind: service`, an unknown kind; a caller asking for `service`; an `app_catalog` pin | An agent's by default; a gateway refuses a service session, the service caller an agent's; the pin parsed and checked |
+| 142 | The retrieval overlay; the app gateway's overlay with the register; a session naming none of the app's resources | Empty approvals; the register's approvals for the session's apps only; empty |
+| 143 | The shipped app gateway; a catalog with a send, delete or drafted-write action, an unlisted tool, a foreign resource or a non-string argument | Serves nothing; each catalog refuses to load |
+| 144 | A resource restricted in only one of the policy and the register | The app gateway refuses to start |
+| 145 | An allowed call; a call the register gives no runtime approval; an unknown tool; an expired session | Request states no credential and `external_exposure`; stop 9; refusal; stop 13. No harness runs: "no harness is pinned" |
+| 146 | A harness result with steering text or a secret; a failing harness | Quarantined and labelled, the secret redacted, the log holding the digest only; nothing returned |
+| 147 | A call past the app's call bound, or past the minutes bound | Refused and logged as `bound` before the fabric is asked |
+| 148 | A session pinning a different app catalog, under enforce and observe | Start refused; `catalog_pin` logged |
+| 149 | `initialize` on the app gateway; `tools/list`; a refused CLI start | `governed-apps`, the retrieval gateway's name unchanged; the fabric-allowed tools; exit 2 |
+| 150 | A binding with an admitted app tool, `"app_gateway"` off and enforce; an unknown switch value | Off: not granted, one server, record unchanged; enforce: `governed-apps` with its own evidence folder, both runtimes' rules; refused |
+| 151 | Every seat bound today; a poisoned or missing app catalog; a new app-catalog tool | No app tool, pin or material; a finding marked `app catalog:`; a `GRANT` line |
+| 152 | A listed app request with the stand-in | Forwarded over TLS with the app's key as a bearer; the sent credentials and cookies dropped; one `"route": "app"` line with the register's path, and no key, stand-in or actual path |
+| 153 | A wrong stand-in, a non-loopback `Host`, an app with no key, an unlisted host or path, a `{name}` of `.` or `..`, an unadmitted class, a query that is not plain | 403, logged, nothing reaches the app |
+| 154 | A `CONNECT` to a host the app register lists, in observe or enforce | Refused; the shipped empty register refuses no tunnel |
+| 155 | The app-key file: well formed; malformed; a key for an app the register does not list | Read once and deleted; refused and still deleted; the proxy does not start |
+| 156 | `AgentEgress` with app keys; without | A 0600 file in a 0700 folder, gone after start, never on argv or in the environment, and `--apps` always given; without keys, `--apps` only |
+| 157 | `app_keys_plan` with no app tool; with app tools; a missing `APP_KEY_<n>`; an app the session does not name | None; the session's apps' keys and the tools' classes; refused; refused |
+| 158 | The endpoint file | 0444, exactly port and stand-in, never written twice; named only in the app gateway's MCP args; read at start, refused when inside the checkout, with another field, or missing |
+| 159 | An app line in `egress.jsonl`, at `collect` | Recorded as `app <app> <method> <register path>` |
+| 160 | `APP_KEY_1` and `APP_KEY_99` in the job's environment | Not in the runtime's; the runtime's own login kept |

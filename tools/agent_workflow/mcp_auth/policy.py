@@ -9,9 +9,12 @@ A policy document has exactly these tables:
 ``schema``          ``"mcp-auth-policy-v1"``
 ``policy_version``  non-empty string, copied into every decision record
 ``session``         ``{"max_ttl_seconds": <int>}``
-``actions``         action name -> ``{"kind": "read" | "write" | "execute"}``
-``classes``         exactly ``rag`` and ``epap``, each ``{"read": [...], "mutation": [...]}``;
-                    ``rag`` has no mutation action (doctrine section 7.1)
+``actions``         action name -> ``{"kind": "read" | "write" | "execute" | "send" | "delete"}``
+``classes``         exactly ``rag``, ``epap`` and ``app``, each ``{"read": [...], "mutation": [...]}``;
+                    ``rag`` has no mutation action (doctrine section 7.1). A ``read`` list takes actions of kind
+                    ``read`` only; a ``mutation`` list takes kind ``write`` only, except the ``app`` class's, which
+                    also takes ``send`` and ``delete`` (APP-CONTROL-HARNESS-SPEC-001 §4.3, MISSION-DISPATCH-001
+                    Amendment 027). Every class has at least one read action.
 ``authority_refs``  SOT reference -> ``{"kind", "source", "missions"}``; the missions it covers
 ``roles``           governed role names
 ``principals``      principal id -> ``{"kind", "acting_identities", "roles"}``
@@ -34,8 +37,10 @@ from typing import Any, Iterable, Optional
 SCHEMA = "mcp-auth-policy-v1"
 DEFAULT_PATH = Path(__file__).resolve().parent / "policy.json"
 
-CLASSES = ("rag", "epap")
-ACTION_KINDS = ("read", "write", "execute")
+CLASSES = ("rag", "epap", "app")
+ACTION_KINDS = ("read", "write", "execute", "send", "delete")
+# The kinds each class's mutation list takes: write only, except the app class (harness sends and deletes).
+MUTATION_KINDS = {"rag": ("write",), "epap": ("write",), "app": ("write", "send", "delete")}
 AUTHORITY_KINDS = ("SPEC", "ABC", "HITL", "DOCTRINE", "POLICY")
 PRINCIPAL_KINDS = ("human", "agent", "service")
 EVIDENCE = ("none", "audit_record", "epap_packet", "pr_evidence")
@@ -132,11 +137,12 @@ def validate(doc: Any) -> dict:
     placed = {}
     for cls in CLASSES:
         entry = _fields(classes[cls], {"read", "mutation"}, f"classes.{cls}")
-        for level, kind in (("read", "read"), ("mutation", "write")):
+        for level, kinds in (("read", ("read",)), ("mutation", MUTATION_KINDS[cls])):
             names = _names(entry[level], f"classes.{cls}.{level}", actions, nonempty=(level == "read"))
             for action in names:
-                if actions[action]["kind"] != kind:
-                    raise PolicyError(f"classes.{cls}.{level}: {action!r} must be of kind {kind!r}")
+                if actions[action]["kind"] not in kinds:
+                    raise PolicyError(f"classes.{cls}.{level}: {action!r} must be of kind "
+                                      + " or ".join(repr(k) for k in kinds))
                 if action in placed:
                     raise PolicyError(f"classes.{cls}.{level}: {action!r} is already placed in {placed[action]}")
                 placed[action] = f"classes.{cls}.{level}"

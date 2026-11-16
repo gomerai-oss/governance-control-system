@@ -9,8 +9,10 @@ shipped matrix, and turns the admitted surface into a ``Binding``:
 ``allowed_rules``  ``Read(<glob>)`` / ``Edit(<glob>)``, the glob relative to the checkout
 ``denied_rules``   extra denials (none today)
 ``mcp_tools``      admitted gateway tools, bare names
+``app_mcp_tools``  admitted app-gateway tools, bare names (APP-CONTROL-HARNESS-SPEC-001, Amendment 027)
 ``session``        the gateway session document (``mcp_gateway/session.py`` format)
 ``catalog_sha256`` the gateway catalog's digest, when ``catalog_mode`` was given (else ``""``)
+``app_catalog_sha256`` the app catalog's digest, when ``catalog_mode`` was given and an app tool is admitted
 ``scoped_rules``   the allowed rules with a mutation-capable seat's ``Edit(**)`` narrowed to the mission's
                    ``build_scope`` (MISSION-DISPATCH-001 §3k item 2), whether or not they were applied
 ``scope_problem``  why the scope could not be rendered as rules (else ``""``)
@@ -32,6 +34,12 @@ gateway knows whether a different catalog refuses its start or is only recorded)
 ``Edit(.mission-dispatch/DELETE)`` instead of ``Edit(**)``, and keeps ``Read(**)``; a scope that cannot be rendered
 refuses the binding. Without it the rules are as before, and ``scoped_rules`` says what narrowing would bind.
 This supersedes decision 17 of ``IMPLEMENTATION-DECISIONS.md`` when narrowing is asked for.
+
+App tools (MISSION-DISPATCH-001 §3p, Amendment 027) are registry entries named ``mcp__governed-apps__<tool>``, served
+by the app gateway from its own catalog (``mcp_gateway/app_tools.json``). An admitted one must be in that catalog;
+with ``catalog_mode`` the session pins the app catalog as ``app_catalog`` and the audit takes it as a material
+(``app_catalogs``). A seat with no app tool admitted is bound exactly as before: no app pin, no app material. Whether
+the dispatcher grants the app gateway at all is its own switch (``"app_gateway"``, ``mission_dispatch/binding.py``).
 
 A seat with ``"drafts"`` (MISSION-DISPATCH-001 §3n item 4, the Adversarial Reviewer) holds draft-class write rules
 for exactly those files and no others: each template, with ``{mission_id}`` and ``{round}`` put in, becomes one
@@ -56,6 +64,7 @@ HERE = Path(__file__).resolve().parent
 SEATS_PATH = HERE / "seats.json"
 REGISTRY_PATH = HERE / "runtime_registry.json"
 GATEWAY_CATALOG = Path("mcp_gateway") / "tools.json"  # under gateway_root
+APP_CATALOG = Path("mcp_gateway") / "app_tools.json"  # under gateway_root (Amendment 027)
 
 SEATS_SCHEMA = "mission-seats-v1"
 SEAT_FIELDS = frozenset({"role", "mission_type", "fabric_role", "principal", "resources"})
@@ -66,6 +75,7 @@ MISSION_FIELDS = frozenset({"id", "round", "agent", "base_sha", "build_scope"})
 RUNTIMES = ("claude-code", "cursor-cli")
 BUILTINS = ("Read", "Edit", "Write", "Glob", "Grep")
 GATEWAY_PREFIX = "mcp__governed-retrieval__"
+APP_GATEWAY_PREFIX = "mcp__governed-apps__"
 REPO = "checkout"  # the registry's one repository: the agent's checkout
 MISSION_PLACEHOLDER = "{mission_id}"
 AUTHORITY_REF = "MISSION-ROUTER-001"
@@ -95,6 +105,8 @@ class Binding:
     catalog_sha256: str = ""
     scoped_rules: tuple = ()
     scope_problem: str = ""
+    app_mcp_tools: Tuple[str, ...] = ()
+    app_catalog_sha256: str = ""
 
 
 def _is_int(value: Any) -> bool:
@@ -174,13 +186,14 @@ def render_registry(doc: Mapping, mission_id: str) -> dict:
 CATALOG_MODES = ("observe", "enforce")
 
 
-def _gateway_catalog(gateway_root: Path) -> Tuple[dict, frozenset]:
-    """The gateway catalog under ``gateway_root`` and the names of its tools."""
+def _gateway_catalog(gateway_root: Path, relative: Path = GATEWAY_CATALOG,
+                     what: str = "gateway catalog") -> Tuple[dict, frozenset]:
+    """A gateway catalog under ``gateway_root`` and the names of its tools."""
     try:
-        doc = M.read_file(Path(gateway_root) / GATEWAY_CATALOG, "gateway catalog")
+        doc = M.read_file(Path(gateway_root) / relative, what)
         return doc, frozenset(t["name"] for t in doc["tools"])
     except (ValueError, KeyError, TypeError) as exc:
-        raise BindingRefused(f"the gateway catalog under {gateway_root} cannot be read: {exc}") from None
+        raise BindingRefused(f"the {what} under {gateway_root} cannot be read: {exc}") from None
 
 
 
@@ -188,22 +201,28 @@ def _rule(kind: str, path: str) -> str:
     return f"{kind}(**)" if path == "." else f"{kind}({path}/**)"
 
 
-def _surface(selection: S.Selection, registry: Mapping, matrix: Mapping) -> Tuple[tuple, list, tuple, dict]:
-    """(tools, allowed rules, gateway tools, registry name -> bound name) for the admitted surface only."""
+def _surface(selection: S.Selection, registry: Mapping, matrix: Mapping) -> Tuple[tuple, list, tuple, dict, tuple]:
+    """(tools, allowed rules, gateway tools, registry name -> bound name, app-gateway tools) for the admitted
+    surface only."""
     entries = [(REG.tool_name(e), e) for e in registry["tools"]]
     unknown = sorted(selection.surface - {name for name, _ in entries})
     if unknown:
         raise BindingRefused(f"admitted tools {unknown} have no registry entry")
-    tools, rules, gateway, bound = set(), [], [], {}
+    tools, rules, gateway, bound, apps = set(), [], [], {}, []
     for name, entry in entries:  # registry order
         if name not in selection.surface:
             continue
-        if name.startswith(GATEWAY_PREFIX):
-            bare = name[len(GATEWAY_PREFIX):]
-            if not _GATEWAY_TOOL.fullmatch(bare):
-                raise BindingRefused(f"admitted gateway tool {name!r} is not a plain tool name")
-            gateway.append(bare)
-            bound[name] = bare
+        for prefix, served in ((GATEWAY_PREFIX, gateway), (APP_GATEWAY_PREFIX, apps)):
+            if name.startswith(prefix):
+                bare = name[len(prefix):]
+                if not _GATEWAY_TOOL.fullmatch(bare):
+                    raise BindingRefused(f"admitted gateway tool {name!r} is not a plain tool name")
+                served.append(bare)
+                bound[name] = bare
+                break
+        else:
+            bare = None
+        if bare is not None:
             continue
         builtin = name.split(":", 1)[0]
         if builtin not in BUILTINS:
@@ -216,7 +235,7 @@ def _surface(selection: S.Selection, registry: Mapping, matrix: Mapping) -> Tupl
             rules.append(rule)
         bound[name] = builtin
     rules.sort(key=lambda r: (not r.startswith("Read("), r))
-    return tuple(t for t in BUILTINS if t in tools), rules, tuple(gateway), bound
+    return tuple(t for t in BUILTINS if t in tools), rules, tuple(gateway), bound, tuple(apps)
 
 
 def scoped_rules(allowed: list, scope: list) -> Tuple[tuple, str]:
@@ -249,12 +268,14 @@ def _artifact(folder: str, value: Any) -> Tuple[str, dict]:
 
 def audit_material(seat: str, runtime: str, seat_doc: Mapping, seats: Mapping, matrix: Mapping,
                    registry: Mapping, request: Mapping, selection: S.Selection, bound_doc: Mapping,
-                   catalog: Any = None) -> dict:
+                   catalog: Any = None, app_catalog: Any = None) -> dict:
     """The ``signed`` part of the ``RUNTIME_BINDING`` link: inputs as materials, record and binding as products.
-    With ``catalog`` (ring 2) the gateway catalog is a material too."""
+    With ``catalog`` (ring 2) the gateway catalog is a material too, and with ``app_catalog`` the app catalog."""
     inputs = [("matrix", matrix), ("registries", registry), ("requests", request), ("seats", seats)]
     if catalog is not None:
         inputs.insert(0, ("catalogs", catalog))
+    if app_catalog is not None:
+        inputs.insert(0, ("app_catalogs", app_catalog))
     materials = dict(_artifact(folder, value) for folder, value in inputs)
     products = dict(materials)
     products.update(dict(_artifact(folder, value) for folder, value in
@@ -312,7 +333,7 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
     if problem:
         raise BindingRefused(f"selection record is inconsistent: {problem}")
 
-    tools, allowed, mcp_tools, bound = _surface(selection, registry, matrix)
+    tools, allowed, mcp_tools, bound, app_tools = _surface(selection, registry, matrix)
     if "drafts" in seat_doc:  # §3n item 4: the seat's own files replace every draft-class rule
         draft_paths = {_rule("Edit", e["resource"]["path"]) for e in registry["tools"]
                        if REG.tool_name(e) in bound and not REG.tool_name(e).startswith(GATEWAY_PREFIX)
@@ -333,6 +354,12 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
     missing = sorted(set(mcp_tools) - served)
     if missing:
         raise BindingRefused(f"admitted gateway tools {missing} are not served by the gateway")
+    app_catalog = None
+    if app_tools:
+        app_catalog, app_served = _gateway_catalog(gateway_root, APP_CATALOG, "app catalog")
+        missing = sorted(set(app_tools) - app_served)
+        if missing:
+            raise BindingRefused(f"admitted app tools {missing} are not served by the app gateway")
 
     session = {
         "principal": seat_doc["principal"],
@@ -350,12 +377,22 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
         if pinned is None:
             raise BindingRefused("the gateway catalog has no canonical form")
         session["catalog"] = {"sha256": pinned, "mode": catalog_mode}
+    app_pinned = ""
+    if catalog_mode is not None and app_catalog is not None:
+        app_pinned = R.digest(app_catalog)
+        if app_pinned is None:
+            raise BindingRefused("the app catalog has no canonical form")
+        session["app_catalog"] = {"sha256": app_pinned, "mode": catalog_mode}
     denied: list = []
     bound_doc = {"seat": seat, "runtime": runtime, "mission": mission, "tools": list(tools),
                  "allowed_rules": list(allowed), "denied_rules": list(denied), "mcp_tools": list(mcp_tools),
                  "tool_map": bound, "session": session}
+    if app_tools:
+        bound_doc["app_mcp_tools"] = list(app_tools)
     audit = audit_material(seat, runtime, seat_doc, seats, matrix, registry, request, selection, bound_doc,
-                           catalog if catalog_mode is not None else None)
+                           catalog if catalog_mode is not None else None,
+                           app_catalog if catalog_mode is not None else None)
     if links.link_problem(audit):
         raise BindingRefused(f"the binding's audit link is malformed: {links.link_problem(audit)}")
-    return Binding(tools, allowed, denied, mcp_tools, session, audit, pinned, scoped, scope_problem)
+    return Binding(tools, allowed, denied, mcp_tools, session, audit, pinned, scoped, scope_problem,
+                   app_tools, app_pinned)

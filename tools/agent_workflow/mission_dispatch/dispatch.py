@@ -1081,11 +1081,13 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
             default_branch: str, checks_report: Optional[Path] = None, binding_mode: str = binding.OFF,
             now: Optional[int] = None, binder: object = None, permissions_mode: str = "observe",
             supply_mode: str = "observe", provenance_dir: Optional[Path] = None,
-            verify: Optional[Callable] = None, log: Callable[[str], None] = _stderr) -> Checkout:
+            verify: Optional[Callable] = None, log: Callable[[str], None] = _stderr,
+            app_mode: str = binding.OFF) -> Checkout:
     """Fresh checkout of ``job.base_sha`` on the stage branch, with the task (and any checks report) written.
 
     With ``binding_mode`` ``enforce`` (Amendment 011) the seat's tool surface is bound here, before any agent
-    starts; a surface that cannot be bound fails the job.
+    starts; a surface that cannot be bound fails the job. ``app_mode`` is the ``"app_gateway"`` switch (Amendment
+    027): while ``"off"`` no app tool is granted.
     """
     checkout = Checkout(root)
     try:
@@ -1130,7 +1132,8 @@ def prepare(job: Job, root: Path, clone_url: str, read_token: str, environ: Mapp
     try:
         if binding_mode == binding.ENFORCE:
             when = int(time.time()) if now is None else now
-            bound = binding.bind(job, root, checkout.tree, home, when, binder, permissions_mode=permissions_mode)
+            bound = binding.bind(job, root, checkout.tree, home, when, binder, permissions_mode=permissions_mode,
+                                 apps=app_mode)
         if job.runtime == CURSOR_CLI:
             write_cursor_config(checkout.tree, home, bound)
             if bound is not None:
@@ -1177,6 +1180,47 @@ def model_login_plan(job: Job, environ: Mapping[str, str], login_mode: str, blas
     return {"state": state, "endpoint": endpoint, "proxy_login": {"kind": kind, "login": value, "standin": standin}}
 
 
+def app_keys_plan(bound: object, root: Path, environ: Mapping[str, str]) -> Optional[Dict[str, Any]]:
+    """What the egress proxy holds for this run's app endpoint (§3p, Amendment 028), or None when the run was granted
+    no app tool (always so while ``"app_gateway"`` is ``"off"``).
+
+    The apps are those of the admitted app tools that the session also names (``session.session_apps``, the rule its
+    approvals use). Each one's key is read from its register slot (``APP_KEY_<n>``) in this job's environment; a
+    missing key refuses the run. The classes are those of the admitted tools, never ``send`` or ``delete``: no agent
+    sends or deletes (Proposal C). The registers, catalog and policy are the tooling tree's, never the checkout's."""
+    tools_granted = tuple(getattr(bound, "app_mcp_tools", ()) or ())
+    if bound is None or not tools_granted:
+        return None
+    from mcp_auth import policy as policy_mod  # the tooling tree's copies, as the gateway itself
+    from mcp_gateway import app_gateway
+    from mcp_gateway import session as session_mod
+    from tool_selection import apps as apps_mod
+    try:
+        register = apps_mod.load_file()
+        catalog = {t.name: t for t in app_gateway.load_catalog(app_gateway.DEFAULT_CATALOG, policy_mod.load_file(),
+                                                                 register)}
+        session = session_mod.load(binding.binding_dir(root) / binding.SESSION_FILE, Checkout(root).tree)
+        named = set(session_mod.session_apps(register, session))
+    except (apps_mod.AppsError, policy_mod.PolicyError, app_gateway.GatewayError, session_mod.SessionError) as exc:
+        raise DispatchError(f"the app endpoint cannot be planned: {exc}") from None
+    missing = [name for name in tools_granted if name not in catalog]
+    if missing:
+        raise DispatchError(f"admitted app tools are not in the app catalog: {sorted(missing)}")
+    tools = [catalog[name] for name in tools_granted]
+    apps = sorted({t.app for t in tools} & named)
+    if not apps:
+        raise DispatchError("no admitted app tool belongs to an app the session names")
+    keys = {}
+    for app in apps:
+        slot = register["apps"][app]["key_slot"]
+        value = environ.get(slot, "")
+        if not value:
+            raise DispatchError(f"app {app}'s key ({slot}) is not set in this job; no agent was started")
+        keys[app] = value
+    classes = sorted({t.kind for t in tools if t.app in apps} - {"send", "delete"})
+    return {"standin": login.new_standin(), "keys": keys, "classes": classes}
+
+
 def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, timeout: float = DEFAULT_TIMEOUT,
               binaries: Mapping[str, str] = BINARIES, now: Optional[datetime] = None,
               binding_mode: str = binding.OFF, blast_mode: str = blast.OBSERVE, run_as: Optional[str] = None,
@@ -1205,12 +1249,22 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
         env[CANARY_ENV] = canary
     plan = model_login_plan(job, environ, login_mode, blast_mode)
     state, endpoint, proxy_login = plan["state"], plan["endpoint"], plan["proxy_login"]
+    app_keys = app_keys_plan(bound, root, environ)
     try:
         egress = egress or blast.AgentEgress(job.runtime, blast_mode, root, run_as, model_login=proxy_login,
-                                             exclusive=state["placement"] == "proxy")
+                                             exclusive=state["placement"] == "proxy",
+                                             **({"app_keys": app_keys} if app_keys is not None else {}))
         for name in blast.NO_PROXY_ENV:
             env.pop(name, None)
         env.update(egress.start())
+        if app_keys is not None:
+            if not getattr(egress, "port", 0):
+                raise blast.BlastError("the egress proxy is not running, so the app endpoint cannot be served")
+            try:
+                binding.write_app_endpoint(root, egress.port, app_keys["standin"])
+            except binding.BindingError as exc:  # stopped below like any other start failure: the proxy holds keys
+                raise blast.BlastError(str(exc)) from None
+            log(f"app endpoint: {len(app_keys['keys'])} app(s), classes {', '.join(app_keys['classes'])}")
         serving = endpoint is not None and getattr(egress, "model_login", None) and getattr(egress, "port", 0)
         if serving:
             state["readiness"] = login.readiness(egress.port, state["standin"], endpoint.readiness_route,
@@ -1234,7 +1288,8 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
             + (f", readiness {state['readiness']['reason']}" if state["readiness"] else "") + ")")
         if run_as:
             env = blast.account_env(env, run_as, environ.get("HOME", ""))
-            mine = (checkout.tree, checkout.git_dir, binding.binding_dir(root) / binding.EVIDENCE_DIR)
+            mine = (checkout.tree, checkout.git_dir, binding.binding_dir(root) / binding.EVIDENCE_DIR,
+                    binding.binding_dir(root) / binding.APP_EVIDENCE_DIR)  # the app gateway's, when granted
             blast.hand_over(root, run_as, [p for p in mine if p.exists()], egress.run)
             argv = [*blast.run_as_argv(run_as, list(env), environ.get("HOME", "")), *argv]
     except blast.BlastError as exc:

@@ -351,7 +351,8 @@ class HardeningTests(GatewayCase):
     def test_package_holds_exactly_the_planned_files_and_no_init(self):
         names = sorted(p.name for p in PKG.iterdir() if p.name != "__pycache__")
         self.assertEqual(names, sorted(["protocol.py", "tools.json", "session.py", "server.py", "__main__.py",
-                                        "IMPLEMENTATION-DECISIONS.md"]))
+                                        "IMPLEMENTATION-DECISIONS.md",
+                                        "app_gateway.py", "app_tools.json"]))  # the app gateway (Amendment 027)
         self.assertFalse(any(PKG.rglob("__init__.py")))
 
     def test_no_release_deny_term_matches_a_delivered_file(self):
@@ -504,7 +505,7 @@ class SecretsBoundaryTests(GatewayCase):
 class ShippedDataTests(unittest.TestCase):
     def test_policy_adds_mission_seats_and_read_only_mission_grants(self):
         policy = P.load_file()
-        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-11.1")
+        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-15.1")
         self.assertEqual(policy["authority_refs"]["MISSION-ROUTER-001"],
                          {"kind": "HITL", "source": "tools/agent_workflow/specs/MISSION-ROUTER-001.md",
                           "missions": []})

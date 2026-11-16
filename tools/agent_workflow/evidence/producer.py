@@ -154,7 +154,13 @@ def gateway_result(entry: dict):
 def egress_result(entry: dict):
     """The egress log (``egress.jsonl``): every line is one decision."""
     allowed = entry.get("decision") == "allowed"
-    where = entry.get("path", "") if entry.get("route") == "model" else f"{entry.get('host', '')}:{entry.get('port', '')}"
+    route = entry.get("route")
+    if route == "model":
+        where = entry.get("path", "")
+    elif route == "app":  # Amendment 028: the app and the register's path, never the actual path
+        where = f"app {entry.get('app', '')} {entry.get('method', '')} {entry.get('path', '')}"
+    else:
+        where = f"{entry.get('host', '')}:{entry.get('port', '')}"
     return ("done" if allowed else "refused"), f"{where}: {entry.get('decision', '?')}"
 
 

@@ -217,6 +217,9 @@ class CheckNetwork:
 AGENT_ACCOUNT = "mission-agent"
 AGENT_CHAIN = "MISSION-AGENT-NET"
 POLICY_FILE = Path(__file__).resolve().parent / "egress-policy.json"
+# The tooling tree's app register (§3p, Amendment 028): always given to the proxy, so a tunnel to any app host is
+# refused even in a run with no app key; never the checkout's copy.
+APPS_FILE = Path(__file__).resolve().parents[1] / "tool_selection" / "apps.json"
 EGRESS_LOG, EGRESS_READY, EGRESS_ERR = "egress.jsonl", "egress.port", "egress.err"
 EGRESS_START_TIMEOUT = 15.0
 EGRESS_MAX_BYTES = 4 * 1024 * 1024  # of egress.jsonl kept with the run's artifact
@@ -297,10 +300,13 @@ class AgentEgress:
     def __init__(self, runtime: str, blast_mode: str, root: Path, account: Optional[str] = None,
                  run: Runner = _run, popen: Callable[..., Any] = subprocess.Popen, policy: Path = POLICY_FILE,
                  probe_host: Optional[Callable[[], str]] = None, log: Callable[[str], None] = print,
-                 model_login: Optional[Mapping[str, str]] = None, exclusive: bool = False) -> None:
+                 model_login: Optional[Mapping[str, str]] = None, exclusive: bool = False,
+                 app_keys: Optional[Mapping[str, Any]] = None, apps: Path = APPS_FILE) -> None:
         """``model_login`` (``{"kind", "login", "standin"}``, MISSION-DISPATCH-001 §3i item 6) makes the proxy serve
         the runtime's model endpoint; ``exclusive`` (``"model_login": "enforce"``) closes the tunnel to the model
-        host. The login reaches the proxy in a file only this account can read, never by environment or argv."""
+        host. ``app_keys`` (``{"standin", "keys", "classes"}``, §3p, Amendment 028) makes it serve the app endpoint
+        for the apps it names. Each reaches the proxy in a file only this account can read, never by environment or
+        argv. ``apps`` is the app register, always given to the proxy."""
         if blast_mode not in MODES:
             raise BlastError(f"unknown blast-radius mode {blast_mode!r}")
         if exclusive and not model_login:
@@ -311,6 +317,7 @@ class AgentEgress:
         self.run, self.popen, self.policy, self.log = run, popen, policy, log
         self.probe_host = probe_host or _probe_host
         self.model_login, self.exclusive = dict(model_login) if model_login else None, exclusive
+        self.app_keys, self.apps = dict(app_keys) if app_keys else None, apps
         self.proc: Any = None
         self.port = 0
 
@@ -339,17 +346,24 @@ class AgentEgress:
         err_path = self.root / EGRESS_ERR  # a file, not a pipe: nothing reads it while the agent runs
         argv = [sys.executable, "-B", "-m", "egress", "serve", "--policy", str(self.policy),
                 "--runtime", self.runtime, "--mode", self.mode,
-                "--log", str(self.root / EGRESS_LOG), "--ready", str(ready)]
+                "--log", str(self.root / EGRESS_LOG), "--ready", str(ready), "--apps", str(self.apps)]
         private = None
-        if self.model_login:
+        if self.model_login or self.app_keys:
             # A fresh 0700 folder of this account's, outside the job root the agent account is handed parts of;
-            # the proxy reads the file and deletes it before it writes its port.
+            # the proxy reads each file and deletes it before it writes its port.
             private = Path(tempfile.mkdtemp(prefix="mission-login-"))
+        if self.model_login:
             login_file = private / "login.json"
             fd = os.open(login_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as out:
                 json.dump({k: self.model_login[k] for k in ("kind", "login", "standin")}, out)
             argv += ["--login-file", str(login_file)] + (["--exclusive"] if self.exclusive else [])
+        if self.app_keys:
+            keys_file = private / "app-keys.json"
+            fd = os.open(keys_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                json.dump({k: self.app_keys[k] for k in ("standin", "keys", "classes")}, out)
+            argv += ["--app-keys-file", str(keys_file)]
         try:
             with open(err_path, "wb") as err:
                 self.proc = self.popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
