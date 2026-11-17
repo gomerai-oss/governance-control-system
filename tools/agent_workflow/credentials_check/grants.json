@@ -11,6 +11,8 @@
         "publish": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
         "report": {"contents": "read", "issues": "write", "pull-requests": "write", "checks": "read"},
         "land": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
+        "secscan": {"contents": "read", "pull-requests": "read"},
+        "secscan-report": {"contents": "read", "checks": "write", "pull-requests": "write"},
         "perform": {"actions": "read", "contents": "read", "issues": "write", "pull-requests": "read", "checks": "read"}
       },
       "app_tokens": {

@@ -234,6 +234,13 @@ route to `api.openai.com` and nothing else. It adds a plain `bearer` login kind,
 readiness request, and a plan for where the key goes. No job calls any of it yet: part 3 adds the scan job.
 Nothing an agent or a mission can do changes. §3q items 1 to 5; vectors 203 to 208; §7 item 45.
 
+**Amendment 036 (2026-11-16, SECURITY-SCAN-SPEC-001 build part 3, reporting only):** the `secscan` job scans each A3
+PASS PR into a landing branch and each stack's landing PR, and its `secscan report` job sets the `security-scan` check
+on the PR's head and posts the findings through the quarantine. Any finding is red, and so is a scan that cannot run.
+The router does not wait on the check: part 4 adds the hold and HITL's two commands. `config.json`
+`"security_scan"` is absent, so `"off"`: nothing is scanned until HITL switches it to `"observe"` for the pilot.
+§3q items 6 to 13; vectors 209 to 216; §7 items 46 and 47.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -2124,6 +2131,53 @@ untrusted code and runs commands, so the proxy holds the key, as for the model l
    - **The key is `OPENAI_API_KEY` in the `mission-secscan` environment** (HITL created it, deployable from `main`
      only). Part 3's job passes it only to the step that starts the proxy.
 
+Part 3 (Amendment 036) builds the scan job itself, reporting only (`mission_dispatch/secscan.py`, the `scan-prepare`,
+`scan` and `scan-report` commands, and two jobs of `mission-agent.yml`).
+
+6. **The switch** (`config.json` `"security_scan"`). `"off"` when absent: no scan is planned and the scan commands
+   refuse. `"observe"` scans and reports, and the router does not wait on the check. Any other value is refused,
+   never read as off. Part 4 adds `"enforce"`, under which the router holds the merge until the check is green.
+7. **What is scanned** (`secscan.scan_targets`, read from the router's survey, writing nothing; the router is
+   unchanged): each open A3 PR into a
+   landing branch whose verdict file at its head says `PASS`, and each stack's landing PR. A draft, or a PR whose head
+   is in another repository, is left out. A mission in a stack is scanned once, in its stack's landing PR.
+8. **When.** The plan job lists a scan for each target whose head has no `security-scan` check run set by this
+   workflow, and that no other unfinished run is scanning. Its jobs are named `secscan #<pr> <head>` and
+   `secscan #<pr> <head> report` for that reason. A head that already has a check, green or red, is not scanned
+   again: HITL settles a red scan (part 4). A new head is a new scan.
+9. **The `secscan` job.** Its own VM, environment `mission-secscan`, permissions `contents: read` and
+   `pull-requests: read`, in four steps:
+   - **`scan-prepare`**, the only step with the read token: it checks the PR is still open at that head, then makes a
+     fresh, full clone, detached at the head, and finds its merge base with `origin/<base>`. Nothing is written into
+     the checkout.
+   - **`tree-install`** of Node and the scanner (§3l items 8 to 11), copied root-owned to `/opt/mission-scan-tools`.
+   - **`scan`**, the only step with `OPENAI_API_KEY`, and no token. It needs `blast_radius` enforced (the job
+     refuses before anything else otherwise). `scan_login_plan` gives the proxy the key; the proxy's readiness
+     request must succeed before the scanner starts. The scanner runs as `mission-agent`, its network closed except
+     the proxy, as `codex-security scan . --diff <merge base> --output-dir <outside the checkout> --json --auth
+     api-key`, with a model provider whose `base_url` is the proxy's model route, `wire_api` `responses`,
+     `supports_websockets` off, and whose key variable holds only the stand-in. Analytics and update notices are
+     off. No project file is passed (`-c`), so nothing in the checkout configures the scan. Then every process of
+     the account is killed, the proxy stops, and the log is scrubbed of the key and the stand-in.
+   - It writes `result.json`, always: a scan that could not run writes a red one.
+10. **The result** (`secscan.read_result`). `success` only when the scanner exited 0, `scan-manifest.json` says
+    `completed`, and `findings.json` lists no finding. HITL decided that any finding the scanner reports blocks,
+    whatever its severity (SECURITY-SCAN-SPEC-001 §1); the scanner validates each finding against the source before
+    reporting it. Any other exit code, status or unreadable file is `failure`, with its reason.
+11. **The `secscan report` job.** A separate VM with no environment, no secret and none of the scanner's code,
+    permissions `contents: read`, `checks: write`, `pull-requests: write`. It reads the result again strictly
+    (`secscan.parse_result`: for another scan, malformed, or claiming success with a finding, it is a failure), and
+    with no result at all the check is `failure`. It sets `security-scan` on the head and posts the same text on the
+    PR. Every text of the scanner's in it passes the quarantine (§3j item 1), because it quotes code agents wrote.
+    A PR closed, or whose head moved, since the plan gets no check.
+12. **What is kept.** The SARIF, the scanner's report, its log and the proxy's log, for 90 days; the result for one
+    day, for the report job. A kept file that holds the key is emptied. Each job keeps an evidence chain:
+    `dispatch.scan` (`decide`) with the result's digest, and `dispatch.scan_report` (`send`) with the comment's. They
+    never set `evidence-sealed`, which only a published stage PR gets.
+13. **What is not settled here.** The scanner has never run on a runner: the pilot (SECURITY-SCAN-SPEC-001 §6, part
+    5) is its first run. It may need a request the egress policy does not list (§7 item 45), and its own sandbox may
+    not start on GitHub's runners (§7 item 46). Each fails red, never green.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -2378,6 +2432,12 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     its runtime's strings, not observed. If the scanner needs a request the policy does not list, it fails and the
     check is red: the cost is a failed pilot, never a scan that passes without its model. The scanner's own
     "Trusted Access for Cyber" may also refuse some requests under the standard program; the pilot shows which.
+46. **The scanner's own sandbox may not start on the runner (Amendment 036).** The Codex runtime runs commands in a
+    Linux sandbox, and GitHub's Ubuntu runners restrict unprivileged user namespaces. If it cannot start, the scan
+    fails red. The pilot shows it; nothing in part 3 loosens the runner.
+47. **The scanner reads the checkout's instructions (Amendment 036).** It is a model reading untrusted text: a file
+    in the PR can try to steer it toward "clean" (SECURITY-SCAN-SPEC-001 §7). No project file is passed, so the
+    checkout cannot configure the scan, but its text is still read. A green scan narrows risk; it proves nothing.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2586,3 +2646,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 206 | The scanner's readiness request; a wrong stand-in; a policy entry giving a `GET` readiness a model, a `POST` readiness none, or Claude Code's readiness none | `GET /v1/models` with no body and no Anthropic header, accepted; 403; each refused when the policy loads |
 | 207 | `scan_login_plan` with the key; without blast radius enforced; without a key or with a short one; without a scanner endpoint | The proxy's `bearer` login and a fresh stand-in; each of the rest refused, with no fallback |
 | 208 | The real proxy process, given the scanner's key by file | A 0600 file in a 0700 folder, gone after start, never on argv or in the environment; the endpoint is up and refuses a wrong stand-in; a `bearer` kind is read and an unknown kind refused |
+| 209 | `"security_scan"` absent, `"observe"`, or any other value; the shipped config | Off; observe; refused; off, and the plan asks the router for no target |
+| 210 | A target with this workflow's check on its head, another app's check, one another run is scanning, a malformed one | Only the head with no check of this workflow's and no scan in another run is due; the rest are noted |
+| 211 | Open A3 PRs into a landing branch with a PASS, FAIL or unreadable verdict, a draft, a fork, an A3 PR into an integration branch, an A2 PR, stack landing PRs | Only the PASS PR and the stack's ready landing PR |
+| 212 | The scanner's command and environment, with the key, a GitHub token and a project file variable in the job | `scan . --diff <merge base>` through the proxy's model route, WebSockets and analytics off, no `-c`; only the stand-in |
+| 213 | A clean scan; a finding of each severity; a failed status, a wrong document, exit 1, 2, 130, none; a result for another scan or claiming success with a finding; steering text in a finding | Green only for the clean scan; every other red; the text quarantined, 20 findings listed |
+| 214 | The scan with no account of its own, blast radius observe, no key, a refused readiness, no proxy port, no install, a process that survives | Each refused before the scanner starts, or red after; the scanner sees no key; its log and kept files hold neither the key nor the stand-in |
+| 215 | The checkout, after the base branch moved past the PR's base | A clean clone detached at the head; the merge base is the PR's base, not the branch's head; a head not in the repository refused |
+| 216 | `scan-report` with no result, a green result, a moved head; `scan` while off | Red check and comment; green; no check; a red result and a failed step |

@@ -44,7 +44,8 @@ from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
 
-from . import binding, blast, login, perform, permissions, provenance, quarantine, registry, supply_chain
+from . import binding, blast, login, perform, permissions, provenance, quarantine, registry, secscan, supply_chain
+from .workspace import git_env
 from evidence import producer as evidence_producer
 from mcp_gateway import app_gateway as mcp_app_gateway
 from .runtimes import BINARIES
@@ -153,15 +154,18 @@ def other_runs(gh: GitHub, own_run_id: str) -> list:
 
 def cmd_plan(args) -> int:
     gh = GitHub(_env("GITHUB_TOKEN"), args.repo)
-    busy, unknown = busy_lanes(other_runs(gh, os.environ.get("GITHUB_RUN_ID", "")))
+    runs = other_runs(gh, os.environ.get("GITHUB_RUN_ID", ""))
+    busy, unknown = busy_lanes(runs)
     if unknown:
         _log("another run of this workflow is still starting its jobs; starting nothing now, the next run plans again")
         _output("count", "0")
         _output("matrix", json.dumps({"job": []}))
         _output("land_count", "0")
         _output("land_matrix", json.dumps({"land": []}))
+        _output("scan_count", "0")
+        _output("scan_matrix", json.dumps(secscan.scan_matrix([])))
         return 0
-    survey, _ = live_survey(gh, _log)
+    survey, router = live_survey(gh, _log)
     jobs, notes = plan(survey, busy)
     for note in notes:
         _log(note)
@@ -174,6 +178,115 @@ def cmd_plan(args) -> int:
     _output("matrix", json.dumps(job_matrix(jobs), separators=(",", ":"), sort_keys=True))
     _output("land_count", str(len(landings)))
     _output("land_matrix", json.dumps(land_matrix(landings), separators=(",", ":"), sort_keys=True))
+    scans = plan_scans(gh, router, runs)
+    _output("scan_count", str(len(scans)))
+    _output("scan_matrix", json.dumps(secscan.scan_matrix(scans), separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def _scan_mode(config: dict) -> str:
+    """``"security_scan"`` (Amendment 036): ``"off"`` when absent; an unknown value fails the job."""
+    try:
+        return secscan.mode(config)
+    except secscan.ScanError as exc:
+        raise DispatchError(str(exc)) from None
+
+
+def plan_scans(gh: GitHub, router: MissionRouter, runs: list) -> list:
+    """The security scans due (Amendment 036): none while ``"security_scan"`` is ``"off"``. A target that cannot be
+    read is left out this time; the next plan looks again."""
+    if _scan_mode(load_config()) == secscan.OFF:
+        return []
+    try:
+        jobs, notes = secscan.plan_scans(secscan.scan_targets(router), lambda sha: gh.check_runs(sha, secscan.CHECK_NAME),
+                                         secscan.busy_scans(runs))
+    except GitHubError as exc:
+        _log(f"scan targets could not be read, so no scan starts this time: {exc}")
+        return []
+    for note in notes:
+        _log(note)
+    for job in jobs:
+        _log(f"due: {job.name} ({job.kind} {job.subject}, into {job.base_ref})")
+    return jobs
+
+
+def _scan_job() -> "secscan.ScanJob":
+    try:
+        return secscan.ScanJob.from_dict(json.loads(_env("SCAN")))
+    except ValueError:
+        raise DispatchError("SCAN is not JSON") from None
+    except secscan.ScanError as exc:
+        raise DispatchError(str(exc)) from None
+
+
+def cmd_scan_prepare(args) -> int:
+    """Read token only: is the scan still due (the PR open at the same head), and a fresh clone at that head."""
+    job = _scan_job()
+    if _scan_mode(load_config()) == secscan.OFF:
+        raise DispatchError("security_scan is off")
+    token = _env("GITHUB_TOKEN")
+    pr = GitHub(token, args.repo).get(f"/pulls/{job.pr}") or {}
+    due = pr.get("state") == "open" and (pr.get("head") or {}).get("sha") == job.head_sha
+    _output("due", "true" if due else "false")
+    if not due:
+        _log(f"{job.name}: the PR is closed or its head moved; nothing to scan")
+        return 0
+    try:
+        base = secscan.prepare_checkout(job, Path(args.root), CLONE_URL.format(repo=args.repo),
+                                        git_env(os.environ, token))
+    except secscan.ScanError as exc:
+        raise DispatchError(str(exc)) from None
+    _log(f"{job.name}: checkout at {job.head_sha}; scanning from the merge base {base}")
+    return 0
+
+
+def cmd_scan(args) -> int:
+    """No GitHub token: run the scanner, the proxy holding the key, and write ``result.json``. A scan that cannot
+    run writes a failed result too, so the report job never reads silence as green."""
+    job = _scan_job()
+    root, out = Path(args.root), Path(args.out)
+    code, base, error = None, "", ""
+    try:
+        config = load_config()
+        if _scan_mode(config) == secscan.OFF:
+            raise secscan.ScanError("security_scan is off")
+        base = secscan.read_merge_base(root)
+        table = supply_chain.read_pins(Path(__file__).resolve().parents[1] / supply_chain.PINS_TABLE)
+        node = ((table.get("tools") or {}).get(secscan.TOOL) or {}).get("version", "")
+        code = secscan.run_scan(job, root, Path(args.tools), out, os.environ, _blast_mode(config), args.run_as,
+                                node, base, timeout=args.timeout, log=_log)
+    except (secscan.ScanError, DispatchError, supply_chain.SupplyChainError, OSError) as exc:
+        error = str(exc) or type(exc).__name__
+    result = secscan.read_result(job, root / secscan.RESULTS_DIR, code, base, error)
+    secscan.write_result(out / secscan.RESULT_FILE, result)
+    _NOTE.update(result=evidence_producer.text_digest(json.dumps(result, sort_keys=True)),
+                 conclusion=result["conclusion"])
+    _log(f"{job.name}: {result['conclusion']}: {result['reason']}")
+    if error:
+        raise DispatchError(error)
+    return 0
+
+
+def cmd_scan_report(args) -> int:
+    """Set the ``security-scan`` check on the head and post the result through the quarantine. No result (the scan
+    job failed before writing one) is a failure, never green."""
+    job = _scan_job()
+    gh = GitHub(_env("GITHUB_TOKEN"), args.repo)
+    pr = gh.get(f"/pulls/{job.pr}") or {}
+    if pr.get("state") != "open" or (pr.get("head") or {}).get("sha") != job.head_sha:
+        _log(f"{job.name}: the PR is closed or its head moved; no check is set")
+        return 0
+    path = Path(args.result) / secscan.RESULT_FILE
+    if path.is_file() and not path.is_symlink():
+        parsed = secscan.parse_result(path.read_text(encoding="utf-8", errors="replace"), job)
+    else:
+        parsed = {"conclusion": "failure", "reason": "the scan job ended without a result", "findings": [],
+                  "finding_count": 0}
+    title, body = secscan.report_text(job, parsed, os.environ.get("RUN_URL", ""))
+    gh.create_check_run(secscan.CHECK_NAME, job.head_sha, "completed", parsed["conclusion"], title, body)
+    gh.comment(job.pr, body)
+    _NOTE.update(comment=evidence_producer.text_digest(body), conclusion=parsed["conclusion"])
+    _log(f"{job.name}: {secscan.CHECK_NAME} set to {parsed['conclusion']}: {title}")
     return 0
 
 
@@ -652,6 +765,7 @@ def write_refusal(path: str, reason: str) -> None:
 _NOTE: dict = {}
 STEP_ACTIONS = {"prepare": "dispatch.prepare", "run": "dispatch.run", "collect": "dispatch.collect",
                 "publish": "dispatch.publish", "report": "dispatch.report", "registry-check": "dispatch.refusal"}
+SCAN_ACTIONS = {"scan": "dispatch.scan", "scan-report": "dispatch.scan_report"}  # Amendment 036
 DISPATCH_ACTOR, CHECKS_ACTOR, GATEWAY_ACTOR, EGRESS_ACTOR = "mission-dispatch", "mission-checks", "mcp-gateway", "egress-proxy"
 APP_GATEWAY_ACTOR = "app-gateway"
 HARNESS_KINDS = ("read", "write", "send", "delete")  # a harness call is recorded as harness.<kind> (Amendment 030)
@@ -751,11 +865,29 @@ def record_harness_calls(recorder, log: Path, base: dict) -> int:
     return written
 
 
+def record_scan(recorder, step: str, result: str, reason: str) -> None:
+    """The scan's records (Amendment 036): ``dispatch.scan`` (``decide``) with the result's digest, and
+    ``dispatch.scan_report`` (``send``) with the comment's. Never fails the step."""
+    try:
+        job = _scan_job()
+    except DispatchError:
+        return
+    outputs = {k: _NOTE[k] for k in ("result", "comment") if _NOTE.get(k)}
+    recorder.record(actor=DISPATCH_ACTOR, account_id=None, action=SCAN_ACTIONS[step], result=result,
+                    reason=reason or f"{secscan.CHECK_NAME}: {_NOTE.get('conclusion', result)}", outputs=outputs,
+                    mission=job.subject if job.kind == "mission" else None, pr=job.pr, commit=job.head_sha,
+                    authority_kind="spec_rule", authority_ref=f"SECURITY-SCAN-SPEC-001 §3, {job.kind} {job.subject}")
+
+
 def record_step(recorder, args, result: str, reason: str) -> None:
     """This step's records (§3m item 1, ring 6 part 2): one for the step, with the digests of what it wrote; under
     ``checks``, one per check; after ``collect``, one per gateway decision and per egress decision. Never fails
     the step (``"evidence": "observe"``)."""
     step = args.step
+    if step in SCAN_ACTIONS:
+        if recorder.enabled:
+            record_scan(recorder, step, result, reason)
+        return
     if not recorder.enabled or (step not in STEP_ACTIONS and step != "checks"):
         return
     if step == "registry-check" and result == "done":
@@ -859,6 +991,18 @@ def main(argv=None) -> int:
     sub.choices["report"].add_argument("--refusal", action="append", help="a refusal record from collect or publish")
     sub.choices["report"].add_argument("--capacity", help="accepted for workflow compatibility; ignored")
     sub.choices["report"].add_argument("--drafts", default="", help="the run's drafted list (Amendment 031)")
+    scan_prep = sub.add_parser("scan-prepare", help="the security scan's checkout (Amendment 036)")
+    scan_prep.add_argument("--repo", required=True)
+    scan_prep.add_argument("--root", required=True)
+    scanning = sub.add_parser("scan", help="the security scan itself, no GitHub token (Amendment 036)")
+    scanning.add_argument("--root", required=True)
+    scanning.add_argument("--tools", required=True, help="where tree-install put Node and the scanner")
+    scanning.add_argument("--out", required=True)
+    scanning.add_argument("--run-as", default="", help="the agent's own account (blast radius, §3h)")
+    scanning.add_argument("--timeout", type=float, default=secscan.SCAN_TIMEOUT)
+    scan_report = sub.add_parser("scan-report", help="the security-scan check and comment (Amendment 036)")
+    scan_report.add_argument("--repo", required=True)
+    scan_report.add_argument("--result", required=True, help="the scan job's result folder")
     performing = sub.add_parser("perform", help="HITL's /mission perform (Amendment 032)")
     performing.add_argument("--stage", required=True, choices=("check", "call", "report"))
     performing.add_argument("--repo", default="")
@@ -866,7 +1010,8 @@ def main(argv=None) -> int:
     performing.add_argument("--plan", default="", help="where check wrote the plan")
     args = parser.parse_args(argv)
     steps = {"blast-mode": cmd_blast_mode, "tree-install": cmd_tree_install, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
-             "publish": cmd_publish, "report": cmd_report, "land": cmd_land, "perform": cmd_perform}
+             "publish": cmd_publish, "report": cmd_report, "land": cmd_land, "perform": cmd_perform,
+             "scan-prepare": cmd_scan_prepare, "scan": cmd_scan, "scan-report": cmd_scan_report}
     recorder = evidence_producer.Recorder.from_env(os.environ)
     _NOTE.clear()
     try:

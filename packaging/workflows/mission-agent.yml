@@ -35,6 +35,13 @@ name: Mission Agent
 #   list with the read token, claims the list, then makes exactly those calls through the
 #   app gateway as the service principal in a step with no token, only the listed apps'
 #   keys (environment mission-runtime, no model login, no agent). Amendment 032.
+# - secscan: the security scan (SECURITY-SCAN-SPEC-001; Amendment 036), only while config.json "security_scan" is
+#   not "off". Its own VM, environment mission-secscan (deployable from the default branch only), which holds only
+#   OPENAI_API_KEY. The read token clones the PR's exact head in one step; the key is given only to the scan step,
+#   where the egress proxy holds it and the scanner (pinned with its whole tree, Amendment 034) runs as the agent's
+#   own account with a stand-in, its one way out the proxy (Amendment 035). No token there.
+# - secscan report: a separate VM with no key and none of the scanner's code. It reads the scan's result strictly,
+#   sets the security-scan check on the head and posts the findings through the quarantine. No result is red.
 # - No agent App may hold the Workflows permission, so no agent can change this file.
 
 on:
@@ -79,6 +86,8 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       land_count: ${{ steps.plan.outputs.land_count }}
       land_matrix: ${{ steps.plan.outputs.land_matrix }}
+      scan_count: ${{ steps.plan.outputs.scan_count }}
+      scan_matrix: ${{ steps.plan.outputs.scan_matrix }}
     steps:
       - name: Check out the default branch's tooling
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -653,6 +662,175 @@ jobs:
           AGENT_SLUG: ${{ steps.token.outputs.app-slug }}
           APP_ID: ${{ vars.APP_ID }}
         run: python3 -m mission_dispatch land --repo "$GITHUB_REPOSITORY"
+
+  # The security scan of an A3 PASS PR or a stack's landing PR (SECURITY-SCAN-SPEC-001 §3; Amendment 036).
+  # Reporting only: the router does not wait on the check yet (part 4).
+  secscan:
+    name: "secscan #${{ matrix.scan.pr }} ${{ matrix.scan.head_sha }}"
+    needs: [plan]
+    if: ${{ !cancelled() && needs.plan.outputs.scan_count != '0' && needs.plan.outputs.scan_count != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    environment: mission-secscan
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.scan_matrix) }}
+    env:
+      SCAN: ${{ toJSON(matrix.scan) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6; the scanner never sees it)
+        env:
+          LANE: ${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-secscan-$LANE" >> "$GITHUB_ENV"
+
+      - name: The scanner's own account (the scan needs blast radius enforced)
+        run: |
+          python3 -m mission_dispatch blast-mode
+          if ! grep -qx 'mode=enforce' "$GITHUB_OUTPUT"; then
+            echo "::error::the security scan needs blast_radius enforced, so the key can be kept from the scanner"
+            exit 1
+          fi
+          sudo useradd --create-home --shell /bin/bash mission-agent
+          sudo cp -a tooling /opt/mission-tooling
+          sudo chown -R root:root /opt/mission-tooling
+          sudo chmod -R a+rX,go-w /opt/mission-tooling
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /srv/mission-job
+
+      - name: Is the scan still due? A fresh clone at the PR's head (read-only token, this step only)
+        id: due
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONPATH: /opt/mission-tooling/tools/agent_workflow
+        run: python3 -m mission_dispatch scan-prepare --repo "$GITHUB_REPOSITORY" --root /srv/mission-job/scan
+
+      - name: Install Node and the scanner (pinned with its whole tree, Amendment 034; never npm)
+        if: steps.due.outputs.due == 'true'
+        env:
+          PYTHONPATH: /opt/mission-tooling/tools/agent_workflow
+        run: |
+          tools="$RUNNER_TEMP/scan-tools"
+          python3 -B -m mission_dispatch tree-install --tool node --dest "$tools"
+          python3 -B -m mission_dispatch tree-install --tree codex-security --dest "$tools/codex-security"
+          sudo cp -a "$tools" /opt/mission-scan-tools  # root-owned, outside the runner's home
+          sudo chown -R root:root /opt/mission-scan-tools
+          sudo chmod -R a+rX,go-w /opt/mission-scan-tools
+
+      - name: Run the scan (no GitHub token; the egress proxy holds the key)
+        if: steps.due.outputs.due == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHONPATH: /opt/mission-tooling/tools/agent_workflow
+        run: >-
+          python3 -m mission_dispatch scan --root /srv/mission-job/scan --tools /opt/mission-scan-tools
+          --out "$RUNNER_TEMP/scan-out" --run-as mission-agent
+
+      - name: Hand the result to the report job
+        if: always() && steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scan-result-${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+          path: ${{ runner.temp }}/scan-out/result.json
+          if-no-files-found: ignore  # none: the report job sets the check red
+          retention-days: 1
+
+      - name: Keep the SARIF and the report (SECURITY-SCAN-SPEC-001 §3, Output)
+        if: always() && steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scan-${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+          path: |
+            ${{ runner.temp }}/scan-out
+            /srv/mission-job/scan/scan.log
+            /srv/mission-job/scan/egress.jsonl
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-secscan-${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
+  secscan-report:
+    name: "secscan #${{ matrix.scan.pr }} ${{ matrix.scan.head_sha }} report"
+    needs: [plan, secscan]
+    if: ${{ !cancelled() && needs.plan.outputs.scan_count != '0' && needs.plan.outputs.scan_count != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write  # the security-scan check on the PR's head
+      pull-requests: write  # the comment on the PR
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.scan_matrix) }}
+    env:
+      SCAN: ${{ toJSON(matrix.scan) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m)
+        env:
+          LANE: ${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-secscan-report-$LANE" >> "$GITHUB_ENV"
+
+      - name: Fetch the scan's result
+        continue-on-error: true  # without it the check is red: the scan job ended without a result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: scan-result-${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+          path: ${{ runner.temp }}/scan-result
+
+      # A PR closed, or whose head moved, since the plan gets no check: scan-report looks first.
+      - name: Set the security-scan check and post the result (quarantined)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m mission_dispatch scan-report --repo "$GITHUB_REPOSITORY" --result "$RUNNER_TEMP/scan-result"
+
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-secscan-report-${{ matrix.scan.pr }}-${{ matrix.scan.head_sha }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
 
   # HITL's /mission perform <digest> (MISSION-DISPATCH-001 Amendment 032): performs exactly a run's drafted app
   # calls. The comment only starts the job; check re-derives every mission and reads the command, the report and
