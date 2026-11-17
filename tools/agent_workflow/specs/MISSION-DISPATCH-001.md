@@ -249,6 +249,19 @@ The router does not wait on the check: part 4 adds the hold and HITL's two comma
 HITL decided both open questions (2026-11-16): send-back ends the mission rather than reopening it, and accept-scan
 works on a stack's landing PR too. Under enforce, a red report names both commands. `config.json` still leaves the
 scan off, until the pilot (part 5). §3q item 14; vectors 217 to 224.
+**Amendment 038 (2026-11-17, the security scan pilot's first run, AST-SCAN.1):** the scanner's state and output move
+to a root-owned private area.
+- **What the first run showed:** the proxy held the pilot key, and its readiness request came back `200`. Then the
+  scanner stopped with `Scan output parent must have a trusted owner: /srv/mission-job/scan` and exited 2, before it
+  scanned anything. The check was red and the router held the PR, so it failed closed as designed.
+- **The scanner's own rule** (its `requireSecureOutputAncestry`, read as data): every folder above its output folder,
+  its state folder and its credential home must be owned by root or by the scanner's account, and writable by no one
+  else unless sticky. The job root is the runner's, so the rule refused it.
+- **The fix** (§3q item 9): the job makes `/srv/mission-scan`, owned by root, mode 755. The scan step checks that it
+  and every folder above it meet the same rule, then creates `state` and `results` in it, owned by the scanner's
+  account, mode 0700. Only the checkout is handed over as before, and `results` is taken back before it is read.
+
+The job root, the proxy's log and the checkout stay where they were. Vector 225.
 
 ## 1. Purpose
 
@@ -2168,6 +2181,11 @@ Part 3 (Amendment 036) builds the scan job itself, reporting only (`mission_disp
      `supports_websockets` off, and whose key variable holds only the stand-in. Analytics and update notices are
      off. No project file is passed (`-c`), so nothing in the checkout configures the scan. Then every process of
      the account is killed, the proxy stops, and the log is scrubbed of the key and the stand-in.
+   - **Its state and output (Amendment 038)** are in `/srv/mission-scan`, which the job makes, owned by root, mode
+     755. The step first checks that it and every folder above it are root's real directories, writable by no one
+     else unless sticky, which is the scanner's own rule for its parents. It then makes `state` (the scanner's
+     `CODEX_SECURITY_STATE_DIR` and `CODEX_HOME`) and `results` (its `--output-dir`) there, owned by the account,
+     mode 0700, and refuses if either is already there. After the run, `results` is taken back before it is read.
    - It writes `result.json`, always: a scan that could not run writes a red one.
 10. **The result** (`secscan.read_result`). `success` only when the scanner exited 0, `scan-manifest.json` says
     `completed`, and `findings.json` lists no finding. HITL decided that any finding the scanner reports blocks,
@@ -2681,3 +2699,4 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 222 | A stack's landing PR under enforce, with no scan then a green one; with a red one, then HITL's accept-scan on the stack's issue | Held, then landed; the router's comment names the stack's issue, and the accept lands it and is recorded (router 137) |
 | 223 | HITL's `/mission send-back` on the stack's issue once every mission passed, with a red scan; the same while a mission is still running | The stack is blocked, with "Stack sent back", the landing PR is not merged, nothing reaches `main`, and the command is recorded; the stack is not blocked (router 138) |
 | 224 | The report under enforce, red, for a mission and for a stack; green; under observe | Names both commands, the head and where to post them, never at the start of a line; says the router merges only with it green; says reporting only |
+| 225 | The private area: root's chain, a sticky parent; a folder another user owns, one writable by others, a symlink, a file, a missing folder; one already holding `results`; a folder that cannot be made; output not taken back; the workflow | Passes, and the scanner's state and output are made there, its own, 0700, with only the checkout handed over and `results` taken back; refused before the scanner starts in every other case; a problem after the run, so red; the job makes it root-owned and passes it (Amendment 038) |

@@ -23,7 +23,9 @@ before it reports it. Anything else (a refusal, a scan that did not finish, a re
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -49,7 +51,9 @@ RESULT_FILE = "result.json"
 RESULT_SCHEMA = "mission-secscan-result-v1"
 OUT_FILES = ("report.md", "results.sarif")  # kept with result.json as the scan's artifact
 SCAN_LOG = "scan.log"
-RESULTS_DIR = "results"  # the scanner's --output-dir, under the job root and outside the checkout
+RESULTS_DIR = "results"  # the scanner's --output-dir, in the private area (Amendment 038)
+STATE_DIR = "state"  # CODEX_SECURITY_STATE_DIR and CODEX_HOME, in the private area
+PRIVATE = "/srv/mission-scan"  # root-owned: the scanner refuses state or output under a parent another user owns
 MAX_FINDINGS = 200  # findings kept in result.json; the count is always exact
 LISTED = 20  # findings listed in the comment and the check
 TEXT_MAX = 300
@@ -332,12 +336,35 @@ def report_text(job: ScanJob, parsed: Mapping[str, Any], run_url: str = "",
 
 
 # ------------------------------------------------------------------ running it
+def require_trusted_parent(private: Path, lstat: Callable[[str], os.stat_result] = os.lstat) -> None:
+    """The private area and every folder above it must be root's real directories, writable by no one else unless
+    sticky: the scanner refuses state or output under a parent another user could rename (AST-SCAN.1, 2026-11-17;
+    Amendment 038). Checked before the scanner starts, so a wrong setup says why."""
+    current = Path(private)
+    while True:
+        try:
+            meta = lstat(str(current))
+        except OSError as exc:
+            raise ScanError(f"the scan's private area cannot be checked at {current}: {exc}") from None
+        if stat.S_ISLNK(meta.st_mode) or not stat.S_ISDIR(meta.st_mode):
+            raise ScanError(f"the scan's private area must be real directories: {current} is not")
+        if meta.st_uid != 0:
+            raise ScanError(f"the scan's private area must be owned by root up to /: {current} is not")
+        if meta.st_mode & 0o022 and not meta.st_mode & 0o1000:
+            raise ScanError(f"the scan's private area must not be writable by others: {current} is")
+        if current.parent == current:
+            return
+        current = current.parent
+
+
 def run_scan(job: ScanJob, root: Path, tools: Path, out_dir: Path, environ: Mapping[str, str], blast_mode: str,
              run_as: str, node_version: str, merge_base: str, timeout: float = SCAN_TIMEOUT,
              egress: Optional["blast.AgentEgress"] = None, run: Callable[..., Any] = subprocess.run,
-             log: Callable[[str], None] = print) -> int:
-    """Run the scanner on ``root/checkout`` as ``run_as``, its only way out the proxy, which holds the key. Returns
-    its exit code. Raises ``ScanError`` before the scanner starts when the key cannot be kept from it."""
+             log: Callable[[str], None] = print, private: Path = Path(PRIVATE),
+             check_private: Callable[[Path], None] = require_trusted_parent) -> int:
+    """Run the scanner on ``root/checkout`` as ``run_as``, its only way out the proxy, which holds the key. Its state
+    and output are in ``private``, a root-owned area outside the job root (Amendment 038). Returns its exit code.
+    Raises ``ScanError`` before the scanner starts when the key cannot be kept from it."""
     from .dispatch import DispatchError, SCAN_RUNTIME, scan_login_plan, scrub  # no import cycle
     if not run_as:
         raise ScanError("the scan runs only as the agent's own account (blast_radius enforced)")
@@ -351,9 +378,11 @@ def run_scan(job: ScanJob, root: Path, tools: Path, out_dir: Path, environ: Mapp
     for need in (node_bin / "node", cli):
         if need.is_symlink() or not need.is_file():
             raise ScanError(f"the pinned install has no {need.name}")
-    state_dir, results = root / "state", root / RESULTS_DIR
+    check_private(private)
+    state_dir, results = private / STATE_DIR, private / RESULTS_DIR
     for folder in (state_dir, results):
-        folder.mkdir(mode=0o700)
+        if os.path.lexists(folder):
+            raise ScanError(f"the scan's private area already holds {folder.name}")
     log_path = root / SCAN_LOG
     state, endpoint = plan["state"], plan["endpoint"]
     secrets = [plan["proxy_login"]["login"], state["standin"]]
@@ -371,7 +400,11 @@ def run_scan(job: ScanJob, root: Path, tools: Path, out_dir: Path, environ: Mapp
         log(f"scan: the proxy holds the key; readiness {ready['reason']}")
         argv = scan_argv(node_bin / "node", cli, merge_base, results, egress.port)
         env = blast.account_env(env, run_as, environ.get("HOME", ""))
-        blast.hand_over(root, run_as, [tree, state_dir, results], egress.run)
+        for folder in (state_dir, results):  # the scanner's own, 0700, under root's parent
+            made = egress.run(["sudo", "-n", "install", "-d", "-o", run_as, "-g", run_as, "-m", "0700", str(folder)])
+            if made.returncode != 0:
+                raise ScanError(f"cannot make {folder} for {run_as}: {(made.stderr or '').strip()[:200]}")
+        blast.hand_over(root, run_as, [tree], egress.run)
         argv = [*blast.run_as_argv(run_as, list(env), environ.get("HOME", "")), *argv]
     except (blast.BlastError, ScanError) as exc:
         egress.stop()
@@ -388,6 +421,10 @@ def run_scan(job: ScanJob, root: Path, tools: Path, out_dir: Path, environ: Mapp
         log(f"::error::the scanner could not start: {exc}")
     finally:
         problems = blast.take_back(root, run_as, egress.run)
+        back = egress.run(["sudo", "-n", "chown", "-R", "--no-dereference", f"{os.getuid()}:{os.getgid()}",
+                           str(results)])
+        if back.returncode != 0:
+            problems.append(f"cannot take {results} back from {run_as}")
         egress.stop()
         blast.keep_tail(log_path)
         scrub(log_path, secrets)

@@ -254,10 +254,10 @@ def cmd_scan(args) -> int:
         table = supply_chain.read_pins(Path(__file__).resolve().parents[1] / supply_chain.PINS_TABLE)
         node = ((table.get("tools") or {}).get(secscan.TOOL) or {}).get("version", "")
         code = secscan.run_scan(job, root, Path(args.tools), out, os.environ, _blast_mode(config), args.run_as,
-                                node, base, timeout=args.timeout, log=_log)
+                                node, base, timeout=args.timeout, log=_log, private=Path(args.private))
     except (secscan.ScanError, DispatchError, supply_chain.SupplyChainError, OSError) as exc:
         error = str(exc) or type(exc).__name__
-    result = secscan.read_result(job, root / secscan.RESULTS_DIR, code, base, error)
+    result = secscan.read_result(job, Path(args.private) / secscan.RESULTS_DIR, code, base, error)
     secscan.write_result(out / secscan.RESULT_FILE, result)
     _NOTE.update(result=evidence_producer.text_digest(json.dumps(result, sort_keys=True)),
                  conclusion=result["conclusion"])
@@ -1000,6 +1000,8 @@ def main(argv=None) -> int:
     scanning.add_argument("--out", required=True)
     scanning.add_argument("--run-as", default="", help="the agent's own account (blast radius, §3h)")
     scanning.add_argument("--timeout", type=float, default=secscan.SCAN_TIMEOUT)
+    scanning.add_argument("--private", default=secscan.PRIVATE,
+                          help="root-owned area for the scanner's state and output (Amendment 038)")
     scan_report = sub.add_parser("scan-report", help="the security-scan check and comment (Amendment 036)")
     scan_report.add_argument("--repo", required=True)
     scan_report.add_argument("--result", required=True, help="the scan job's result folder")
