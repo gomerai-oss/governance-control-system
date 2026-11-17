@@ -24,7 +24,8 @@ from unittest import mock
 
 from egress import proxy
 from mission_dispatch import blast, login
-from mission_dispatch.dispatch import DispatchError, Job, collect, model_login_plan, plan, prepare, run_agent
+from mission_dispatch.dispatch import (DispatchError, Job, collect, model_login_plan, plan, prepare, run_agent,
+                                       scan_login_plan)
 from mission_router.router import load_config
 from mission_router.state import AWAIT_A2
 
@@ -529,6 +530,266 @@ class LoginFileTests(unittest.TestCase):
             self.assertNotIn(REAL, seen["argv"] + seen["env"], "never on a command line or in the environment")
             self.assertIn("--exclusive", seen["argv"])
             self.assertFalse(seen["path"].exists() or seen["path"].parent.exists(), "file and folder are gone")
+
+
+
+# ---------------------------------------------------------------- Amendment 035: the security scanner's model route
+OPENAI_KEY = "sk-proj-" + "R" * 40
+SCAN_SHIPPED = Path(__file__).resolve().parents[1] / "mission_dispatch" / "egress-policy.json"
+
+
+class _OpenAIHost(http.server.BaseHTTPRequestHandler):
+    """A fake TLS ``api.openai.com``: records what reaches it, answers 200."""
+    protocol_version = "HTTP/1.1"
+    seen: list = []
+
+    def _answer(self):
+        n = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(n) if n else b""
+        _OpenAIHost.seen.append({"method": self.command, "path": self.path, "body": body,
+                                 "headers": {k.lower(): v for k, v in self.headers.items()}})
+        out = b'{"object": "list", "data": []}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(out)))
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.wfile.write(out)
+
+    do_GET = do_POST = _answer
+
+    def log_message(self, *args):
+        pass
+
+
+class ScannerEndpointTests(unittest.TestCase):
+    """The proxy's model route for the security scanner (a ``bearer`` login), against a fake ``api.openai.com``."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = Path(cls.tmp.name)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(d / "k.pem"),
+                        "-out", str(d / "c.pem"), "-days", "1", "-subj", "/CN=api.openai.com",
+                        "-addext", "subjectAltName=DNS:api.openai.com"], check=True, capture_output=True)
+        cls.host = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _OpenAIHost)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(d / "c.pem"), str(d / "k.pem"))
+        cls.host.socket = ctx.wrap_socket(cls.host.socket, server_side=True)
+        threading.Thread(target=cls.host.serve_forever, daemon=True).start()
+        cls.ca = str(d / "c.pem")
+        cls.endpoint = proxy.load_model_endpoints(SCAN_SHIPPED.read_text(encoding="utf-8"))["codex-security"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.host.shutdown()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        _OpenAIHost.seen = []
+        self.dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.dir.cleanup)
+        self.log = Path(self.dir.name) / "egress.jsonl"
+        for patch in (mock.patch.object(proxy, "PORT", self.host.server_address[1]),
+                      mock.patch.object(proxy, "address_problem", lambda addresses: None)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def serve(self, exclusive=True):
+        egress = proxy.Egress(["api.openai.com"], proxy.ENFORCE, self.log, resolver=lambda h, p: ["127.0.0.1"],
+                              model=self.endpoint, login=proxy.ModelLogin("bearer", OPENAI_KEY, STANDIN),
+                              exclusive=exclusive, tls=ssl.create_default_context(cafile=self.ca))
+        server = proxy.Server(egress)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return server.port
+
+    def call(self, port, method="POST", path="/model/v1/responses", token=STANDIN, host=None, extra=None):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        headers = {"Authorization": f"Bearer {token}", "Host": host or f"127.0.0.1:{port}", **(extra or {})}
+        body = b'{"model":"m","input":"x"}' if method == "POST" else None
+        if body:
+            headers["content-type"] = "application/json"
+        conn.request(method, path, body=body, headers=headers)
+        reply = conn.getresponse()
+        reply.read()
+        return reply.status
+
+    def lines(self, want=0):
+        deadline = time.monotonic() + 5
+        while True:
+            found = [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
+            if len(found) >= want or time.monotonic() > deadline:
+                return found
+            time.sleep(0.02)
+
+    def test_the_key_is_a_plain_bearer_and_nothing_of_anthropics_is_added(self):  # vector 203
+        port = self.serve()
+        self.assertEqual(self.call(port, extra={"anthropic-beta": "x", "x-api-key": "other", "Cookie": "c=1"}), 200)
+        (seen,) = _OpenAIHost.seen
+        self.assertEqual((seen["method"], seen["path"]), ("POST", "/v1/responses"))
+        self.assertEqual(seen["headers"]["authorization"], f"Bearer {OPENAI_KEY}")
+        self.assertEqual(seen["headers"]["host"], "api.openai.com")
+        for absent in ("x-api-key", "anthropic-beta", "cookie"):
+            self.assertNotIn(absent, seen["headers"])
+        self.assertNotIn(STANDIN, json.dumps(seen["headers"]))
+        (line,) = self.lines(want=1)
+        self.assertEqual((line["route"], line["decision"], line["status"], line["path"]),
+                         ("model", "allowed", 200, "/v1/responses"))
+        text = self.log.read_text()
+        self.assertNotIn(OPENAI_KEY, text)
+        self.assertNotIn(STANDIN, text)
+
+    def test_the_model_list_is_a_get_and_its_query_is_exact(self):
+        port = self.serve()
+        self.assertEqual(self.call(port, "GET", "/model/v1/models?client_version=0.167.1"), 200)
+        self.assertEqual(self.call(port, "GET", "/model/v1/models"), 200)
+        self.assertEqual([(s["method"], s["path"]) for s in _OpenAIHost.seen],
+                         [("GET", "/v1/models?client_version=0.167.1"), ("GET", "/v1/models")])
+        self.assertTrue(all(s["headers"]["authorization"] == f"Bearer {OPENAI_KEY}" for s in _OpenAIHost.seen))
+
+    def test_what_the_endpoint_refuses(self):  # vector 204
+        port = self.serve()
+        cases = {
+            "no stand-in": dict(token=""),
+            "the key itself": dict(token=OPENAI_KEY),
+            "another route": dict(path="/model/v1/chat/completions"),
+            "files": dict(path="/model/v1/files"),
+            "the wrong method for a route": dict(method="GET", path="/model/v1/responses"),
+            "the wrong method the other way": dict(method="POST", path="/model/v1/models"),
+            "a query not on the list": dict(method="GET", path="/model/v1/models?client_version=9.9.9"),
+            "a query on a route that lists none": dict(path="/model/v1/responses?debug=1"),
+            "another host header": dict(host="evil.example.com"),
+            "a traversal": dict(path="/model/v1/responses/../files"),
+            "an absolute URL": dict(path="http://evil.example.com/v1/responses"),
+        }
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.assertIn(self.call(port, **kw), (403, 405))
+        self.assertEqual(_OpenAIHost.seen, [], "nothing was forwarded")
+        self.assertTrue(all(line["decision"] == "refused" for line in self.lines()))
+        text = self.log.read_text()
+        self.assertNotIn(OPENAI_KEY, text)
+        self.assertNotIn(STANDIN, text)
+
+    def test_exclusive_closes_the_tunnel_to_api_openai_com(self):  # vector 205
+        for mode in (proxy.ENFORCE, proxy.OBSERVE):
+            egress = proxy.Egress(["api.openai.com"], mode, self.log, resolver=lambda h, p: ["8.8.8.8"],
+                                  model=self.endpoint, login=proxy.ModelLogin("bearer", OPENAI_KEY, STANDIN),
+                                  exclusive=True)
+            _, _, decision = egress.decide("CONNECT", f"api.openai.com:{proxy.PORT}")
+            self.assertFalse(decision.allowed, f"{mode}: the endpoint is the only way to the model host")
+
+    def test_readiness_is_a_get_with_no_body_and_no_anthropic_header(self):  # vector 206
+        port = self.serve()
+        self.assertEqual(self.endpoint.readiness_route, ("GET", "/v1/models"))
+        self.assertIsNone(self.endpoint.readiness_model)
+        self.assertEqual(login.readiness(port, STANDIN, self.endpoint.readiness_route, None), OK)
+        self.lines(want=1)
+        (seen,) = _OpenAIHost.seen
+        self.assertEqual((seen["method"], seen["path"], seen["body"]), ("GET", "/v1/models", b""))
+        for absent in ("anthropic-version", "content-type", "x-api-key"):
+            self.assertNotIn(absent, seen["headers"])
+        refused = login.readiness(port, "standin-wrong" + "0" * 40, self.endpoint.readiness_route, None)
+        self.assertEqual((refused["ok"], refused["status"]), (False, 403))
+
+    def test_the_policy_section_for_a_get_readiness(self):
+        good = json.loads(SCAN_SHIPPED.read_text())
+        entry = good["model_endpoints"]["codex-security"]
+        for name, bad in {"a model on a GET readiness": {**entry, "readiness": {"route": "GET /v1/models", "model": "m1"}},
+                          "no model on a POST readiness": {**entry, "readiness": {"route": "POST /v1/responses",
+                                                                                    "model": None}},
+                          "a readiness route not listed": {**entry, "readiness": {"route": "GET /v1/other", "model": None}},
+                          "a wildcard host": {**entry, "host": "*.openai.com"}}.items():
+            with self.subTest(name), self.assertRaises(proxy.PolicyError):
+                proxy.load_policy(json.dumps({**good, "model_endpoints": {"codex-security": bad}}))
+        claude = good["model_endpoints"]["claude-code"]
+        with self.assertRaises(proxy.PolicyError):  # Claude Code's own readiness still needs its model
+            proxy.load_policy(json.dumps({**good, "model_endpoints": {"claude-code": {
+                **claude, "readiness": {"route": "POST /v1/messages/count_tokens", "model": None}}}}))
+
+
+class ScanLoginPlanTests(unittest.TestCase):
+    """``scan_login_plan``: where the scanner's key goes, and when it refuses (vector 207)."""
+
+    def test_the_proxy_holds_the_key_and_the_scanner_gets_a_fresh_stand_in(self):
+        plan_a = scan_login_plan({"OPENAI_API_KEY": OPENAI_KEY}, blast.ENFORCE)
+        plan_b = scan_login_plan({"OPENAI_API_KEY": OPENAI_KEY}, blast.ENFORCE)
+        self.assertEqual((plan_a["runtime"], plan_a["endpoint"].host), ("codex-security", "api.openai.com"))
+        self.assertEqual(plan_a["proxy_login"]["kind"], "bearer")
+        self.assertEqual(plan_a["proxy_login"]["login"], OPENAI_KEY)
+        standin = plan_a["state"]["standin"]
+        self.assertEqual(plan_a["proxy_login"]["standin"], standin)
+        self.assertTrue(standin.startswith(login.STANDIN_PREFIX))
+        self.assertNotEqual(standin, OPENAI_KEY)
+        self.assertNotEqual(standin, plan_b["state"]["standin"], "a fresh stand-in for each run")
+        self.assertNotIn(OPENAI_KEY, json.dumps(plan_a["state"]), "the record the run keeps never holds the key")
+        self.assertEqual((plan_a["state"]["mode"], plan_a["state"]["placement"]), ("enforce", "proxy"))
+
+    def test_it_refuses_rather_than_fall_back(self):
+        env = {"OPENAI_API_KEY": OPENAI_KEY}
+        with self.assertRaisesRegex(DispatchError, "blast_radius enforced"):
+            scan_login_plan(env, blast.OBSERVE)
+        with self.assertRaisesRegex(DispatchError, "OPENAI_API_KEY"):
+            scan_login_plan({}, blast.ENFORCE)
+        with self.assertRaisesRegex(DispatchError, "OPENAI_API_KEY"):
+            scan_login_plan({"OPENAI_API_KEY": "short"}, blast.ENFORCE)
+        with tempfile.TemporaryDirectory() as tmp:
+            without = json.loads(SCAN_SHIPPED.read_text())
+            del without["model_endpoints"]["codex-security"]
+            path = Path(tmp) / "policy.json"
+            path.write_text(json.dumps(without))
+            with self.assertRaisesRegex(DispatchError, "no model endpoint for codex-security"):
+                scan_login_plan(env, blast.ENFORCE, policy=path)
+            path.write_text("{")
+            with self.assertRaisesRegex(DispatchError, "cannot be read"):
+                scan_login_plan(env, blast.ENFORCE, policy=path)
+
+    def test_a_job_with_only_a_claude_login_has_no_scanner_key(self):
+        self.assertIsNone(login.openai_credential({"ANTHROPIC_API_KEY": "sk-ant-" + "A" * 40}))
+        self.assertEqual(login.openai_credential({"OPENAI_API_KEY": OPENAI_KEY}), ("bearer", OPENAI_KEY))
+
+
+class ScannerLoginFileTests(unittest.TestCase):
+    """The real proxy process, given the scanner's key by file (vector 208)."""
+
+    def test_the_real_proxy_serves_the_scanner_endpoint_and_deletes_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen = {}
+            real_popen = subprocess.Popen
+
+            def popen(argv, **kw):
+                path = Path(argv[argv.index("--login-file") + 1])
+                seen.update(mode=oct(path.stat().st_mode & 0o777), parent=oct(path.parent.stat().st_mode & 0o777),
+                            argv=" ".join(argv), env=json.dumps(kw.get("env", {})), path=path,
+                            doc=json.loads(path.read_text()))
+                return real_popen(argv, **kw)
+
+            egress = blast.AgentEgress("codex-security", blast.OBSERVE, root, popen=popen,
+                                       model_login={"kind": "bearer", "login": OPENAI_KEY, "standin": STANDIN},
+                                       exclusive=True)
+            try:
+                egress.start()
+                self.assertTrue(egress.port, "the shipped policy gives the scanner a model endpoint")
+                self.assertEqual(login.readiness(egress.port, "standin-wrong" + "0" * 40, ("GET", "/v1/models"), None)["status"],
+                                 403, "the endpoint is up, and refuses what is not its stand-in")
+            finally:
+                egress.stop()
+            self.assertEqual((seen["mode"], seen["parent"]), ("0o600", "0o700"))
+            self.assertEqual(seen["doc"]["kind"], "bearer")
+            self.assertNotIn(OPENAI_KEY, seen["argv"] + seen["env"], "never on a command line or in the environment")
+            self.assertIn("--exclusive", seen["argv"])
+            self.assertFalse(seen["path"].exists() or seen["path"].parent.exists())
+
+    def test_the_login_file_takes_a_bearer_kind_and_no_other_new_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "login.json"
+            path.write_text(json.dumps({"kind": "bearer", "login": OPENAI_KEY, "standin": STANDIN}))
+            self.assertEqual(proxy.read_login_file(path), proxy.ModelLogin("bearer", OPENAI_KEY, STANDIN))
+            path.write_text(json.dumps({"kind": "basic", "login": OPENAI_KEY, "standin": STANDIN}))
+            with self.assertRaises(proxy.PolicyError):
+                proxy.read_login_file(path)
 
 
 if __name__ == "__main__":

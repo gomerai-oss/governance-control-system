@@ -1221,6 +1221,41 @@ def app_keys_plan(bound: object, root: Path, environ: Mapping[str, str]) -> Opti
     return {"standin": login.new_standin(), "keys": keys, "classes": classes}
 
 
+SCAN_RUNTIME = "codex-security"  # the security scanner's runtime name in the egress policy (Amendment 035)
+
+
+def scan_login_plan(environ: Mapping[str, str], blast_mode: str, policy: Path = blast.POLICY_FILE) -> Dict[str, Any]:
+    """Where the security scanner's OpenAI key goes (SECURITY-SCAN-SPEC-001 §3, Amendment 035): the proxy holds it, and
+    the scanner is given only the returned stand-in. Unlike a Claude Code job there is no ``"observe"`` fallback in
+    which the runtime keeps its login: the scanner reads untrusted code, so this raises unless the key can be kept out
+    of its reach. It needs
+
+    - the egress proxy's account to differ from the scanner's (``blast_radius`` enforced), or the scanner could read
+      the proxy's memory;
+    - an OpenAI key in this job's environment;
+    - a model endpoint for the scanner in the egress policy.
+
+    Returns ``{"state", "endpoint", "proxy_login", "runtime"}``, the same shape as ``model_login_plan``'s."""
+    if blast_mode != blast.ENFORCE:
+        raise DispatchError("the security scan needs blast_radius enforced: the scanner and the proxy would share an "
+                            "account, so the key could not be kept from the scanner")
+    found = login.openai_credential(environ)
+    if found is None:
+        raise DispatchError(f"the security scan needs {login.SCAN_KEY_ENV} in this job, and it has none")
+    from egress.proxy import PolicyError, load_model_endpoints  # the tooling tree's copy, as the proxy itself
+    try:
+        endpoint = load_model_endpoints(policy.read_text(encoding="utf-8")).get(SCAN_RUNTIME)
+    except (OSError, PolicyError) as exc:
+        raise DispatchError(f"the egress policy cannot be read for the scanner's endpoint: {exc}") from None
+    if endpoint is None:
+        raise DispatchError(f"the egress policy has no model endpoint for {SCAN_RUNTIME}")
+    kind, value = found
+    standin = login.new_standin()
+    state = {"mode": login.ENFORCE, "placement": "proxy", "kind": kind, "standin": standin, "readiness": None}
+    return {"state": state, "endpoint": endpoint, "runtime": SCAN_RUNTIME,
+            "proxy_login": {"kind": kind, "login": value, "standin": standin}}
+
+
 def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, timeout: float = DEFAULT_TIMEOUT,
               binaries: Mapping[str, str] = BINARIES, now: Optional[datetime] = None,
               binding_mode: str = binding.OFF, blast_mode: str = blast.OBSERVE, run_as: Optional[str] = None,

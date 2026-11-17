@@ -40,6 +40,9 @@ ANTHROPIC_VERSION = "2023-06-01"
 # The login forms a Claude Code runtime is given, in the order the runtime itself prefers them.
 CLAUDE_LOGINS = (("ANTHROPIC_API_KEY", "api_key"), ("CLAUDE_CODE_OAUTH_TOKEN", "oauth"))
 CLAUDE_LOGIN_ENV = tuple(name for name, _ in CLAUDE_LOGINS)
+# The security scanner's key (SECURITY-SCAN-SPEC-001, MISSION-DISPATCH-001 Amendment 035): OpenAI's, held by the proxy
+# as a plain bearer. The scanner is told the stand-in under the name its provider setting gives (``env_key``).
+SCAN_KEY_ENV = "OPENAI_API_KEY"
 BASE_URL_ENV, STANDIN_ENV = "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"
 MIN_CHARS = 16
 # Characters a login may be split by and still be read back: whitespace, commas, quotes, plus signs, backslashes.
@@ -64,6 +67,12 @@ def credential(environ: Mapping[str, str]) -> Optional[Tuple[str, str]]:
         if len(value) >= MIN_CHARS:
             return kind, value
     return None
+
+
+def openai_credential(environ: Mapping[str, str]) -> Optional[Tuple[str, str]]:
+    """The security scanner's OpenAI key the job was given, as ``("bearer", value)``, or None."""
+    value = environ.get(SCAN_KEY_ENV, "")
+    return ("bearer", value) if len(value) >= MIN_CHARS else None
 
 
 def new_standin() -> str:
@@ -113,16 +122,22 @@ def encodings_found(text: str, values: Sequence[str]) -> List[str]:
 
 
 # ------------------------------------------------------------------ readiness (item 6e)
-def readiness(port: int, standin: str, route: Tuple[str, str], model: str,
+def readiness(port: int, standin: str, route: Tuple[str, str], model: Optional[str],
               timeout: float = READINESS_TIMEOUT) -> Dict[str, Any]:
-    """One token-count request through the endpoint. ``{"ok", "status", "reason"}``; the body is never kept."""
+    """One minimal request through the endpoint: a token count for Claude Code, or, for a ``GET`` route (the security
+    scanner's model list, Amendment 035), the list itself with no body and no Anthropic header.
+    ``{"ok", "status", "reason"}``; the body is never kept."""
     method, path = route
-    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ready"}]}).encode("utf-8")
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-        conn.request(method, "/model" + path, body=body, headers={
-            "Authorization": f"Bearer {standin}", "content-type": "application/json",
-            "anthropic-version": ANTHROPIC_VERSION, "Host": f"127.0.0.1:{port}"})
+        if method == "GET":
+            conn.request("GET", "/model" + path, headers={"Authorization": f"Bearer {standin}",
+                                                          "Host": f"127.0.0.1:{port}"})
+        else:
+            body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ready"}]}).encode("utf-8")
+            conn.request(method, "/model" + path, body=body, headers={
+                "Authorization": f"Bearer {standin}", "content-type": "application/json",
+                "anthropic-version": ANTHROPIC_VERSION, "Host": f"127.0.0.1:{port}"})
         reply = conn.getresponse()
         reply.read()
         conn.close()

@@ -67,7 +67,9 @@ CHUNK = 64 * 1024
 MODEL_PREFIX = "/model"
 MAX_MODEL_BODY = 32 * 1024 * 1024  # one model request's body
 MODEL_TIMEOUT = 600.0  # a streamed answer can be long
-LOGIN_KINDS = ("api_key", "oauth")
+# ``bearer`` (Amendment 035): a plain ``Authorization: Bearer <key>``, as an OpenAI key is sent, with nothing of
+# Anthropic's added. ``api_key`` and ``oauth`` are Claude Code's.
+LOGIN_KINDS = ("api_key", "oauth", "bearer")
 APP_PREFIX = "/app"
 MAX_APP_BODY = 1024 * 1024  # one app request's body
 APP_TIMEOUT = 120.0
@@ -126,7 +128,7 @@ class ModelEndpoint:
     routes: Tuple[Tuple[str, str], ...]
     queries: Tuple[str, ...]
     readiness_route: Tuple[str, str]
-    readiness_model: str
+    readiness_model: Optional[str]  # None when the readiness route is a GET
 
 
 _ROUTE = re.compile(r"([A-Z]{3,7}) (/[A-Za-z0-9_/.-]{1,200})")
@@ -155,9 +157,12 @@ def load_model_endpoints(text: str) -> Dict[str, ModelEndpoint]:
             raise PolicyError(f"{where}: routes must be \"METHOD /path\" entries")
         if not (isinstance(queries, list) and all(isinstance(q, str) and _QUERY.fullmatch(q) for q in queries)):
             raise PolicyError(f"{where}: queries must be exact query strings")
+        get_route = isinstance(ready, dict) and isinstance(ready.get("route"), str) and ready["route"].startswith("GET ")
         if not (isinstance(ready, dict) and set(ready) == {"route", "model"} and ready["route"] in routes
-                and isinstance(ready["model"], str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,80}", ready["model"])):
-            raise PolicyError(f"{where}: readiness must name one of its routes and a model")
+                and ((get_route and ready["model"] is None)  # a GET readiness request carries no model (Amendment 035)
+                     or (not get_route and isinstance(ready["model"], str)
+                         and re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,80}", ready["model"])))):
+            raise PolicyError(f"{where}: readiness must name one of its routes, and a model unless the route is a GET")
         split = tuple(tuple(r.split(" ", 1)) for r in routes)
         found[runtime] = ModelEndpoint(host, split, tuple(queries), tuple(ready["route"].split(" ", 1)), ready["model"])
     return found
@@ -416,6 +421,9 @@ class Egress:
             lines.append(f"{name}: {value}")
         if self.login.kind == "api_key":
             lines.append(f"x-api-key: {self.login.login}")
+        elif self.login.kind == "bearer":  # Amendment 035: nothing of Anthropic's is added, and its header is dropped
+            lines.append(f"Authorization: Bearer {self.login.login}")
+            return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
         else:
             lines.append(f"Authorization: Bearer {self.login.login}")
             betas = [b.strip() for b in beta.split(",") if b.strip()]
