@@ -50,6 +50,8 @@ ACTIONS: Mapping[str, str] = {
     "dispatch.report": "send",
     "dispatch.refusal": "refuse",
     "dispatch.perform": "decide",  # Amendment 032: HITL's /mission perform, accepted or refused by the perform step
+    "dispatch.scan": "decide",  # Amendment 036: the security scan's result for one PR head
+    "dispatch.scan_report": "send",  # Amendment 036: its security-scan check and PR comment
     # the gateway, the checks job and the credentials check
     "gateway.tool": "decide",
     # the app gateway (Amendment 030): one record per harness tool call, by the tool's class
