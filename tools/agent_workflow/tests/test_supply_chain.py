@@ -339,5 +339,250 @@ class CliTests(unittest.TestCase):
         self.assertIn("pin_findings=0 mode=enforce", text)
 
 
+
+# ------------------------------------------------------------------ Amendment 034: pinned tools and package trees
+from mission_dispatch import tree as tree_mod  # noqa: E402
+import tarfile  # noqa: E402
+
+KEY_NEW, KEY_OLD = "SHA256:" + "N" * 43, "SHA256:" + "O" * 43
+SHIPPED_PINS = Path(__file__).resolve().parents[1] / sc.PINS_TABLE
+
+
+def _tgz(files, extra=None):
+    """An npm-style tarball: ``files`` under ``package/``; ``extra`` adds raw TarInfo entries."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, (data, mode) in files.items():
+            info = tarfile.TarInfo(f"package/{name}")
+            info.size, info.mode = len(data), mode
+            tar.addfile(info, io.BytesIO(data))
+        for info, data in (extra or []):
+            tar.addfile(info, io.BytesIO(data) if data is not None else None)
+    return buf.getvalue()
+
+
+class TreeCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = Path(cls.tmp.name)
+        for name in ("new", "old"):
+            for argv in (["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(d / f"{name}.pem")],
+                         ["openssl", "ec", "-in", str(d / f"{name}.pem"), "-pubout", "-outform", "DER",
+                          "-out", str(d / f"{name}.der")]):
+                subprocess.run(argv, check=True, capture_output=True)
+        cls.dir = d
+        cls.keys = {KEY_NEW: {"key": base64.b64encode((d / "new.der").read_bytes()).decode(), "expires": None},
+                    KEY_OLD: {"key": base64.b64encode((d / "old.der").read_bytes()).decode(),
+                              "expires": "2025-01-29T00:00:00Z"}}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def sign(self, key, message):
+        (self.dir / "m").write_bytes(message)
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.dir / f"{key}.pem"), "-out",
+                        str(self.dir / "s"), str(self.dir / "m")], check=True, capture_output=True)
+        return base64.b64encode((self.dir / "s").read_bytes()).decode()
+
+    def package(self, path, name, version, data, key="new", published="2026-01-01T00:00:00.000Z"):
+        integrity = tree_mod._integrity(data)
+        keyid = KEY_NEW if key == "new" else KEY_OLD
+        sig = base64.b64decode(self.sign(key, f"{name}@{version}:{integrity}".encode()))
+        return {"path": path, "name": name, "version": version,
+                "sha512": tree_mod.to_decimal(hashlib.sha512(data).digest()), "keyid": keyid,
+                "sig": tree_mod.to_decimal(sig), "published": published,
+                "_integrity": integrity, "_raw_sig": self.sign(key, f"{name}@{version}:{integrity}".encode())}
+
+    def tree(self, packages):
+        return {"root": "@scope/tool", "version": "1.0.0", "platform": "linux-x64",
+                "registry": {"keys": dict(self.keys)}, "packages": packages,
+                "provenance": {"version": "1.0.0", "checked": "2026-11-16", "how": "test", "by": "test"}}
+
+    def setUp(self):
+        self.root_tgz = _tgz({"package.json": (b'{"name":"@scope/tool"}', 0o644), "bin/tool.mjs": (b"// tool", 0o755)})
+        self.dep_tgz = _tgz({"index.js": (b"module.exports = 1", 0o644)})
+        self.served = {tree_mod.tarball_url("@scope/tool", "1.0.0"): self.root_tgz,
+                       tree_mod.tarball_url("dep", "2.0.0"): self.dep_tgz}
+        self.full = [self.package("node_modules/@scope/tool", "@scope/tool", "1.0.0", self.root_tgz),
+                     self.package("node_modules/dep", "dep", "2.0.0", self.dep_tgz, key="old",
+                                  published="2024-06-01T00:00:00.000Z")]
+        self.packages = [self.pinned(p) for p in self.full]
+        out = tempfile.TemporaryDirectory()
+        self.addCleanup(out.cleanup)
+        self.dest = Path(out.name) / "tree"
+
+    @staticmethod
+    def pinned(pkg):
+        return {k: v for k, v in pkg.items() if not k.startswith("_")}
+
+    def fetch(self, url):
+        return self.served[url]
+
+
+class Vector196TheShippedPins(unittest.TestCase):
+    """196: pins.json pins Node and the scanner's tree, and ring 4's reader accepts it."""
+
+    def test_the_shipped_table(self):
+        doc = sc.read_pins(SHIPPED_PINS)
+        self.assertEqual(doc["tools"]["node"]["url"],
+                         f"https://nodejs.org/dist/{doc['tools']['node']['version']}/node-"
+                         f"{doc['tools']['node']['version']}-linux-x64.tar.xz")
+        tree = doc["trees"]["codex-security"]
+        self.assertEqual((tree["root"], tree["platform"]), ("@openai/codex-security", "linux-x64"))
+        self.assertIn(doc["runtimes"]["claude-code"]["registry"]["keyid"], tree["registry"]["keys"],
+                      "the tree trusts the same current registry key as Claude Code's pin")
+        self.assertEqual(tree["registry"]["keys"][doc["runtimes"]["claude-code"]["registry"]["keyid"]]["key"],
+                         doc["runtimes"]["claude-code"]["registry"]["key"])
+        self.assertTrue(all(p["path"].startswith("node_modules/") for p in tree["packages"]))
+
+
+class Vector197TreeInstall(TreeCase):
+    """197: a tree installs only when every package matches its integrity and a valid signature."""
+
+    def test_a_good_tree_installs_into_its_paths(self):
+        out = tree_mod.install_tree(self.tree(self.packages), self.dest, fetch=self.fetch)
+        self.assertEqual(out["packages"], 2)
+        self.assertTrue((self.dest / "node_modules/@scope/tool/bin/tool.mjs").is_file())
+        self.assertEqual(oct((self.dest / "node_modules/@scope/tool/bin/tool.mjs").stat().st_mode & 0o777), "0o755")
+        self.assertEqual((self.dest / "node_modules/dep/index.js").read_bytes(), b"module.exports = 1")
+
+    def test_wrong_bytes_or_signature_stop_it(self):
+        self.served[tree_mod.tarball_url("dep", "2.0.0")] = _tgz({"index.js": (b"evil", 0o644)})
+        with self.assertRaisesRegex(tree_mod.TreeError, "integrity"):
+            tree_mod.install_tree(self.tree(self.packages), self.dest, fetch=self.fetch)
+        self.setUp()
+        forged = dict(self.packages[1], keyid=KEY_NEW, sig=tree_mod.to_decimal(base64.b64decode(
+            self.sign("new", b"dep@2.0.1:" + self.full[1]["_integrity"].encode()))))
+        with self.assertRaisesRegex(tree_mod.TreeError, "does not verify"):
+            tree_mod.install_tree(self.tree([self.packages[0], forged]), self.dest, fetch=self.fetch)
+
+    def test_an_old_key_counts_only_before_it_expired(self):
+        late = self.pinned(self.package("node_modules/dep", "dep", "2.0.0", self.dep_tgz, key="old",
+                                        published="2025-03-01T00:00:00.000Z"))
+        with self.assertRaisesRegex(tree_mod.TreeError, "after its key expired"):
+            tree_mod.install_tree(self.tree([self.packages[0], late]), self.dest, fetch=self.fetch)
+
+    def test_a_non_empty_destination_is_refused(self):
+        self.dest.mkdir(parents=True)
+        (self.dest / "x").write_text("x")
+        with self.assertRaisesRegex(tree_mod.TreeError, "not empty"):
+            tree_mod.install_tree(self.tree(self.packages), self.dest, fetch=self.fetch)
+
+
+class Vector198UnsafeTarballs(TreeCase):
+    """198: an entry that is a link, absolute, outside package/ or leaves its folder is refused."""
+
+    def test_each(self):
+        link = tarfile.TarInfo("package/l")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+        dev = tarfile.TarInfo("package/d")
+        dev.type = tarfile.CHRTYPE
+        for name, extra in (("a symlink", [(link, None)]), ("a device", [(dev, None)]),
+                            ("leaving the folder", [(tarfile.TarInfo("package/../../x"), b"")]),
+                            ("outside package/", [(tarfile.TarInfo("other/x"), b"")])):
+            with self.subTest(name):
+                with self.assertRaises(tree_mod.TreeError):
+                    tree_mod.unpack(_tgz({"ok": (b"1", 0o644)}, extra), self.dest / name.replace(" ", "_"))
+
+
+class Vector199ThePinIsTheOnlySource(TreeCase):
+    """199: the tarball URL comes from the pinned name and version, and malformed pins are refused."""
+
+    def test_url(self):
+        self.assertEqual(tree_mod.tarball_url("@openai/codex", "0.167.1-linux-x64"),
+                         "https://registry.npmjs.org/@openai/codex/-/codex-0.167.1-linux-x64.tgz")
+        self.assertEqual(tree_mod.tarball_url("dep", "2.0.0"), "https://registry.npmjs.org/dep/-/dep-2.0.0.tgz")
+
+    def test_malformed_trees(self):
+        good = self.tree(self.packages)
+        bad = {
+            "a key the tree does not hold": dict(good, packages=[self.packages[0], dict(self.packages[1], keyid="SHA256:" + "X" * 43)]),
+            "the root missing": dict(good, packages=[self.packages[1]]),
+            "a path twice": dict(good, packages=[self.packages[0], self.packages[0]]),
+            "a path that leaves node_modules": dict(good, packages=[self.packages[0], dict(self.packages[1], path="node_modules/../x")]),
+            "a digest in base64": dict(good, packages=[self.packages[0], dict(self.packages[1], sha512="AAAA==")]),
+            "another platform": dict(good, platform="darwin-arm64"),
+        }
+        for name, row in bad.items():
+            with self.subTest(name), self.assertRaises(tree_mod.TreeError):
+                tree_mod.check_trees({"t": row})
+
+
+class Vector200ToolInstall(unittest.TestCase):
+    """200: a pinned tool installs only with its SHA-256, and never writes outside its folder."""
+
+    def row(self, data):
+        return {"version": "v1", "sha256": hashlib.sha256(data).hexdigest(), "url": "https://example.test/t.tar.gz",
+                "provenance": {"version": "v1", "checked": "2026-11-16", "how": "test", "by": "test"}}
+
+    def archive(self, extra=None):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            info = tarfile.TarInfo("tool-v1/bin/tool")
+            data = b"#!/bin/sh\n"
+            info.size, info.mode = len(data), 0o755
+            tar.addfile(info, io.BytesIO(data))
+            for i in extra or []:
+                tar.addfile(i)
+        return buf.getvalue()
+
+    def test_good_and_bad(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self.archive()
+            top = tree_mod.install_tool(self.row(data), Path(tmp) / "a", fetch=lambda url: data)
+            self.assertTrue((top / "bin" / "tool").is_file())
+            with self.assertRaisesRegex(tree_mod.TreeError, "SHA-256"):
+                tree_mod.install_tool(self.row(b"other"), Path(tmp) / "b", fetch=lambda url: data)
+            link = tarfile.TarInfo("tool-v1/escape")
+            link.type, link.linkname = tarfile.SYMTYPE, "../../../etc/passwd"
+            evil = self.archive([link])
+            with self.assertRaises(tree_mod.TreeError):
+                tree_mod.install_tool(self.row(evil), Path(tmp) / "c", fetch=lambda url: evil)
+
+
+class Vector201PinChangesAreListed(TreeCase):
+    """201: the credentials check lists every tool and tree change, with counts inside a tree."""
+
+    def test_lines(self):
+        base = {"tools": {}, "trees": {}}
+        head = {"tools": {"node": {"version": "v22"}}, "trees": {"t": self.tree(self.packages)}}
+        self.assertEqual(sc.tree_lines(base, head), ["pins.json adds tool node at v22",
+                                                     "pins.json adds tree t: @scope/tool@1.0.0, 2 packages"])
+        swapped = self.tree([self.packages[0], dict(self.packages[1], version="2.0.1")])
+        self.assertEqual(sc.tree_lines(head, dict(head, trees={"t": swapped})),
+                         ["pins.json changes tree t: 1.0.0 -> 1.0.0; 0 packages added, 0 removed, 1 changed"])
+
+
+class Vector202MakingAPin(TreeCase):
+    """202: a pin is made from a lockfile and the registry's records: other platforms left out, a package with an
+    install script refused, a record that disagrees with the lockfile refused."""
+
+    def lock(self, **dep):
+        return {"packages": {"": {}, "node_modules/@scope/tool": {"version": "1.0.0",
+                                                                 "integrity": self.full[0]["_integrity"]},
+                             "node_modules/dep": dict({"version": "2.0.0", "integrity": self.full[1]["_integrity"]}, **dep),
+                             "node_modules/dep-darwin": {"version": "1.0.0", "integrity": "x", "os": ["darwin"]}}}
+
+    def record(self, name, version):
+        pkg = {p["name"]: p for p in self.full}[name]
+        return {"name": name, "version": version,
+                "dist": {"integrity": pkg["_integrity"], "signatures": [{"keyid": pkg["keyid"], "sig": pkg["_raw_sig"]}]}}
+
+    def make(self, lock):
+        return tree_mod.make_tree_pin(lock, "@scope/tool", "linux-x64", self.keys, "2026-11-16", "test",
+                                      fetch_record=self.record, fetch_published=lambda n, v: "2024-06-01T00:00:00.000Z")
+
+    def test_made_and_refused(self):
+        row = self.make(self.lock())
+        self.assertEqual([p["path"] for p in row["packages"]], ["node_modules/@scope/tool", "node_modules/dep"])
+        with self.assertRaisesRegex(tree_mod.TreeError, "install script"):
+            self.make(self.lock(hasInstallScript=True))
+        with self.assertRaisesRegex(tree_mod.TreeError, "does not match"):
+            self.make(self.lock(integrity=self.full[0]["_integrity"]))
+        self.assertEqual(row["packages"][1]["sha512"], self.packages[1]["sha512"], "decimal, as the pin stores it")
+
+
 if __name__ == "__main__":
     unittest.main()

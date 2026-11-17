@@ -215,6 +215,25 @@ app gateway in a `service` session, as a new `service` principal, `mission-perfo
 performed: the shipped policy grants nothing to `APP_PERFORM`, the app catalog is empty, no app key is set and
 `"app_gateway"` is off. The router is unchanged. §3p items 38 to 46; vectors 182 to 190; §7 item 43.
 
+**Amendment 033 (2026-11-16, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 6a; APP-CONTROL-HARNESS-SPEC-001 §4.5):**
+the first harness's file, `mcp_gateway/harnesses/slack_read.py`, read-only, and its tests, so that one commit can be
+reviewed independently before it is pinned. Nothing changes: the harness is not pinned, the app register and the app
+catalog are empty, the release does not ship it and `"app_gateway"` is off. Part 6b pins it with that review, and
+adds its register entry, catalog tools, resource, the app's identity and its key. §3p items 47 to 50; vectors 191 to
+195.
+
+**Amendment 034 (2026-11-16, SECURITY-SCAN-SPEC-001 build part 1, HITL's decision to pin the scanner's whole
+tree):** ring 4 pins a tool fetched outside npm and a package tree, and installs them without npm. `pins.json` gains
+`tools` (Node 22.23.5, for the security scanner) and `trees` (`@openai/codex-security` 0.10.0: 107 packages for
+`linux-x64`). Nothing installs or runs them yet: part 3 adds the scan job. §3l items 8 to 11; vectors 196 to 202;
+§7 item 44.
+
+**Amendment 035 (2026-11-16, SECURITY-SCAN-SPEC-001 build part 2, HITL's decision to keep the scanner's key in the
+proxy):** the egress proxy can hold an OpenAI key for the security scanner, and the policy admits the scanner's model
+route to `api.openai.com` and nothing else. It adds a plain `bearer` login kind, a model list as the scanner's
+readiness request, and a plan for where the key goes. No job calls any of it yet: part 3 adds the scan job.
+Nothing an agent or a mission can do changes. §3q items 1 to 5; vectors 203 to 208; §7 item 45.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -1150,6 +1169,32 @@ HITL switches to `"enforce"` after AST-4.1 to 4.5 below pass. **Switched on:** t
      test fails, naming the module.
    - **AST-4.5, a pin change is listed.** A PR bumps an action to a newer SHA, with its row in `pins.json`. Pass: a
      `PIN` line for it, and no finding.
+8. **Pinned tools (Amendment 034).** `pins.json`'s `tools` section pins a tool fetched outside npm: its version,
+   SHA-256, https URL and provenance. `python3 -m mission_dispatch tree-install --tool <name> --dest <dir>` fetches
+   it, checks the SHA-256, and unpacks it only when every entry is a file, a folder, or a link that resolves inside
+   its own top folder (`mission_dispatch/tree.py` `install_tool`). The check is the tooling's own, not the Python
+   version's tar filter, which on Python 3.10.12 rejected Node's own relative links.
+9. **Pinned trees (Amendment 034).** `pins.json`'s `trees` section pins a package tree: its root package and version,
+   its platform, the npm registry's public keys with their expiry, and every package of the tree for that platform,
+   each with its path, name, version, SHA-512, signing key, signature and publish time.
+   `python3 -m mission_dispatch tree-install --tree <name> --dest <dir>`:
+   - never runs `npm`, `npx` or any install script;
+   - builds each tarball's URL from the pinned name and version only;
+   - checks each tarball's SHA-512 against the pin, and the pinned signature over `<name>@<version>:<integrity>`
+     against the pinned key, with `openssl`;
+   - accepts a signature by a key that has expired only for a version published before it expired, as
+     `npm audit signatures` does. npm rotated its key on 2025-01-29; 32 of the scanner's 107 packages carry only
+     the old key's signature;
+   - unpacks only regular files and folders, under each package's own path;
+   - stops at the first mismatch, into an empty destination only.
+10. **Why decimal.** A tree pin's SHA-512 and signature are written as decimal numbers. The public GCS release scans
+    every shipped line for internal names, and a base64 signature matched one by chance; decimal digits cannot. The
+    installer converts them back to npm's forms before checking.
+11. **Making and changing a tree pin.** `tree.make_tree_pin` builds a tree's row from an npm lockfile (made with
+    `--package-lock-only --ignore-scripts`) and each version's registry record: other platforms are left out, a
+    package with an install script is refused, and a record that disagrees with the lockfile is refused. The
+    credentials check lists each tool or tree a change adds, removes or changes, with the number of packages added,
+    removed and changed inside a tree (`supply_chain.tree_lines`). HITL's hand merge is the review.
 
 ### 3m. Durable evidence (Amendment 020)
 
@@ -1697,7 +1742,7 @@ wrote on the tracking issue never reached an agent: the task is built from the c
 5. **On record.** `prepare`'s record carries the notes' digest as output `hitl_notes`, never their text (§3m item 1).
    The notes themselves stay on the tracking issue, by comment id and author.
 
-### 3p. The app-control harness (Amendments 026 to 032)
+### 3p. The app-control harness (Amendments 026 to 033)
 
 **What it is.** A harness lets an agent use an app that was not built for AI, as tools of a second governed MCP
 server, the app gateway (`APP-CONTROL-HARNESS-SPEC-001`). It is built in seven hand-built parts
@@ -2017,6 +2062,68 @@ Part 5b (Amendment 032): HITL's command, the perform step and its job.
     told from an agent's call by its authority. The job keeps its evidence chain, the gateway's log and the proxy's
     log for 90 days.
 
+Part 6a (Amendment 033): the first harness, Slack, read-only, unpinned.
+
+47. **The harness** (`mcp_gateway/harnesses/slack_read.py`) has two tools, both of class `read`, each one request
+    through the app gateway's `request` (item 24):
+    - `slack_list_channels`: `GET slack.com/api/conversations.list`, public channels only, archived ones left out;
+      argument `cursor`;
+    - `slack_read_channel`: `GET slack.com/api/conversations.history` of one public channel the bot is a member of;
+      arguments `channel` (required), `oldest`, `latest` and `cursor`.
+
+    Slack takes the arguments in the query and the token in the `Authorization` header; the proxy adds the token
+    (Amendment 028), so the harness never has it. It imports `json`, `re` and `urllib.parse` only (item 23).
+48. **Its arguments** are each checked against a fixed pattern before any request: a public channel's id (`C` and
+    8 to 20 capitals or digits), a Slack timestamp, and a cursor of at most 250 characters, so that every query fits
+    the proxy's query rule (`egress/proxy.py` `_APP_QUERY`). An argument that does not match makes no request.
+49. **Its answer** is compact JSON of listed fields only: per channel `id`, `name`, `is_member`, `is_archived` and
+    `num_members`; per message `ts`, `user`, `bot_id`, `subtype`, `thread_ts`, `reply_count` and `text`, cut at 4,000
+    characters; one page of at most 100; the next cursor when it is of its pattern. Slack's own error code is passed
+    on as `error`, and an HTTP 429 as `ratelimited`. The app gateway quarantines it (item 8).
+50. **Not pinned here.** `pins.json` keeps an empty `harnesses` section, so the file runs nowhere. The pin needs the
+    independent review of the commit that adds it (§4.5: another seat, another vendor's model), so the file is
+    merged first and pinned in part 6b with that review.
+
+### 3q. The security scan (Amendments 035 on)
+
+Part 2 of SECURITY-SCAN-SPEC-001 builds the scanner's way to its model. The scanner is `@openai/codex-security`,
+pinned in §3l items 8 to 11. HITL decided that its key stays out of its reach (2026-11-16): the scanner reads
+untrusted code and runs commands, so the proxy holds the key, as for the model login (§3i item 6).
+
+1. **The scanner's runtime and route** (`mission_dispatch/egress-policy.json`). A runtime `codex-security` is listed
+   with one host, `api.openai.com`, and a model endpoint with exactly these requests:
+   - `POST /v1/responses`, the model call;
+   - `GET /v1/models`, the model list.
+
+   The endpoint's queries are the empty query and exactly `client_version=0.167.1` (the pinned Codex runtime's own).
+   As for Claude Code, queries are listed for the endpoint as a whole, not for each route, and any other query is
+   refused.
+
+   No other host is listed: the scanner's bundle knows model providers, code-scanning services and npm, and the run
+   needs none of them. With `exclusive`, a tunnel to `api.openai.com` is refused, so the endpoint is the only way to
+   it, as for Claude Code.
+2. **The `bearer` login kind** (`egress/proxy.py`). The proxy adds `Authorization: Bearer <key>` and nothing of
+   Anthropic's: no `x-api-key`, and an `anthropic-beta` header the caller sent is dropped. A login file may now name
+   `bearer` beside `api_key` and `oauth`; any other kind is still refused.
+3. **Readiness for a `GET` route** (`mission_dispatch/login.py`, `egress/proxy.py`). The scanner's readiness request
+   is `GET /v1/models`: no body, no `Content-Type`, no Anthropic header. Its policy entry gives `"model": null`, and a
+   `GET` readiness route may not name a model, nor a `POST` one omit it. Claude Code's readiness is unchanged.
+4. **Where the key goes** (`mission_dispatch/dispatch.py` `scan_login_plan`). It returns the proxy's login and a fresh
+   stand-in for each run, and the record a run keeps holds only the stand-in. It refuses, and there is no fallback:
+   - unless `blast_radius` is enforced, because a scanner and a proxy that share an account share the key;
+   - when the job has no `OPENAI_API_KEY` of at least 16 characters;
+   - when the egress policy has no model endpoint for the scanner.
+5. **What is not settled here.**
+   - **The route list is read, not observed.** It comes from the scanner's own documentation and the strings of its
+     bundled Codex runtime. The scanner could not be run to observe it on the builder's machine. An unlisted request
+     is refused and logged, so a gap makes the scan fail, never pass. The pilot (SECURITY-SCAN-SPEC-001 §6) shows the
+     real set, and widening it is a hand-merged policy change.
+   - **WebSockets.** The Codex runtime can use WebSockets for its model calls (`supports_websockets` in a provider's
+     settings). The proxy's model route is plain HTTP and refuses an upgrade, because `GET /v1/responses` is not
+     listed. Part 3 sets `supports_websockets` off for the scanner's provider.
+   - **The key is `OPENAI_API_KEY` in the `mission-secscan` environment** (HITL created it, deployable from `main`
+     only). Part 3's job passes it only to the step that starts the proxy.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -2263,6 +2370,14 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     listed apps' keys are in the proxy only, out of its environment, before the gateway starts. The claim is posted
     before any call, so a run that stops half way leaves its list claimed: the calls not made are drafted again by
     an agent, never performed twice.
+44. **A pinned tree is as trustworthy as what its publishers signed (Amendment 034).** The pin proves each package is
+    the bytes npm published and signed under that name and version. It does not prove the code is safe: a malicious
+    version, signed by the registry, would install. The scanner's 107 packages are a large surface, and each update
+    is a reviewed pin change, listed package by package.
+45. **The scanner's route list may be incomplete (Amendment 035).** It was read from the scanner's documentation and
+    its runtime's strings, not observed. If the scanner needs a request the policy does not list, it fails and the
+    check is red: the cost is a failed pilot, never a scan that passes without its model. The scanner's own
+    "Trusted Access for Cyber" may also refuse some requests under the standard program; the pilot shows which.
 
 ## 8. Predicted vectors (A3 verifies)
 
@@ -2453,3 +2568,21 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 188 | The claim, refusal and outcome comments | The claim and answer markers; quoted text on one line, so no `/mission` line |
 | 189 | `check` with two commands for one list and one already answered | The first claimed and planned, the second refused, the third not answered again; one `dispatch.perform` record each |
 | 190 | The perform job | Only on the command, on the default branch, one at a time, in `mission-runtime`; no model login; the token in `check` and `report` only, never in `call` |
+| 191 | The Slack harness's imports and its pin | Only allowed modules; `run` defined; not pinned; the gateway loads it from a matching pin and refuses a wrong digest |
+| 192 | Each tool's request | One `GET` to `slack.com`, arguments in the query, no body; every query fits the proxy's rule |
+| 193 | A missing channel, a direct message's id, an injected query, a bad timestamp or cursor, an unknown tool | No request; an error |
+| 194 | Slack's answers: extra fields, long text, over a page, a bad cursor, Slack's error, 429, not JSON | Listed fields only, text cut, 100 at most, cursor dropped; the error passed on |
+| 195 | Both tools in the app gateway through the proxy's app endpoint to a fake `slack.com` | Listed and run; the key added by the proxy; a `/mission` line in a message broken |
+| 196 | The shipped `pins.json` | `tools.node` and `trees.codex-security` pinned; the tree trusts the same current registry key as Claude Code's pin |
+| 197 | A tree install: every package matching; a tarball with other bytes; a signature over another message; a non-empty destination | Installed into each package's path, modes kept; refused; refused; refused |
+| 198 | A tarball holding a symlink, a device, a name that leaves its folder, or a name outside `package/` | Refused |
+| 199 | A tree whose package names an unheld key, lacks its root, lists a path twice, leaves `node_modules`, has a base64 digest, or names another platform | Refused when the table loads |
+| 200 | A tool install: its SHA-256 matching; another SHA-256; a link pointing outside its folder | Unpacked; refused; refused |
+| 201 | A change adding a tool and a tree; one changing a package inside a tree | `adds tool …` and `adds tree …, N packages`; `changes tree …; 0 added, 0 removed, 1 changed` |
+| 202 | Making a pin: a package for another platform; one with an install script; a record that disagrees with the lockfile | Left out; refused; refused |
+| 203 | A listed scanner request with the stand-in, with an `anthropic-beta` or `x-api-key` header sent | Forwarded to `api.openai.com` with the key as `Authorization: Bearer` only; the stand-in, cookies and Anthropic headers never leave; one `"route": "model"` line, no key or stand-in |
+| 204 | A scanner request with no stand-in, the key itself, another route, another method, an unlisted query, another `Host`, a traversal or an absolute URL | 403 or 405, logged, nothing forwarded |
+| 205 | A tunnel to `api.openai.com` while the endpoint is exclusive, in observe or enforce | Refused |
+| 206 | The scanner's readiness request; a wrong stand-in; a policy entry giving a `GET` readiness a model, a `POST` readiness none, or Claude Code's readiness none | `GET /v1/models` with no body and no Anthropic header, accepted; 403; each refused when the policy loads |
+| 207 | `scan_login_plan` with the key; without blast radius enforced; without a key or with a short one; without a scanner endpoint | The proxy's `bearer` login and a fresh stand-in; each of the rest refused, with no fallback |
+| 208 | The real proxy process, given the scanner's key by file | A 0600 file in a 0700 folder, gone after start, never on argv or in the environment; the endpoint is up and refuses a wrong stand-in; a `bearer` kind is read and an unknown kind refused |

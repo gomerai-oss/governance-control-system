@@ -92,12 +92,16 @@ class DecisionTests(unittest.TestCase):
         """The hosts AST-5.4 saw each runtime need, and nothing else (HITL, ring 5 part 4)."""
         shipped = Path(__file__).resolve().parents[1] / "mission_dispatch" / "egress-policy.json"
         policy = load_policy(shipped.read_text(encoding="utf-8"))
-        self.assertEqual(policy, {"claude-code": ("api.anthropic.com",), "cursor-cli": ("*.cursor.sh",)})
+        self.assertEqual(policy, {"claude-code": ("api.anthropic.com",), "cursor-cli": ("*.cursor.sh",),
+                                  "codex-security": ("api.openai.com",)})  # the scanner: one host (Amendment 035)
         for host in ("api2.cursor.sh", "agentn.global.api5.cursor.sh", "repo42.cursor.sh"):
             self.assertTrue(proxy.listed(host, policy["cursor-cli"]), host)
         for host in ("downloads.cursor.com", "cursor.sh", "cursor.sh.evil.com", "evilcursor.sh"):
             self.assertFalse(proxy.listed(host, policy["cursor-cli"]), f"{host}: the CLI must not fetch another build of itself")
         self.assertFalse(proxy.listed("http-intake.logs.us5.datadoghq.com", policy["claude-code"]), "no telemetry")
+        for host in ("chatgpt.com", "api.openai.com.evil.com", "registry.npmjs.org", "api.snyk.io", "openrouter.ai"):
+            self.assertFalse(proxy.listed(host, policy["codex-security"]),
+                             f"{host}: the scanner knows it, and the run does not need it")
 
 
 class Upstream:

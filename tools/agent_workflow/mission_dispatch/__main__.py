@@ -325,6 +325,29 @@ def _login_mode(config: dict) -> str:
     return value
 
 
+def cmd_tree_install(args) -> int:
+    """Amendment 034: install a pinned tool (``--tool``) or package tree (``--tree``) from the tooling tree's
+    ``pins.json`` into ``--dest``. Always fails closed: there is no unchecked install to fall back to."""
+    from mission_dispatch import tree as tree_mod
+    table_path = Path(__file__).resolve().parents[1] / supply_chain.PINS_TABLE  # the tooling tree's, never the checkout's
+    try:
+        table = supply_chain.read_pins(table_path)
+        if args.tool:
+            row = (table.get("tools") or {}).get(args.tool)
+            if row is None:
+                raise DispatchError(f"pins.json pins no tool {args.tool!r}")
+            top = tree_mod.install_tool(row, Path(args.dest))
+            _log(f"tool {args.tool} {row['version']}: SHA-256 checked, unpacked at {top}")
+        else:
+            row = (table.get("trees") or {}).get(args.tree)
+            if row is None:
+                raise DispatchError(f"pins.json pins no tree {args.tree!r}")
+            tree_mod.install_tree(row, Path(args.dest), log=_log)
+    except (tree_mod.TreeError, supply_chain.SupplyChainError, OSError) as exc:
+        raise DispatchError(f"the pinned install failed: {exc}") from None
+    return 0
+
+
 def cmd_registry_check(args) -> int:
     """§3l item 2 (ring 4): the downloaded runtime package against its registry's signature, before it is installed.
     Under ``"supply_chain": "enforce"`` a failure stops the install; under ``"observe"`` it is a warning."""
@@ -817,6 +840,11 @@ def main(argv=None) -> int:
     fetch.add_argument("--repo", required=True)
     fetch.add_argument("--out", required=True)
     sub.add_parser("blast-mode")
+    install = sub.add_parser("tree-install")
+    which = install.add_mutually_exclusive_group(required=True)
+    which.add_argument("--tool")
+    which.add_argument("--tree")
+    install.add_argument("--dest", required=True)
     check = sub.add_parser("registry-check")
     check.add_argument("--runtime", required=True)
     check.add_argument("--package", required=True)
@@ -837,7 +865,7 @@ def main(argv=None) -> int:
     performing.add_argument("--out", required=True, help="the stage's work folder")
     performing.add_argument("--plan", default="", help="where check wrote the plan")
     args = parser.parse_args(argv)
-    steps = {"blast-mode": cmd_blast_mode, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
+    steps = {"blast-mode": cmd_blast_mode, "tree-install": cmd_tree_install, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land, "perform": cmd_perform}
     recorder = evidence_producer.Recorder.from_env(os.environ)
     _NOTE.clear()

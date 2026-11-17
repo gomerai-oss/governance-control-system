@@ -349,10 +349,15 @@ class VectorTests(GatewayCase):
 
 class HardeningTests(GatewayCase):
     def test_package_holds_exactly_the_planned_files_and_no_init(self):
-        names = sorted(p.name for p in PKG.iterdir() if p.name != "__pycache__")
+        names = sorted(p.name for p in PKG.iterdir() if p.name not in ("__pycache__", "harnesses"))
         self.assertEqual(names, sorted(["protocol.py", "tools.json", "session.py", "server.py", "__main__.py",
                                         "IMPLEMENTATION-DECISIONS.md",
                                         "app_gateway.py", "app_tools.json"]))  # the app gateway (Amendment 027)
+        harnesses = PKG / "harnesses"  # the harness files (Amendment 029), where a tree has them (Amendment 033)
+        if harnesses.exists():
+            self.assertTrue(harnesses.is_dir() and not harnesses.is_symlink())
+            self.assertTrue(all(p.suffix == ".py" and p.is_file() and not p.is_symlink()
+                                for p in harnesses.iterdir() if p.name != "__pycache__"))
         self.assertFalse(any(PKG.rglob("__init__.py")))
 
     def test_no_release_deny_term_matches_a_delivered_file(self):

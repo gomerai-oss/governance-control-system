@@ -49,7 +49,7 @@ TESTS_OWED: Mapping[str, Tuple[str, ...]] = {
 }
 RUNTIME_FIELDS = frozenset({"version", "sha256", "url", "registry", "attestation", "provenance"})
 PROVENANCE_FIELDS = frozenset({"version", "checked", "how", "by"})
-TABLE_FIELDS = frozenset({"schema", "spec", "actions", "runtimes", "harnesses"})
+TABLE_FIELDS = frozenset({"schema", "spec", "actions", "runtimes", "harnesses", "tools", "trees"})
 # A harness pin (§3p, Amendment 029): the file is mcp_gateway/harnesses/<name>.py in the tooling tree.
 HARNESS_DIR = "mcp_gateway/harnesses"
 HARNESS_FIELDS = frozenset({"app", "sha256", "commit", "built_by", "review"})
@@ -87,15 +87,17 @@ def mode(config: Mapping[str, object]) -> str:
 
 # ------------------------------------------------------------------ the table
 def read_pins(path: Path) -> dict:
-    """``{"schema": "workflow-pins-v1", "spec", "actions": {...}, "runtimes": {...}, "harnesses": {...}}``; a
-    malformed table raises."""
+    """``{"schema": "workflow-pins-v1", "spec", "actions": {...}, "runtimes": {...}, "harnesses": {...},
+    "tools": {...}, "trees": {...}}``; a malformed table raises. ``tools`` and ``trees`` are checked by ``tree.py``
+    (Amendment 034)."""
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
         raise SupplyChainError(f"{PINS_TABLE} is not JSON: {exc}") from None
     if not (isinstance(doc, dict) and doc.get("schema") == PINS_SCHEMA
             and set(doc) == TABLE_FIELDS):
-        raise SupplyChainError(f"{PINS_TABLE} must be {PINS_SCHEMA} with spec, actions, runtimes and harnesses")
+        raise SupplyChainError(f"{PINS_TABLE} must be {PINS_SCHEMA} with spec, actions, runtimes, harnesses, tools "
+                               "and trees")
     actions, runtimes = doc["actions"], doc["runtimes"]
     if not isinstance(actions, dict) or not all(
             isinstance(name, str) and _ACTION.fullmatch(f"{name}@x") and isinstance(row, dict)
@@ -117,6 +119,12 @@ def read_pins(path: Path) -> dict:
                                          and all(isinstance(registry[k], str) and registry[k] for k in registry)):
             raise SupplyChainError(f"{PINS_TABLE}: runtime {name!r} registry must be null or {{package, keyid, key}}")
     check_harnesses(doc["harnesses"])
+    from mission_dispatch import tree as tree_mod  # its own module; it imports nothing from here
+    try:
+        tree_mod.check_tools(doc["tools"])
+        tree_mod.check_trees(doc["trees"])
+    except tree_mod.TreeError as exc:
+        raise SupplyChainError(f"{PINS_TABLE}: {exc}") from None
     return doc
 
 
@@ -328,7 +336,45 @@ def pin_lines(base: Path, head: Path, tooling: str, workflows_rel: str) -> List[
         for ref in sorted(refs - old_wf.get(name, set())):
             lines.append(f"{name} now runs {ref}")
     lines += harness_lines(base, head, tooling, before, after)
+    lines += tree_lines(before, after)
     lines += evidence_key_lines(base, head, tooling)
+    return lines
+
+
+def tree_lines(before: Mapping, after: Mapping) -> List[str]:
+    """One line per tool or tree the head adds, changes or removes (Amendment 034). A tree's line names how many of
+    its packages were added, removed or changed, so a quiet swap inside a large tree is never silent."""
+    lines: List[str] = []
+    old_tools, new_tools = before.get("tools", {}) or {}, after.get("tools", {}) or {}
+    for name in sorted(set(old_tools) | set(new_tools)):
+        old, new = old_tools.get(name), new_tools.get(name)
+        if old == new:
+            continue
+        if old is None:
+            lines.append(f"pins.json adds tool {name} at {new.get('version')}")
+        elif new is None:
+            lines.append(f"pins.json removes tool {name}")
+        else:
+            lines.append(f"pins.json changes tool {name}: {old.get('version')} -> {new.get('version')}")
+    old_trees, new_trees = before.get("trees", {}) or {}, after.get("trees", {}) or {}
+    for name in sorted(set(old_trees) | set(new_trees)):
+        old, new = old_trees.get(name), new_trees.get(name)
+        if old == new:
+            continue
+        if old is None:
+            lines.append(f"pins.json adds tree {name}: {new.get('root')}@{new.get('version')}, "
+                         f"{len(new.get('packages') or [])} packages")
+            continue
+        if new is None:
+            lines.append(f"pins.json removes tree {name}")
+            continue
+        was = {p["path"]: p for p in old.get("packages") or []}
+        now = {p["path"]: p for p in new.get("packages") or []}
+        added, removed = sorted(set(now) - set(was)), sorted(set(was) - set(now))
+        changed = sorted(p for p in set(now) & set(was) if now[p] != was[p])
+        keys = " (its registry keys changed)" if old.get("registry") != new.get("registry") else ""
+        lines.append(f"pins.json changes tree {name}: {old.get('version')} -> {new.get('version')}; "
+                     f"{len(added)} packages added, {len(removed)} removed, {len(changed)} changed{keys}")
     return lines
 
 
