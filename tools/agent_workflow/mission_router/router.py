@@ -25,7 +25,7 @@ import os
 
 import evidence
 from evidence import producer as evidence_producer
-from mission_dispatch import login, permissions, quarantine, supply_chain
+from mission_dispatch import login, permissions, quarantine, secscan, supply_chain
 from mission_dispatch.quarantine import inline as quarantined  # §5, Amendment 012: agent text the router posts
 from .github import GitHub, GitHubError
 from .model import (
@@ -76,6 +76,9 @@ COMMENT_ACTIONS = {"approval": "router.approval_request", "reject": "router.refu
 _APPROVE_RE = re.compile(r"(?m)^\s*/mission approve ([0-9a-f]{40})\s*$")
 _END_CHALLENGE_RE = re.compile(r"(?m)^\s*/mission end-challenge ([0-9a-f]{40})\s*$")  # Amendment 020
 _CANCEL_RE = re.compile(r"(?m)^\s*/mission cancel\s*$")
+_ACCEPT_SCAN_RE = re.compile(r"(?m)^\s*/mission accept-scan ([0-9a-f]{40})\s*$")  # Amendment 021
+_SEND_BACK_RE = re.compile(r"(?m)^\s*/mission send-back\s*$")  # Amendment 021
+SENT_BACK = "sent it back after the security scan"  # in the reason, so the stage comment says what follows
 _TRACKING_RE = re.compile(r"<!-- mission-router:tracking-issue:([1-9][0-9]*) -->")
 COMPARE_FILE_CAP = 300
 ACTIVITY_CAP = 300
@@ -204,6 +207,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     supply_chain.mode(config)  # ring 4 (MISSION-DISPATCH-001 §3l): likewise (vectors 97, 116)
     evidence.mode(config)  # ring 6 (MISSION-DISPATCH-001 §3m): likewise (vectors 111, 119)
     challenge_mod.mode(config)  # the challenge loop (MISSION-DISPATCH-001 §3n): likewise (vectors 120, 126)
+    _scan_mode(config)  # the security scan (Amendment 021): likewise (vector 139)
     config_accounts(config)
     store = config.get("evidence_store")
     if store is not None and not (isinstance(store, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", store)):
@@ -244,6 +248,13 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     return config
 
 
+def _scan_mode(config: dict) -> str:
+    try:
+        return secscan.mode(config)
+    except secscan.ScanError as exc:
+        raise ValueError(str(exc)) from None
+
+
 def write_grant_line(manifest: Optional[Manifest]) -> str:
     """The plan's write grant, stated where HITL approves it (MISSION-ROUTER-001 Amendment 014): under ring 2 the
     agent's write rules are its ``build_scope``, so approving the scope approves what A2 may write."""
@@ -269,6 +280,7 @@ class MissionRouter:
         self.quarantine_mode = quarantine.mode(config)  # Amendment 012
         self.evidence_mode = evidence.mode(config)  # Amendment 018
         self.challenge_mode = challenge_mod.mode(config)  # Amendment 019
+        self.scan_mode = _scan_mode(config)  # Amendment 021: under enforce a landing waits for security-scan
         self._loops: Dict[Tuple[str, str], challenge_mod.LoopStatus] = {}
         self.guard = AccountGuard(self.identity_mode, lambda message: self.log(message))
         self.gh = GuardedGitHub(gh, self.guard)
@@ -441,9 +453,13 @@ class MissionRouter:
                                    f"{state.integration_head}: it was changed outside the router")
         if state.stage != DONE:
             cancelled_by = self._cancelled_by(mission_id)
-            if cancelled_by:
+            sent_back_by = None if cancelled_by else self._issue_command(issue, _SEND_BACK_RE)
+            if cancelled_by or sent_back_by:
+                reason = (f"HITL {cancelled_by} cancelled it" if cancelled_by else
+                          f"HITL {sent_back_by} {SENT_BACK}; it restarts as a new plan under a new mission id, "
+                          "citing the findings")
                 state = MissionState(mission_id, CANCELLED, state.round, state.integration_head,
-                                     reason=f"HITL {cancelled_by} cancelled it", last_pr=state.last_pr, plan_sha=state.plan_sha)
+                                     reason=reason, last_pr=state.last_pr, plan_sha=state.plan_sha)
         state = self._agent_failures(state)
         state = self._hitl_halt(state, manifest)
         ctx = _Context(state, manifest, integration_actual, landing)
@@ -535,13 +551,17 @@ class MissionRouter:
         Only the router-opened tracking issue counts, and only comments from a HITL user
         account. A cancel is final: the mission id cannot be restarted.
         """
-        issue = self._tracking.get(mission_id)
+        return self._issue_command(self._tracking.get(mission_id), _CANCEL_RE)
+
+    def _issue_command(self, issue: Optional[dict], pattern) -> Optional[str]:
+        """The first ``hitl_logins`` user account that commented ``pattern`` on its own line on ``issue``, if any."""
         if issue is None:
             return None
         for comment in self._pr_comments(issue["number"]):
             user = comment.get("user") or {}
             login = str(user.get("login", ""))
-            if user.get("type") == "User" and login.casefold() in self.hitl and _CANCEL_RE.search(comment.get("body") or ""):
+            if (user.get("type") == "User" and login.casefold() in self.hitl
+                    and pattern.search(comment.get("body") or "")):
                 return login
         return None
 
@@ -807,7 +827,10 @@ class MissionRouter:
         elif blocked and (kind == "CHAINED" or finished):
             status, reason = STACK_BLOCKED, "blocked by " + ", ".join(blocked)
         elif members and all(st == DONE for st in stages.values()):
-            status = STACK_READY
+            # Amendment 021: HITL's send-back on the stack's issue counts once every mission passed, at the landing.
+            sent_back_by = self._issue_command(issue, _SEND_BACK_RE)
+            status, reason = (STACK_BLOCKED, f"HITL {sent_back_by} {SENT_BACK}; it restarts as new missions under new "
+                                             "mission ids, citing the findings") if sent_back_by else (STACK_READY, "")
         result = StackStatus(stack_id, kind, members, status, head, lander, bool(self._landing_prs.get(stack_id)), reason,
                              issue, dismissed, target)
         self._stacks[stack_id] = result
@@ -1049,6 +1072,8 @@ class MissionRouter:
         if ref.role == "A1" and ctx.state.stage == AWAIT_A1 and not raw.get("draft"):
             raw = self._prepare_a1(raw, ctx, self._head_manifest(raw))
         decision = self._evidence_hold(self.decide(raw, ctx), ref, head_sha)
+        if ref.role == "A3" and raw["base"]["ref"] in self.targets:
+            decision = self._scan_hold(decision, head_sha, self._tracking.get(ref.mission_id), "mission")
         if ref.role == "A1" and ctx.state.stage == AWAIT_A1 and not raw.get("draft"):
             decision = self._challenge_gate(raw, decision)
         self.log(f"  PR #{number} {ref.role} r{ref.round}: {decision.action} {decision.summary}".rstrip())
@@ -1101,6 +1126,8 @@ class MissionRouter:
         base = raw["base"]["ref"]
         title = f"Mission {ref.mission_id}: merge {ref.role}" + (f" round {ref.round}" if ref.round else "") + \
                 (f" ({decision.verdict})" if decision.verdict else "")
+        if ref.role == "A3" and base in self.targets:
+            self._record_scan_accept(number, head_sha, self._tracking.get(ref.mission_id), ref.mission_id, ref.round)
         self._record_decision(number, head_sha, base, decision, ref.mission_id, ref.round)
         try:
             if base in self.targets:
@@ -1354,6 +1381,72 @@ class MissionRouter:
             return decision
         return Decision(WAIT, decision.reasons + (reason,), decision.approval_required, decision.verdict)
 
+    def _scan_run(self, sha: str) -> Optional[dict]:
+        """The newest ``security-scan`` run on ``sha`` from GitHub Actions (the secscan report job), if any."""
+        ours = [r for r in self.gh.check_runs(sha, secscan.CHECK_NAME)
+                if (r.get("app") or {}).get("slug") == secscan.CHECK_APP]
+        return max(ours, key=lambda r: int(r.get("id") or 0)) if ours else None
+
+    def _scan_settled(self, sha: str, issue: Optional[dict]) -> Tuple[Optional[dict], Optional[dict]]:
+        """(the newest scan run, HITL's ``/mission accept-scan <sha>`` comment on ``issue``). An accept counts only
+        for that exact head, from a ``hitl_logins`` user account, once its scan has finished without passing."""
+        run = self._scan_run(sha)
+        if run is None or run.get("status") != "completed" or run.get("conclusion") == "success" or issue is None:
+            return run, None
+        for comment in self._pr_comments(issue["number"]):
+            user = comment.get("user") or {}
+            if (user.get("type") == "User" and str(user.get("login", "")).casefold() in self.hitl
+                    and sha in _ACCEPT_SCAN_RE.findall(comment.get("body") or "")):
+                return run, comment
+        return run, None
+
+    def _scan_hold(self, decision: Decision, head_sha: str, issue: Optional[dict], kind: str) -> Decision:
+        """Under ``"security_scan": "enforce"`` an A3 PASS into a landing branch, or a stack's landing PR, merges only
+        once its head's ``security-scan`` check passed or HITL accepted that head's red scan (Amendment 021). Until
+        then it is held and says why. Under observe the router only says so in its log; off, nothing."""
+        if decision.action != MERGE or self.scan_mode == secscan.OFF:
+            return decision
+        run, accepted = self._scan_settled(head_sha, issue)
+        if accepted is not None or (run is not None and run.get("status") == "completed"
+                                    and run.get("conclusion") == "success"):
+            return decision
+        if run is None or run.get("status") != "completed":
+            reason = ("the security scan of this head has not finished (the secscan job sets the security-scan "
+                      "check; SECURITY-SCAN-SPEC-001 §3)")
+        else:
+            where = f"#{issue['number']}" if issue else f"the {kind}'s issue"
+            title = (run.get("output") or {}).get("title") or str(run.get("conclusion"))
+            end = ("blocks the stack, so it restarts as new missions under new mission ids" if kind == "stack" else
+                   "cancels the mission, so a new plan under a new mission id cites the findings")
+            reason = (f"the security scan of this head did not pass ({quarantined(title, 120)}). HITL settles it on "
+                      f"{where}: `/mission accept-scan {head_sha}` merges this exact head with the findings "
+                      f"acknowledged, or `/mission send-back` {end} (Amendment 021)")
+        if self.scan_mode != secscan.ENFORCE:
+            self.log(f"    security scan ({self.scan_mode}): {reason}")
+            return decision
+        return Decision(WAIT, decision.reasons + (reason,), decision.approval_required, decision.verdict)
+
+    def _record_scan_accept(self, number: int, head_sha: str, issue: Optional[dict], mission: Optional[str] = None,
+                            round_n: Optional[int] = None) -> None:
+        """HITL's accept of a red scan, recorded before the merge it allows with the digest of the findings it
+        accepted (Amendment 021). Nothing is recorded when the scan passed or the hold is not enforced."""
+        if self.scan_mode != secscan.ENFORCE:
+            return
+        run, comment = self._scan_settled(head_sha, issue)
+        if comment is None:
+            return
+        user = comment.get("user") or {}
+        output = run.get("output") or {}
+        self._record("router.hitl_command", f"HITL command: /mission accept-scan {head_sha}",
+                     actor=str(user.get("login", "")),
+                     account=user.get("id") if isinstance(user.get("id"), int) else None,
+                     authority=("hitl_command", f"comment {comment.get('id')} on #{issue['number']}"),
+                     mission=mission, round_n=round_n, pr=number, commit=head_sha,
+                     outputs={"comment": evidence_producer.text_digest(comment.get("body") or ""),
+                              "findings": evidence_producer.text_digest(
+                                  f"{run.get('id')}\n{run.get('conclusion')}\n{output.get('title') or ''}\n"
+                                  f"{output.get('summary') or ''}")})
+
     def _publish_check(self, sha: str, outcome: str, title: str, summary: str) -> None:
         """Set this router's ``route-handoff-block`` result on ``sha``; skipped when it already says the same."""
         status, conclusion = ("in_progress", None) if outcome == "pending" else ("completed", outcome)
@@ -1521,7 +1614,7 @@ class MissionRouter:
     def _record_commands(self, number: int, mission: str, stage: str) -> Tuple[bool, ...]:
         """The HITL commands on a tracking issue the router acts on as it posts a stage change: each recorded with
         the commenter's account ID. Returns (retry seen, halt seen)."""
-        seen = {"retry": False, "halt": False, "resume": False, "cancel": False}
+        seen = {"retry": False, "halt": False, "resume": False, "cancel": False, "send-back": False}
         for comment in self._pr_comments(number):
             user = comment.get("user") or {}
             login = str(user.get("login", ""))
@@ -1529,7 +1622,7 @@ class MissionRouter:
             if user.get("type") != "User" or login.casefold() not in self.hitl:
                 continue
             for word, pattern in (("retry", _RETRY_RE), ("halt", _HALT_RE), ("resume", _RESUME_RE),
-                                  ("cancel", _CANCEL_RE)):
+                                  ("cancel", _CANCEL_RE), ("send-back", _SEND_BACK_RE)):
                 if pattern.search(body):
                     seen[word] = True
                     self._record("router.hitl_command", f"HITL command: /mission {word}", actor=login,
@@ -1537,6 +1630,19 @@ class MissionRouter:
                                  authority=("hitl_command", f"comment {comment.get('id')} on #{number}"),
                                  mission=mission, outputs={"comment": evidence_producer.text_digest(body)})
         return seen["retry"], seen["halt"]
+
+    def _record_send_back(self, number: int) -> None:
+        """HITL's ``/mission send-back`` on a stack's issue, recorded as the stack's outcome is posted
+        (Amendment 021)."""
+        for comment in self._pr_comments(number):
+            user = comment.get("user") or {}
+            login = str(user.get("login", ""))
+            body = comment.get("body") or ""
+            if user.get("type") == "User" and login.casefold() in self.hitl and _SEND_BACK_RE.search(body):
+                self._record("router.hitl_command", "HITL command: /mission send-back", actor=login,
+                             account=user.get("id") if isinstance(user.get("id"), int) else None,
+                             authority=("hitl_command", f"comment {comment.get('id')} on #{number}"), pr=number,
+                             outputs={"comment": evidence_producer.text_digest(body)})
 
     # ------------------------------------------------------- stacks: landing
     def _sweep_stacks(self) -> None:
@@ -1586,6 +1692,7 @@ class MissionRouter:
         decision = evaluate_landing(pr, status.status, status.reason, status.head, landers, self.hitl | {self.bot.casefold()},
                                     self.classify, self._approvals(number), promotion, complete,
                                     {manifest_path(m) for m in status.members}, status.target)
+        decision = self._scan_hold(decision, head_sha, status.issue, "stack")
         self.log(f"  landing PR #{number} for stack {sid}: {decision.action} {decision.summary}".rstrip())
         outcome = {MERGE: "success", REJECT: "failure"}.get(decision.action, "pending")
         title = {MERGE: f"Stack {sid}: every mission passed A3",
@@ -1607,6 +1714,7 @@ class MissionRouter:
                                + f"\n\nTo approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```")
             self._add_labels(number, ["agent:needs-hitl"])
             return False
+        self._record_scan_accept(number, head_sha, status.issue)
         self._record_decision(number, head_sha, raw["base"]["ref"], decision)
         try:
             self._approve_once(number, head_sha)
@@ -1746,7 +1854,8 @@ class MissionRouter:
             reopened = any(_REOPENED_MARK in (c.get("body") or "")
                            for c in self._pr_comments(number) if (c.get("user") or {}).get("login") == self.bot)
             key = f"stack:{status.status}" + (f":{rounds}" if reopened else "")
-            self._comment_once(number, key, render_stack_outcome(status))
+            self._comment_once(number, key, render_stack_outcome(status),
+                               before=(lambda: self._record_send_back(number)) if SENT_BACK in status.reason else None)
         elif status.status == STACK_READY and not status.landing_pr_open:
             if self._comment_once(int(issue["number"]), f"stack:READY:{(status.head or '')[:12]}",
                                   f"**Every mission passed.** The Mission Agent workflow opens the landing PR from "
@@ -2009,6 +2118,9 @@ def render_stack_body(status: StackStatus, ctxs: Dict[str, _Context], manifests:
 def render_stack_outcome(status: StackStatus) -> str:
     if status.status == STACK_LANDED:
         return f"**Stack landed.** All {len(status.members)} missions of `{status.stack_id}` are merged into `{status.target}`."
+    if SENT_BACK in status.reason:  # Amendment 021
+        return (f"**Stack sent back.** {status.reason}. Nothing from `{status.stack_id}` reached `{status.target}`. "
+                "To end the review, close this issue; the plans then restart as a new stack.")
     return (f"**Stack blocked.** {status.reason}. Nothing from `{status.stack_id}` reached `{status.target}`. "
             "Review the matrix above. To have one blocked mission tried again, comment `/mission retry` on its tracking "
             "issue; the missions that passed stay passed. To end the review, close this issue; the plans then restart "

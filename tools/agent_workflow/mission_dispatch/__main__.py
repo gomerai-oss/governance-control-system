@@ -282,7 +282,7 @@ def cmd_scan_report(args) -> int:
     else:
         parsed = {"conclusion": "failure", "reason": "the scan job ended without a result", "findings": [],
                   "finding_count": 0}
-    title, body = secscan.report_text(job, parsed, os.environ.get("RUN_URL", ""))
+    title, body = secscan.report_text(job, parsed, os.environ.get("RUN_URL", ""), _scan_mode(load_config()))
     gh.create_check_run(secscan.CHECK_NAME, job.head_sha, "completed", parsed["conclusion"], title, body)
     gh.comment(job.pr, body)
     _NOTE.update(comment=evidence_producer.text_digest(body), conclusion=parsed["conclusion"])

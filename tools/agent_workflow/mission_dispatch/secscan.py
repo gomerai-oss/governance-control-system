@@ -34,8 +34,8 @@ from mission_router.model import (MISSION_ID_RE, SHA_RE, STACK_ID_RE, MissionInp
 
 from . import blast, login, quarantine
 
-OFF, OBSERVE = "off", "observe"
-MODES = (OFF, OBSERVE)
+OFF, OBSERVE, ENFORCE = "off", "observe", "enforce"  # enforce: the router also holds the merge (Amendment 037)
+MODES = (OFF, OBSERVE, ENFORCE)
 CONFIG_KEY = "security_scan"
 CHECK_NAME = "security-scan"
 CHECK_APP = "github-actions"
@@ -292,9 +292,11 @@ def parse_result(text: str, job: ScanJob) -> Dict[str, Any]:
             "findings": kept, "finding_count": count}
 
 
-def report_text(job: ScanJob, parsed: Mapping[str, Any], run_url: str = "") -> Tuple[str, str]:
+def report_text(job: ScanJob, parsed: Mapping[str, Any], run_url: str = "",
+                scan_mode: str = OBSERVE) -> Tuple[str, str]:
     """(check title, body): the body is the check's summary and the PR comment. Every scanner text in it is passed
-    through the quarantine, because it quotes code agents wrote."""
+    through the quarantine, because it quotes code agents wrote. Under ``enforce`` a red result names HITL's two
+    commands (MISSION-ROUTER-001 Amendment 021)."""
     count = parsed["finding_count"]
     if parsed["conclusion"] == "success":
         title = "Security scan: no finding"
@@ -310,8 +312,20 @@ def report_text(job: ScanJob, parsed: Mapping[str, Any], run_url: str = "") -> T
     if count > LISTED:
         lines.append(f"- … and {count - LISTED} more, in the scan's artifact")
     lines += ["", "The scan is a check, never a review: a green scan is not an A3 PASS and stands in for no "
-                  "independent review (SECURITY-SCAN-SPEC-001 §1). Reporting only: the router does not wait on it "
-                  "yet (MISSION-DISPATCH-001 Amendment 036)."]
+                  "independent review (SECURITY-SCAN-SPEC-001 §1)."]
+    if scan_mode != ENFORCE:
+        lines[-1] += " Reporting only: the router does not wait on it (MISSION-DISPATCH-001 Amendment 036)."
+    elif parsed["conclusion"] == "success":
+        lines[-1] += " The router merges this head only with this check green (MISSION-ROUTER-001 Amendment 021)."
+    else:
+        where = "the stack's issue" if job.kind == "stack" else "the mission's tracking issue"
+        lines += ["", f"The router holds the merge. HITL settles it on {where}, with one of these on its own line:",
+                  "", f"- `/mission accept-scan {job.head_sha}`: merge this exact head, the findings acknowledged;",
+                  "- `/mission send-back`: " + ("block the stack, so it restarts as new missions under new ids."
+                                                if job.kind == "stack" else
+                                                "cancel the mission; a new plan, under a new mission id, cites "
+                                                "the findings."),
+                  "", "A new push is scanned again (MISSION-ROUTER-001 Amendment 021)."]
     if run_url:
         lines.append(f"The SARIF and the report are kept with the [run]({run_url}) for 90 days.")
     return title, "\n".join(lines) + "\n"

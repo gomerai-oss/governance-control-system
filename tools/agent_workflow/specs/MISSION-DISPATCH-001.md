@@ -240,6 +240,15 @@ on the PR's head and posts the findings through the quarantine. Any finding is r
 The router does not wait on the check: part 4 adds the hold and HITL's two commands. `config.json`
 `"security_scan"` is absent, so `"off"`: nothing is scanned until HITL switches it to `"observe"` for the pilot.
 §3q items 6 to 13; vectors 209 to 216; §7 items 46 and 47.
+**Amendment 037 (2026-11-16, SECURITY-SCAN-SPEC-001 build part 4, with MISSION-ROUTER-001 Amendment 021):**
+`"security_scan": "enforce"`. The router holds an A3 PASS into a landing branch, and a stack's landing PR, until the
+`security-scan` check on its head is green, or HITL settles a red scan:
+- `/mission accept-scan <sha>` merges that exact head;
+- `/mission send-back` ends the mission, or blocks the stack, so it restarts under a new mission id.
+
+HITL decided both open questions (2026-11-16): send-back ends the mission rather than reopening it, and accept-scan
+works on a stack's landing PR too. Under enforce, a red report names both commands. `config.json` still leaves the
+scan off, until the pilot (part 5). §3q item 14; vectors 217 to 224.
 
 ## 1. Purpose
 
@@ -2178,6 +2187,16 @@ Part 3 (Amendment 036) builds the scan job itself, reporting only (`mission_disp
     5) is its first run. It may need a request the egress policy does not list (§7 item 45), and its own sandbox may
     not start on GitHub's runners (§7 item 46). Each fails red, never green.
 
+Part 4 (Amendment 037) makes the check a gate (MISSION-ROUTER-001 Amendment 021, §5b and §6).
+
+14. **`"enforce"`.** The scan runs as under `"observe"`, and the router also holds the merge (router §5b).
+    - **The report under enforce** (`secscan.report_text`). A red report names HITL's two commands with the head's
+      full SHA, and where to post them: the mission's tracking issue, or the stack's issue. A green report says the
+      router merges that head only with the check green.
+    - **Under `"observe"`** the report still says it is reporting only.
+    - **The commands in the report are inside backticks, never at the start of a line.** Only HITL's own comments on
+      the issue count, so the report's text cannot settle a scan.
+
 ## 4. Failures
 
 `report` posts one comment on the tracking issue, with a hidden marker
@@ -2654,3 +2673,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 214 | The scan with no account of its own, blast radius observe, no key, a refused readiness, no proxy port, no install, a process that survives | Each refused before the scanner starts, or red after; the scanner sees no key; its log and kept files hold neither the key nor the stand-in |
 | 215 | The checkout, after the base branch moved past the PR's base | A clean clone detached at the head; the merge base is the PR's base, not the branch's head; a head not in the repository refused |
 | 216 | `scan-report` with no result, a green result, a moved head; `scan` while off | Red check and comment; green; no check; a red result and a failed step |
+| 217 | Under enforce: an A3 PASS into `main` with no scan, then a green one; a scan in progress; `"off"` and `"observe"`; an A2 build or an A3 FAIL | Held, and the router says why, with `route-handoff-block` pending; merged once it is green; held; merged without a scan, with a log line under observe only; merged, never held (router vector 133) |
+| 218 | A red scan; an older green or another app's green behind a newer red | Held, and the router's comment names `/mission accept-scan <head>` and `/mission send-back` and the tracking issue's number, never at the start of a line; held (router 134) |
+| 219 | HITL's `/mission accept-scan <head>` on the tracking issue after a red scan; the same from a bot, from another user, for another SHA, inside a sentence, or on the PR; before the scan finished; then a new push | Merged, with a `router.hitl_command` record holding the findings' digest before the landing record; held in every other case; the new head waits for its own scan (router 135) |
+| 220 | HITL's `/mission send-back` on the tracking issue after a red scan; the same from another user | `CANCELLED`, the issue closed, saying it was sent back and restarts under a new mission id; nothing reaches `main`, and the command is recorded; nothing changes (router 136) |
+| 221 | `config.json` `"security_scan"`: `"enforce"`, and an unknown value | Read; the router stops (router 139) |
+| 222 | A stack's landing PR under enforce, with no scan then a green one; with a red one, then HITL's accept-scan on the stack's issue | Held, then landed; the router's comment names the stack's issue, and the accept lands it and is recorded (router 137) |
+| 223 | HITL's `/mission send-back` on the stack's issue once every mission passed, with a red scan; the same while a mission is still running | The stack is blocked, with "Stack sent back", the landing PR is not merged, nothing reaches `main`, and the command is recorded; the stack is not blocked (router 138) |
+| 224 | The report under enforce, red, for a mission and for a stack; green; under observe | Names both commands, the head and where to post them, never at the start of a line; says the router merges only with it green; says reporting only |
