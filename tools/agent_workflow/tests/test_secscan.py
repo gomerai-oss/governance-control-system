@@ -3,7 +3,8 @@
 Covers the switch, what is due (the router's targets, a scan already set, a scan another run owns), the scanner's
 command and environment, the result and the check it gives, the run (the key kept in the proxy), the checkout, the
 CLI's report step and the workflow's jobs. Vectors 209 to 216. Part 4 (Amendment 037; MISSION-ROUTER-001 Amendment
-021): the router's hold and HITL's /mission accept-scan and /mission send-back. Vectors 217 to 224.
+021): the router's hold and HITL's /mission accept-scan and /mission send-back. Vectors 217 to 224. Amendment 038:
+the scanner's root-owned private area (AST-SCAN.1). Vector 225.
 """
 
 from __future__ import annotations
@@ -285,12 +286,15 @@ class Vector214Run(unittest.TestCase):
         cli_file.parent.mkdir(parents=True)
         cli_file.write_text("")
         self.out = Path(tempfile.mkdtemp()) / "out"
+        self.private = Path(tempfile.mkdtemp())  # stands in for /srv/mission-scan; its owner check is stood in for
+        self.checked = []
         self.env = {"OPENAI_API_KEY": KEY, "HOME": "/home/runner", "GITHUB_TOKEN": "ghs_" + "t" * 36}
 
-    def scan(self, egress, run, blast_mode=blast.ENFORCE, run_as="mission-agent", ready=OK):
+    def scan(self, egress, run, blast_mode=blast.ENFORCE, run_as="mission-agent", ready=OK, check=None):
         with mock.patch.object(login, "readiness", return_value=ready):
             return secscan.run_scan(job(), self.root, self.tools, self.out, self.env, blast_mode, run_as, "v22.23.5",
-                                    BASE, egress=egress, run=run, log=lambda m: None)
+                                    BASE, egress=egress, run=run, log=lambda m: None, private=self.private,
+                                    check_private=check or self.checked.append)
 
     def test_clean_run(self):
         seen = {}
@@ -298,7 +302,8 @@ class Vector214Run(unittest.TestCase):
         def run(argv, cwd, env, stdout, **_):
             seen.update(argv=argv, env=env, cwd=cwd)
             stdout.write(f"model said {KEY} and {env[secscan.STANDIN_ENV]}\n")
-            results = self.root / secscan.RESULTS_DIR
+            results = self.private / secscan.RESULTS_DIR
+            results.mkdir()  # sudo install made it, in the job
             write_results(results)
             (results / "exports").mkdir()
             (results / "exports" / "results.sarif").write_text("{}")
@@ -320,6 +325,20 @@ class Vector214Run(unittest.TestCase):
         self.assertEqual((self.out / "report.md").read_bytes(), b"")  # a file with the key in it is not kept
         self.assertEqual(egress.stopped, 1)
         self.assertTrue(any(c[:3] == ["sudo", "-n", "pkill"] for c in egress.calls))
+        # Amendment 038: the state and output are the scanner's own, 0700, in the root-owned private area; only the
+        # checkout is handed over, and the output is taken back before it is read.
+        self.assertEqual(self.checked, [self.private])
+        for name in (secscan.STATE_DIR, secscan.RESULTS_DIR):
+            self.assertIn(["sudo", "-n", "install", "-d", "-o", "mission-agent", "-g", "mission-agent", "-m", "0700",
+                           str(self.private / name)], egress.calls)
+        handed = [c[-1] for c in egress.calls
+                  if c[:3] == ["sudo", "-n", "chown"] and "mission-agent:mission-agent" in c]
+        self.assertEqual(handed, [str(self.root / "checkout")])
+        back = [c for c in egress.calls if c[:3] == ["sudo", "-n", "chown"] and c[-1] == str(self.private / "results")]
+        self.assertEqual(back[0][-2], f"{os.getuid()}:{os.getgid()}")
+        self.assertEqual(seen["env"]["CODEX_SECURITY_STATE_DIR"], str(self.private / secscan.STATE_DIR))
+        self.assertIn(str(self.private / secscan.RESULTS_DIR), argv)
+        self.assertNotIn(str(self.root), " ".join(a for a in argv if a.startswith("/") and "checkout" not in a))
 
     def test_refusals_before_the_scanner_starts(self):
         never = mock.Mock(side_effect=AssertionError("the scanner must not start"))
@@ -330,6 +349,36 @@ class Vector214Run(unittest.TestCase):
         self.env.pop("OPENAI_API_KEY")
         with self.assertRaisesRegex(ScanError, "OPENAI_API_KEY"):
             self.scan(FakeEgress(), never)
+
+    def test_an_untrusted_or_used_private_area_stops_it(self):  # Amendment 038 (AST-SCAN.1)
+        never = mock.Mock(side_effect=AssertionError("the scanner must not start"))
+
+        def untrusted(path):
+            raise ScanError(f"the scan's private area must be owned by root up to /: {path} is not")
+        with self.assertRaisesRegex(ScanError, "owned by root"):
+            self.scan(FakeEgress(), never, check=untrusted)
+        (self.private / secscan.RESULTS_DIR).mkdir()
+        with self.assertRaisesRegex(ScanError, "already holds results"):
+            self.scan(FakeEgress(), never)
+
+    def test_a_folder_that_cannot_be_made_stops_it(self):
+        class NoInstall(FakeEgress):
+            def run(self, argv):
+                self.calls.append(argv)
+                return subprocess.CompletedProcess(argv, 1 if argv[:3] == ["sudo", "-n", "install"] else 0, "", "no")
+        egress = NoInstall()
+        with self.assertRaisesRegex(ScanError, "cannot make"):
+            self.scan(egress, mock.Mock(side_effect=AssertionError("the scanner must not start")))
+        self.assertEqual(egress.stopped, 1)
+
+    def test_output_not_taken_back_is_a_problem(self):
+        class NoBack(FakeEgress):
+            def run(self, argv):
+                self.calls.append(argv)
+                fail = argv[0] == "pgrep" or (argv[:3] == ["sudo", "-n", "chown"] and argv[-1].endswith("results"))
+                return subprocess.CompletedProcess(argv, 1 if fail else 0, "", "")
+        with self.assertRaisesRegex(ScanError, "cannot take .*results back"):
+            self.scan(NoBack(), lambda argv, **_: subprocess.CompletedProcess(argv, 0))
 
     def test_key_refused_through_the_proxy_stops_it(self):
         egress = FakeEgress()
@@ -356,6 +405,43 @@ class Vector214Run(unittest.TestCase):
         with mock.patch.object(blast.time, "sleep"):
             with self.assertRaisesRegex(ScanError, "survived"):
                 self.scan(Survivor(), run)
+
+
+class Vector225PrivateArea(unittest.TestCase):
+    """Vector 225 (Amendment 038): the private area and every folder above it are root's real directories, writable
+    by no one else unless sticky, as the scanner itself requires of its state and output parents (AST-SCAN.1)."""
+
+    def lstat(self, table):
+        def fake(path):
+            uid, mode = table.get(path, (0, 0o40755))
+            return SimpleNamespace(st_uid=uid, st_mode=mode)
+        return fake
+
+    def test_root_owned_chain_passes(self):
+        secscan.require_trusted_parent(Path("/srv/mission-scan"), self.lstat({}))
+        secscan.require_trusted_parent(Path("/tmp/x"), self.lstat({"/tmp": (0, 0o41777)}))  # sticky, as the scanner
+
+    def test_what_is_refused(self):
+        for table, says in (({"/srv/mission-scan": (1001, 0o40755)}, "owned by root"),
+                            ({"/srv": (1001, 0o40755)}, "owned by root"),
+                            ({"/srv": (0, 0o40777)}, "writable by others"),
+                            ({"/srv/mission-scan": (0, 0o40775)}, "writable by others"),
+                            ({"/srv/mission-scan": (0, 0o120777)}, "real directories"),
+                            ({"/srv/mission-scan": (0, 0o100644)}, "real directories")):
+            with self.subTest(table=table), self.assertRaisesRegex(ScanError, says):
+                secscan.require_trusted_parent(Path("/srv/mission-scan"), self.lstat(table))
+
+    def test_a_missing_area_is_refused(self):
+        def missing(path):
+            raise FileNotFoundError(path)
+        with self.assertRaisesRegex(ScanError, "cannot be checked"):
+            secscan.require_trusted_parent(Path("/srv/mission-scan"), missing)
+
+    def test_the_workflow_makes_it_root_owned_and_passes_it(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("sudo install -d -o root -g root -m 755 /srv/mission-scan", text)
+        self.assertIn("--run-as mission-agent --private /srv/mission-scan", text)
+        self.assertEqual(secscan.PRIVATE, "/srv/mission-scan")
 
 
 class Vector215Checkout(unittest.TestCase):
@@ -456,6 +542,21 @@ class Vector216ReportStep(unittest.TestCase):
         result = json.loads((out / secscan.RESULT_FILE).read_text())
         self.assertEqual(result["conclusion"], "failure")
         self.assertIn("off", result["reason"])
+
+    def test_scan_reads_its_result_from_the_private_area(self):  # Amendment 038
+        root, out, private = (Path(tempfile.mkdtemp()) for _ in range(3))
+
+        def fake_run(job_, root_, tools, out_, environ, blast_mode, run_as, node, base, **kw):
+            self.assertEqual(kw["private"], private)
+            write_results(private / secscan.RESULTS_DIR)
+            return 0
+        with mock.patch.object(cli, "_scan_mode", return_value=secscan.ENFORCE), \
+                mock.patch.object(secscan, "read_merge_base", return_value=BASE), \
+                mock.patch.object(secscan, "run_scan", side_effect=fake_run):
+            code, _ = self.run_cli(["scan", "--root", str(root), "--tools", str(root), "--out", str(out),
+                                    "--run-as", "mission-agent", "--private", str(private)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads((out / secscan.RESULT_FILE).read_text())["conclusion"], "success")
 
     def test_evidence_actions_are_listed(self):
         self.assertEqual(record.ACTIONS["dispatch.scan"], "decide")

@@ -714,6 +714,7 @@ jobs:
           sudo chown -R root:root /opt/mission-tooling
           sudo chmod -R a+rX,go-w /opt/mission-tooling
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /srv/mission-job
+          sudo install -d -o root -g root -m 755 /srv/mission-scan  # the scanner's state and output (Amendment 038)
 
       - name: Is the scan still due? A fresh clone at the PR's head (read-only token, this step only)
         id: due
@@ -741,7 +742,7 @@ jobs:
           PYTHONPATH: /opt/mission-tooling/tools/agent_workflow
         run: >-
           python3 -m mission_dispatch scan --root /srv/mission-job/scan --tools /opt/mission-scan-tools
-          --out "$RUNNER_TEMP/scan-out" --run-as mission-agent
+          --out "$RUNNER_TEMP/scan-out" --run-as mission-agent --private /srv/mission-scan
 
       - name: Hand the result to the report job
         if: always() && steps.due.outputs.due == 'true'
