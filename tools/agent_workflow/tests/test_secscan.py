@@ -2,7 +2,8 @@
 
 Covers the switch, what is due (the router's targets, a scan already set, a scan another run owns), the scanner's
 command and environment, the result and the check it gives, the run (the key kept in the proxy), the checkout, the
-CLI's report step and the workflow's jobs. Vectors 209 to 216.
+CLI's report step and the workflow's jobs. Vectors 209 to 216. Part 4 (Amendment 037; MISSION-ROUTER-001 Amendment
+021): the router's hold and HITL's /mission accept-scan and /mission send-back. Vectors 217 to 224.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from evidence import record
 from mission_dispatch import __main__ as cli
 from mission_dispatch import blast, login, secscan
 from mission_dispatch.secscan import ScanError, ScanJob
+from tests import test_mission_router as rt  # the router's fake GitHub and its mission loop (part 4)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _LIVE = REPO_ROOT / ".github" / "workflows" / "mission-agent.yml"
@@ -60,9 +62,10 @@ class Vector209Switch(unittest.TestCase):
     def test_absent_is_off_and_observe_is_read(self):
         self.assertEqual(secscan.mode({}), secscan.OFF)
         self.assertEqual(secscan.mode({"security_scan": "observe"}), secscan.OBSERVE)
+        self.assertEqual(secscan.mode({"security_scan": "enforce"}), secscan.ENFORCE)  # Amendment 037
 
     def test_unknown_value_is_refused(self):
-        for value in ("enforce", "on", "", None, True):
+        for value in ("Enforce", "on", "", None, True):
             with self.assertRaises(ScanError):
                 secscan.mode({"security_scan": value})
 
@@ -496,3 +499,302 @@ class WorkflowJobs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- part 4: the router's hold (Amendment 037)
+
+
+class Records:
+    """A stand-in evidence chain: the router's records, in order."""
+
+    enabled = True
+
+    def __init__(self):
+        self.rows = []
+
+    def record(self, **fields):
+        self.rows.append(fields)
+        return fields
+
+
+class HoldBase(unittest.TestCase):
+    def loop(self, scan_mode="enforce"):
+        t = rt.RouterLoopTests("test_full_mission_fail_then_pass")
+        t.setUp()
+        t.router.scan_mode = scan_mode
+        t.router.evidence = Records()
+        return t
+
+    def passed(self, t):
+        """A mission whose A3 PASS PR into main is open; returns (PR, head)."""
+        t.start_mission()
+        t.a2_round(1)
+        n = t.a3_round(1, "PASS")
+        return n, t.gh.branches[t.gh.prs[n]["head_ref"]]
+
+    @staticmethod
+    def scan(t, sha, conclusion, title="Security scan: 2 findings", status="completed"):
+        t.gh.create_check_run(secscan.CHECK_NAME, sha, status, conclusion if status == "completed" else None, title,
+                              "- **high**: x")
+
+    @staticmethod
+    def held(t, n):
+        return t.gh.prs[n]["state"] == "open" and t.gh.prs[n]["merged_by"] is None
+
+
+class Vector217MissionHold(HoldBase):
+    """Vector 217 (router 133): under enforce an A3 PASS waits for its head's security-scan, then merges on green."""
+
+    def test_no_scan_yet_is_held_and_says_why_then_green_merges(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.assertTrue(self.held(t, n))
+        self.assertTrue(any("security scan of this head has not finished" in c for c in t.bot_comments(n)))
+        self.assertEqual(t.gh.latest_check(head)["status"], "in_progress", "route-handoff-block stays pending")
+        self.scan(t, head, "success", "Security scan: no finding")
+        t.sweep()
+        self.assertEqual(t.gh.prs[n]["merged_by"], rt.BOT)
+
+    def test_a_scan_still_running_holds(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, None, status="in_progress")
+        t.sweep()
+        self.assertTrue(self.held(t, n))
+
+    def test_off_and_observe_merge_without_a_scan(self):
+        for mode, logged in ((secscan.OFF, False), (secscan.OBSERVE, True)):
+            with self.subTest(mode):
+                t = self.loop(mode)
+                n, _ = self.passed(t)
+                self.assertEqual(t.gh.prs[n]["merged_by"], rt.BOT)
+                self.assertEqual(any("security scan (" in line for line in t.logs), logged)
+
+    def test_a_plan_build_or_fail_round_is_never_held(self):
+        t = self.loop()
+        t.start_mission()
+        a2 = t.a2_round(1)
+        self.assertEqual(t.gh.prs[a2]["merged_by"], rt.BOT)
+        f1 = t.a3_round(1, "FAIL")
+        self.assertEqual(t.gh.prs[f1]["merged_by"], rt.BOT)
+
+
+class Vector218RedScan(HoldBase):
+    """Vector 218 (router 134): a red scan holds, and the router names HITL's two commands with the exact head."""
+
+    def test_red_holds_and_names_the_commands(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, "failure")
+        t.sweep()
+        self.assertTrue(self.held(t, n))
+        issue = t.issue()["number"]
+        (said,) = [c for c in t.bot_comments(n) if "did not pass" in c]
+        self.assertIn(f"`/mission accept-scan {head}`", said)
+        self.assertIn("`/mission send-back`", said)
+        self.assertIn(f"#{issue}", said)
+        self.assertFalse(any(line.lstrip().startswith("/mission") for line in said.splitlines()))
+
+    def test_only_the_newest_github_actions_run_counts(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, "success")
+        self.scan(t, head, "failure")  # a rerun that went red
+        t.gh.checks[head].append({"id": 10 ** 9, "name": secscan.CHECK_NAME, "status": "completed",
+                                  "conclusion": "success", "app": {"slug": "some-other-app"}, "output": {}})
+        t.sweep()
+        self.assertTrue(self.held(t, n), "a green from another app, or an older green, does not count")
+
+
+class Vector219AcceptScan(HoldBase):
+    """Vector 219 (router 135): HITL's /mission accept-scan <head> on the tracking issue merges that exact head, and
+    the command and the findings' digest are recorded before the merge."""
+
+    def test_accept_merges_and_is_recorded_first(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, "failure")
+        t.sweep()
+        t.gh.comment_as(t.issue()["number"], rt.HITL, f"Acknowledged.\n/mission accept-scan {head}")
+        t.sweep()
+        self.assertEqual(t.gh.prs[n]["merged_by"], rt.BOT)
+        rows = t.router.evidence.rows
+        (i,) = [k for k, r in enumerate(rows) if r["reason"] == f"HITL command: /mission accept-scan {head}"]
+        accept = rows[i]
+        self.assertEqual((accept["actor"], accept["authority_kind"], accept["commit"]), (rt.HITL, "hitl_command", head))
+        self.assertIn("findings", accept["outputs"])
+        (m,) = [k for k, r in enumerate(rows) if r["action"] == "router.landing"]
+        self.assertLess(i, m, "recorded before the merge it allows")
+
+    def test_what_does_not_count(self):
+        other = "c" * 40
+        for where, login, type_, body in (
+                ("issue", rt.A2B, "Bot", "/mission accept-scan {head}"),
+                ("issue", "someone", "User", "/mission accept-scan {head}"),
+                ("issue", rt.HITL, "User", f"/mission accept-scan {other}"),
+                ("issue", rt.HITL, "User", "please /mission accept-scan {head}"),
+                ("pr", rt.HITL, "User", "/mission accept-scan {head}")):
+            with self.subTest(where=where, login=login, body=body):
+                t = self.loop()
+                n, head = self.passed(t)
+                self.scan(t, head, "failure")
+                t.gh.comment_as(t.issue()["number"] if where == "issue" else n, login, body.format(head=head), type_)
+                t.sweep()
+                self.assertTrue(self.held(t, n))
+
+    def test_an_accept_before_the_scan_finished_does_not_count(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        t.gh.comment_as(t.issue()["number"], rt.HITL, f"/mission accept-scan {head}")
+        self.scan(t, head, None, status="in_progress")
+        t.sweep()
+        self.assertTrue(self.held(t, n))
+
+    def test_a_new_push_needs_its_own_scan(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, "failure")
+        t.gh.comment_as(t.issue()["number"], rt.HITL, f"/mission accept-scan {head}")
+        verdict = f"missions/{rt.MID}/reviews/round-1.json"
+        branch = t.gh.prs[n]["head_ref"]
+        t.gh.push(branch, {verdict: t.gh.commits[head][1][verdict] + "\n"})  # the same verdict, a new head
+        t.sweep()
+        self.assertNotEqual(t.gh.branches[branch], head)
+        self.assertTrue(self.held(t, n))
+        self.assertTrue(any("has not finished" in c for c in t.bot_comments(n)), "the new head waits for its own scan")
+
+
+class Vector220SendBack(HoldBase):
+    """Vector 220 (router 136): HITL's /mission send-back on the tracking issue ends the mission as CANCELLED, saying
+    it restarts under a new mission id; its PASS PR is rejected and nothing reaches main."""
+
+    def test_send_back_cancels_and_says_what_follows(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, "failure")
+        t.sweep()
+        main_before = t.gh.branches["main"]
+        t.gh.comment_as(t.issue()["number"], rt.HITL, "/mission send-back")
+        t.sweep()
+        issue = t.issue()
+        self.assertEqual(issue["state"], "closed")
+        self.assertIn("mission:cancelled", t.labels())
+        self.assertIn("sent it back after the security scan", issue["body"])
+        self.assertIn("new mission id", issue["body"])
+        self.assertEqual(t.gh.branches["main"], main_before)
+        self.assertNotEqual(t.gh.prs[n]["merged_by"], rt.BOT)
+        self.assertTrue(any(r["reason"] == "HITL command: /mission send-back" for r in t.router.evidence.rows))
+
+    def test_send_back_from_anyone_else_does_nothing(self):
+        t = self.loop()
+        n, head = self.passed(t)
+        self.scan(t, head, "failure")
+        t.gh.comment_as(t.issue()["number"], "someone", "/mission send-back")
+        t.sweep()
+        self.assertNotIn("mission:cancelled", t.labels())
+
+
+class Vector221Config(unittest.TestCase):
+    """Vector 221 (router 139): an unknown "security_scan" value stops the router, never read as off."""
+
+    def test_unknown_value_stops_the_router(self):
+        for value in ("Enforce", "on", 1):
+            with self.subTest(value), self.assertRaises(ValueError):
+                rt.load_config_from({**rt.config(), "security_scan": value})
+        self.assertEqual(rt.load_config_from({**rt.config(), "security_scan": "enforce"})["security_scan"], "enforce")
+
+
+class StackHold(HoldBase):
+    def ready_stack(self, t, sid="S-7"):
+        p1, _, _ = t.open_chained(sid)
+        t.gh.comment_as(p1, rt.HITL, f"/mission approve {t.stack_fingerprint(p1)}")
+        t.sweep()
+        for mid in ("M-LEG-001", "M-LEG-002", "M-LEG-003"):
+            t.run_loop(mid, sid)
+        land = t.gh.open_pr(f"stack/{sid}", "main", rt.A3B)
+        t.sweep()
+        return land, t.gh.branches[f"stack/{sid}"]
+
+
+class Vector222StackHold(StackHold):
+    """Vector 222 (router 137): a stack's landing PR waits for its head's scan; accept-scan on the stack's issue
+    lands it."""
+
+    def test_landing_waits_for_green(self):
+        t = self.loop()
+        land, head = self.ready_stack(t)
+        self.assertTrue(self.held(t, land))
+        self.scan(t, head, "success", "Security scan: no finding")
+        t.sweep()
+        self.assertEqual(t.gh.prs[land]["merged_by"], rt.BOT)
+
+    def test_accept_on_the_stack_issue_lands_it(self):
+        t = self.loop()
+        land, head = self.ready_stack(t)
+        self.scan(t, head, "failure")
+        t.sweep()
+        stack = t.stack_issue("S-7")["number"]
+        self.assertTrue(any(f"#{stack}" in c and f"/mission accept-scan {head}" in c for c in t.bot_comments(land)))
+        t.gh.comment_as(stack, rt.HITL, f"/mission accept-scan {head}")
+        t.sweep()
+        self.assertEqual(t.gh.prs[land]["merged_by"], rt.BOT)
+        self.assertTrue(any(r["reason"] == f"HITL command: /mission accept-scan {head}"
+                            for r in t.router.evidence.rows))
+
+
+class Vector223StackSendBack(StackHold):
+    """Vector 223 (router 138): send-back on the stack's issue, once every mission passed, blocks the stack; its
+    landing PR is rejected and nothing reaches main."""
+
+    def test_send_back_blocks_the_stack(self):
+        t = self.loop()
+        land, head = self.ready_stack(t)
+        self.scan(t, head, "failure")
+        main_before = t.gh.branches["main"]
+        stack = t.stack_issue("S-7")["number"]
+        t.gh.comment_as(stack, rt.HITL, "/mission send-back")
+        t.sweep()
+        t.sweep()
+        self.assertIn("mission:blocked", [l["name"] for l in t.stack_issue("S-7")["labels"]])
+        self.assertTrue(any(c.startswith("**Stack sent back.**") for c in t.bot_comments(stack)))
+        self.assertEqual(t.gh.branches["main"], main_before)
+        self.assertNotEqual(t.gh.prs[land]["merged_by"], rt.BOT)
+        self.assertTrue(any(r["reason"] == "HITL command: /mission send-back" for r in t.router.evidence.rows))
+
+    def test_send_back_before_every_mission_passed_does_not_block(self):
+        t = self.loop()
+        p1, _, _ = t.open_chained("S-8")
+        t.gh.comment_as(p1, rt.HITL, f"/mission approve {t.stack_fingerprint(p1)}")
+        t.sweep()
+        t.run_loop("M-LEG-001", "S-8")
+        t.gh.comment_as(t.stack_issue("S-8")["number"], rt.HITL, "/mission send-back")
+        t.sweep()
+        self.assertNotIn("mission:blocked", [l["name"] for l in t.stack_issue("S-8")["labels"]])
+
+
+class Vector224ReportUnderEnforce(unittest.TestCase):
+    """Vector 224 (dispatch, Amendment 037): under enforce a red report names HITL's commands with the exact head and
+    where to post them; a green one says the router merges only with it green; otherwise it says reporting only."""
+
+    def parsed(self, conclusion="failure", count=1):
+        return {"conclusion": conclusion, "reason": "r", "finding_count": count,
+                "findings": [{"level": "high", "title": "t", "path": "a.py", "line": 1, "rule": ""}] * count}
+
+    def test_red_mission_and_stack(self):
+        for kind, where in (("mission", "the mission's tracking issue"), ("stack", "the stack's issue")):
+            with self.subTest(kind):
+                _, body = secscan.report_text(job(kind=kind, subject="S-7" if kind == "stack" else "M-SCAN-001"),
+                                              self.parsed(), "", secscan.ENFORCE)
+                self.assertIn(where, body)
+                self.assertIn(f"`/mission accept-scan {HEAD}`", body)
+                self.assertIn("`/mission send-back`", body)
+                self.assertNotIn("Reporting only", body)
+                self.assertFalse(any(line.lstrip().startswith("/mission") for line in body.splitlines()))
+
+    def test_green_and_observe(self):
+        _, green = secscan.report_text(job(), self.parsed("success", 0), "", secscan.ENFORCE)
+        self.assertIn("only with this check green", green)
+        self.assertNotIn("accept-scan", green)
+        _, observed = secscan.report_text(job(), self.parsed(), "", secscan.OBSERVE)
+        self.assertIn("Reporting only", observed)
+        self.assertNotIn("accept-scan", observed)

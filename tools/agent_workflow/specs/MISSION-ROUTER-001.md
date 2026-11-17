@@ -99,6 +99,21 @@ loop is complete.
 loop for a head with `/mission end-challenge <sha>`, so stopping no longer costs one more AR round, and the points of
 AR's last round, when it is a `CHALLENGE`, go to A3 as advisory open points and come back to HITL in the DONE comment
 (§6a; vectors 128-132).
+**Amendment 021 (2026-11-16, HITL direction: SECURITY-SCAN-SPEC-001 build part 4, with MISSION-DISPATCH-001
+Amendment 037):** under `"security_scan": "enforce"`, a landing waits for the security scan.
+- **What is held:** an A3 PASS into a landing branch, and a stack's landing PR. Each merges only once the newest
+  `security-scan` check run from GitHub Actions on its head is `success`, or HITL has accepted that head's red scan.
+  Until then the router holds it and says why (§5b).
+- **HITL settles a red scan** with one of two new commands (§6):
+  - `/mission accept-scan <sha>` merges that exact head. The command and the digest of the findings it accepted are
+    recorded before the merge.
+  - `/mission send-back` ends the mission as `CANCELLED`, or blocks the stack, so it restarts as a new plan under a
+    new mission id that cites the findings.
+- **HITL's answers to SECURITY-SCAN-SPEC-001 §8 (2026-11-16):** send-back ends the mission rather than reopening it;
+  accept-scan works on a stack's landing PR too.
+
+`"observe"` only logs what it would hold, and `"off"` (or the key absent) reads nothing. An unknown value stops the
+router (vectors 133-139).
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -436,6 +451,7 @@ on the head commit of every open PR into `main` during each sweep. It republishe
 |---|---|
 | A3 PASS that clears every check in §5, or a landing PR that clears §5c | `success`, published just before the router merges it |
 | A3 PASS held for HITL approval (§6) or waiting on a push record | in progress (pending) |
+| A3 PASS, or a landing PR, held for its security scan (Amendment 021) | in progress (pending) |
 | Any stage PR the router rejects | `failure`, with the reasons |
 | A capture PR that clears §5d | `success`, published just before the router merges it |
 | A capture PR held by a mission that may change the queue, or waiting on a push record | in progress (pending) |
@@ -456,6 +472,20 @@ HITL login; and every mission in the stack has passed (otherwise it waits, or is
 halted or already landed). A diff with SPEC-002 `AUTHORITY` or `AGENT_POLICY` files other than the stack's own
 `mission.json` files, or too large to list, waits for HITL (§6). The router publishes `route-handoff-block` on it as on
 any PR into `main`.
+
+### 5e. The security scan (Amendment 021)
+
+Under `config.json` `"security_scan": "enforce"`, an A3 PASS into a landing branch (§5) and a stack's landing PR
+(§5c) also wait for the security scan (SECURITY-SCAN-SPEC-001; the scan job is MISSION-DISPATCH-001 §3q):
+- **Green.** The newest `security-scan` check run from GitHub Actions on the head is `completed` and `success`.
+  Another app's run does not count, and neither does an older green behind a newer run.
+- **Not finished.** No such run, or one still running: held, and the router says so.
+- **Red.** Any other completed result: held. The router's comment names HITL's two commands (§6), with the head's
+  full SHA and the issue to post them on.
+
+Under `"observe"` the router only logs what it would hold, and under `"off"` it reads nothing. A mission in a stack is
+not held at its A3 PASS (that merges into the stack branch): the stack's landing PR is. A capture PR (§5d) is not
+scanned.
 
 ### 5d. The L1 capture route (Amendment 005; all must hold)
 
@@ -496,6 +526,8 @@ router-opened issue only, from a `hitl_logins` user account only):
 | `/mission cancel` | The mission becomes `CANCELLED` and its issue closes. Every open stage PR is rejected, nothing more is merged, nothing reaches `main`, and its `build_scope` no longer blocks other missions. Final: a restart takes a new mission id. A mission already `DONE` is not affected |
 | `/mission halt` | The mission is halted by HITL (Amendment 010). The router merges none of its stage PRs and leaves them open; no agent starts for it, and a run already in progress publishes nothing (MISSION-DISPATCH-001 §3h). Its `build_scope` stays reserved. On a stack's issue it halts every mission of the stack. Nothing is deleted or rejected |
 | `/mission resume` | Posted after the latest `/mission halt` on the same issue, it lifts the halt: the mission continues from the stage it was in, as if no time had passed. A resume before any halt does nothing |
+| `/mission accept-scan <40-hex head SHA>` | Amendment 021: settles a red security scan (§5e) by accepting it. The router merges that exact head, the A3 PASS or (on the stack's issue) the landing PR, once its check has finished red. It records the command and the digest of the findings before the merge. It counts only for that SHA, so a new push is scanned again. Posted before the scan finished, it does not count |
+| `/mission send-back` | Amendment 021: settles a red security scan (§5e) by sending the work back. The mission becomes `CANCELLED`, as with `/mission cancel`, with the reason that it was sent back after the security scan. It restarts as a new plan under a new mission id, citing the findings, and goes through AR, A2 and A3 again. On a stack's issue it counts once every mission of the stack has passed: the stack is then blocked ("Stack sent back") and its landing PR is not merged. Closing the issue ends the review, and the plans restart as a new stack |
 | `/mission retry` | Gives a stage recorded as failed 3 times in a row new attempts: failed agent runs (MISSION-DISPATCH-001 §4) and refused stage PRs (§5). On a mission blocked by A3, it reopens that mission alone (§4, Amendment 004): A3 reviews the same build again after `BLOCKED`, or A2 gets one more round after a last-round FAIL. Nothing else in the stack reruns |
 
 HITL's notes are not router commands. A comment whose first line starts `/mission note` is read by the dispatcher,
@@ -646,6 +678,12 @@ The router enforces everything it can see. These settings live in GitHub and onl
     a challenge's merit; it checks who wrote it, where, and whether the loop is complete for the head HITL approves.
 12. **A response's `Drafted-with:` line is HITL's declaration (Amendment 019).** HITL's A1 agents push through HITL's
     login, as limit 9 accepts, so the router checks the line is present, not that it is true.
+13. **A send-back on a stack's issue waits for the landing (Amendment 021).** Posted while a mission of the stack is
+    still running, it changes nothing then, but it counts once every mission has passed, like any command left on
+    the issue. To stop a stack earlier, HITL cancels its missions.
+14. **The scan's check is trusted by its app, as `evidence-sealed` is (Amendment 021).** Any workflow of this
+    repository whose token can write checks could set `security-scan`. No agent App may change a workflow, so the
+    workflows that do are HITL's.
 
 ## 10. Predicted vectors (A3 verifies)
 
@@ -783,3 +821,10 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 130 | `/mission end-challenge <old head>`, then a push to the plan | Ignored for the new head: AR is due, and an approval is not counted |
 | 131 | `/mission end-challenge` on a plan with no round | Changes nothing: an approval is not counted, and the comment names the command |
 | 132 | A mission lands whose approved plan ended on a `CHALLENGE` round | The DONE comment lists A3's `AR <id>:` lines, quarantined, or says it gave none |
+| 133 | Under `"security_scan": "enforce"`: an A3 PASS into `main` with no `security-scan` run, then a green one; a run in progress; under `"off"` and `"observe"`; an A2 build and an A3 FAIL | Held, saying the scan has not finished, with `route-handoff-block` pending; merged once green; held; merged without a scan (observe logs it); merged, never held |
+| 134 | A red scan; an older green, or another app's green, behind a newer red | Held; the comment names `/mission accept-scan <head>`, `/mission send-back` and the tracking issue's number; held |
+| 135 | HITL's `/mission accept-scan <head>` on the tracking issue after a red scan; from a bot or a non-HITL user, for another SHA, inside a sentence, or on the PR; before the scan finished; after a new push | Merged, the command recorded with the findings' digest before the landing; held in every other case; the new head waits for its own scan |
+| 136 | HITL's `/mission send-back` on the tracking issue; from a non-HITL user | `CANCELLED`, issue closed, its body saying it was sent back after the security scan and restarts under a new mission id; nothing reaches `main`; the command recorded; nothing changes |
+| 137 | A stack's landing PR under enforce with no scan, then green; red, then HITL's accept-scan on the stack's issue | Held, then landed; the comment names the stack's issue, and the accept lands it and is recorded |
+| 138 | HITL's `/mission send-back` on the stack's issue once every mission passed; while a mission still runs | Stack blocked, "Stack sent back", landing not merged, nothing on `main`, command recorded; not blocked |
+| 139 | `config.json` `"security_scan"`: `"enforce"`; an unknown value | Read; the router stops |
