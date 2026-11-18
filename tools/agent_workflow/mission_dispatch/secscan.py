@@ -240,10 +240,38 @@ def _load(path: Path, document_type: str) -> dict:
     return doc
 
 
+FAILURE_TEXT_MAX = 300
+_FLAT_OBJECT = re.compile(r"\{[^{}]*\}")
+
+
+def scanner_failure(log_path: Path) -> str:
+    """The scanner's own account of why it failed (Amendment 040): the last JSON object near the end of its log whose
+    ``status`` is ``failed``, as ``<code>: <message>``; "" when there is none. A refusal by the model provider shows
+    here and nowhere else (the scanner exits 2 for every failure). It is the scanner's text, so it is bounded and
+    passed through the quarantine before anything reads it."""
+    try:
+        with open(log_path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 16384))
+            tail = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    for match in reversed(list(_FLAT_OBJECT.finditer(tail))):
+        try:
+            doc = json.loads(match.group(0))
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and doc.get("status") == "failed" and isinstance(doc.get("message"), str):
+            code = doc.get("code") if isinstance(doc.get("code"), str) else ""
+            return _text(f"{code}: {doc['message']}" if code else doc["message"], FAILURE_TEXT_MAX)
+    return ""
+
+
 def read_result(job: ScanJob, out_dir: Path, exit_code: Optional[int], merge_base: str = "",
-                error: str = "") -> Dict[str, Any]:
+                error: str = "", failure: str = "") -> Dict[str, Any]:
     """The result ``scan-report`` acts on. ``conclusion`` is ``success`` only for exit 0, a sealed manifest whose
-    status is ``completed``, and an empty findings list; everything else is ``failure`` with its reason."""
+    status is ``completed``, and an empty findings list; everything else is ``failure`` with its reason, which for a
+    scanner that exited nonzero carries its own ``failure`` text when it gave one (Amendment 040)."""
     result: Dict[str, Any] = {"schema": RESULT_SCHEMA, "job": job.to_dict(), "merge_base": merge_base,
                               "exit_code": exit_code, "conclusion": "failure", "reason": "", "findings": [],
                               "finding_count": 0, "status": ""}
@@ -251,8 +279,8 @@ def read_result(job: ScanJob, out_dir: Path, exit_code: Optional[int], merge_bas
         if error:
             raise ScanError(error)
         if exit_code != 0:
-            raise ScanError(f"the scanner exited {exit_code}" if exit_code is not None
-                            else "the scanner did not finish")
+            raise ScanError(f"the scanner exited {exit_code}" + (f": {failure}" if failure else "")
+                            if exit_code is not None else "the scanner did not finish")
         manifest = _load(out_dir / "scan-manifest.json", "codex-security.scan-manifest")
         scan = manifest.get("scan") if isinstance(manifest.get("scan"), dict) else {}
         result["status"] = scan.get("status") if isinstance(scan.get("status"), str) else ""
@@ -312,6 +340,10 @@ def report_text(job: ScanJob, parsed: Mapping[str, Any], run_url: str = "",
     else:
         title = "Security scan: did not pass"
     lines = [f"**{title}** at `{job.head_sha[:12]}`", "", f"- Result: {_text(parsed['reason'], 500)}"]
+    incomplete = parsed["conclusion"] != "success" and not count
+    if incomplete:  # Amendment 040: a failed scan has no findings, and the report it saved can say "No findings"
+        lines.append("- No finding is recorded because the scan did not complete. The report and the SARIF kept "
+                     "with the run may say \"No findings\"; for a scan that did not complete that is not a result.")
     for f in parsed["findings"][:LISTED]:
         where = f" at `{_text(f['path'], 200)}:{f['line']}`" if f["path"] else ""
         lines.append(f"- **{f['level']}**: {_text(f['title'])}{where}" + (f" (`{_text(f['rule'], 80)}`)"
@@ -327,7 +359,8 @@ def report_text(job: ScanJob, parsed: Mapping[str, Any], run_url: str = "",
     else:
         where = "the stack's issue" if job.kind == "stack" else "the mission's tracking issue"
         lines += ["", f"The router holds the merge. HITL settles it on {where}, with one of these on its own line:",
-                  "", f"- `/mission accept-scan {job.head_sha}`: merge this exact head, the findings acknowledged;",
+                  "", f"- `/mission accept-scan {job.head_sha}`: merge this exact head, "
+                      + ("the scan not completed;" if incomplete else "the findings acknowledged;"),
                   "- `/mission send-back`: " + ("block the stack, so it restarts as new missions under new ids."
                                                 if job.kind == "stack" else
                                                 "cancel the mission; a new plan, under a new mission id, cites "
