@@ -307,6 +307,18 @@ Vector 227.
   (`egress/proxy.py`), so the program reaches the provider as the scanner wrote it.
 
 Vector 228.
+**Amendment 042 (2026-11-18, APP-CONTROL-HARNESS-SPEC-001 §4.5, the Slack harness's independent review):** the
+Slack harness reads only an HTTP 200 answer.
+- **The review:** HITL chose A3, on `gpt-5.6-sol` in Cursor, as the checker of another seat and another vendor's
+  model (probe mission M-HREVIEW-001, A3 round 1, FAIL). Its finding: `_answer` treated any status but 429 as Slack's
+  answer when the body held `{"ok": true}`, so an HTTP 500 with Slack-shaped JSON passed as data. That breaks
+  failing closed on a failed response.
+- **The fix:** `_answer` returns `{"ok": false, "error": "HTTP <status>"}` for any status but 200 and 429, before it
+  reads the body. A 429 is still `ratelimited`.
+- **Then:** the fixed file has a new SHA-256, so A3 reviews it again before part 6b pins it. Still unpinned, and not
+  shipped.
+
+Vector 194.
 
 ## 1. Purpose
 
@@ -2719,7 +2731,7 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 191 | The Slack harness's imports and its pin | Only allowed modules; `run` defined; not pinned; the gateway loads it from a matching pin and refuses a wrong digest |
 | 192 | Each tool's request | One `GET` to `slack.com`, arguments in the query, no body; every query fits the proxy's rule |
 | 193 | A missing channel, a direct message's id, an injected query, a bad timestamp or cursor, an unknown tool | No request; an error |
-| 194 | Slack's answers: extra fields, long text, over a page, a bad cursor, Slack's error, 429, not JSON | Listed fields only, text cut, 100 at most, cursor dropped; the error passed on |
+| 194 | Slack's answers: extra fields, long text, over a page, a bad cursor, Slack's error, 429, not JSON, any status but 200 with a body saying `ok` | Listed fields only, text cut, 100 at most, cursor dropped; the error passed on; any status but 200 is an error whatever its body says (Amendment 042) |
 | 195 | Both tools in the app gateway through the proxy's app endpoint to a fake `slack.com` | Listed and run; the key added by the proxy; a `/mission` line in a message broken |
 | 196 | The shipped `pins.json` | `tools.node` and `trees.codex-security` pinned; the tree trusts the same current registry key as Claude Code's pin |
 | 197 | A tree install: every package matching; a tarball with other bytes; a signature over another message; a non-empty destination | Installed into each package's path, modes kept; refused; refused; refused |
