@@ -5,6 +5,7 @@ command and environment, the result and the check it gives, the run (the key kep
 CLI's report step and the workflow's jobs. Vectors 209 to 216. Part 4 (Amendment 037; MISSION-ROUTER-001 Amendment
 021): the router's hold and HITL's /mission accept-scan and /mission send-back. Vectors 217 to 224. Amendment 038:
 the scanner's root-owned private area (AST-SCAN.1). Vector 225. Amendment 039: at most 2 threads. Vector 226.
+Amendment 041: Daybreak Blue when config.json asks for it. Vector 228.
 """
 
 from __future__ import annotations
@@ -341,11 +342,29 @@ class Vector214Run(unittest.TestCase):
         self.checked = []
         self.env = {"OPENAI_API_KEY": KEY, "HOME": "/home/runner", "GITHUB_TOKEN": "ghs_" + "t" * 36}
 
-    def scan(self, egress, run, blast_mode=blast.ENFORCE, run_as="mission-agent", ready=OK, check=None):
+    def scan(self, egress, run, blast_mode=blast.ENFORCE, run_as="mission-agent", ready=OK, check=None, program=None):
         with mock.patch.object(login, "readiness", return_value=ready):
             return secscan.run_scan(job(), self.root, self.tools, self.out, self.env, blast_mode, run_as, "v22.23.5",
                                     BASE, egress=egress, run=run, log=lambda m: None, private=self.private,
-                                    check_private=check or self.checked.append)
+                                    check_private=check or self.checked.append, program=program)
+
+    def test_the_access_program_reaches_the_command(self):  # Amendment 041
+        for program in (None, "daybreak_blue"):
+            self.private = Path(tempfile.mkdtemp())
+            seen = {}
+
+            def run(argv, cwd, env, stdout, **_):
+                seen["argv"] = argv
+                write_results(self.private / secscan.RESULTS_DIR)
+                return subprocess.CompletedProcess(argv, 0)
+            with self.subTest(program):
+                self.scan(FakeEgress(), run, program=program)
+                joined = " ".join(seen["argv"])
+                if program is None:
+                    self.assertNotIn("--cyber-access-program", joined)
+                else:
+                    self.assertIn(f"--cyber-access-program {program}", joined)
+                    self.assertIn("model_providers.egress.capabilities.cyber_access_programs=true", joined)
 
     def test_clean_run(self):
         seen = {}
@@ -515,6 +534,47 @@ class Vector226Threads(unittest.TestCase):
             self.assertNotIn(never, joined)
 
 
+class Vector228Access(unittest.TestCase):
+    """Vector 228 (Amendment 041): ``security_scan_access`` absent asks for no program, as before; ``daybreak_blue``
+    asks for Daybreak Blue and lets the proxy's provider carry it; any other value stops the router and the scan."""
+
+    PROGRAM = "--cyber-access-program"
+    CAPABILITY = "model_providers.egress.capabilities.cyber_access_programs=true"
+
+    def argv(self, program=None):
+        return secscan.scan_argv(Path("/n/node"), Path("/t/cli.mjs"), BASE, Path("/r/results"), 4321, program)
+
+    def test_absent_asks_for_no_program(self):
+        self.assertIsNone(secscan.access_program({}))
+        joined = " ".join(self.argv())
+        self.assertNotIn(self.PROGRAM, joined)
+        self.assertNotIn("capabilities", joined)
+        self.assertEqual(self.argv(), secscan.scan_argv(Path("/n/node"), Path("/t/cli.mjs"), BASE, Path("/r/results"),
+                                                        4321))
+
+    def test_daybreak_blue_asks_for_it_once_with_the_capability(self):
+        self.assertEqual(secscan.access_program({"security_scan_access": "daybreak_blue"}), "daybreak_blue")
+        argv = self.argv("daybreak_blue")
+        self.assertEqual(argv.count(self.PROGRAM), 1)
+        self.assertEqual(argv[argv.index(self.PROGRAM) + 1], "daybreak_blue")
+        self.assertEqual(argv.count(self.CAPABILITY), 1)
+        self.assertEqual(argv[argv.index(self.CAPABILITY) - 1], "--codex")
+        self.assertEqual(argv[:len(self.argv())], self.argv())  # everything else as before
+
+    def test_other_values_are_refused(self):
+        for value in ("daybreak_red", "standard", "Daybreak_Blue", 1, None, ""):
+            with self.subTest(value):
+                with self.assertRaises(ScanError):
+                    secscan.access_program({"security_scan_access": value})
+                with self.assertRaises(ValueError):
+                    rt.load_config_from({**rt.config(), "security_scan_access": value})
+                if value is not None:  # None is the argument's "absent"; a null in config.json is refused above
+                    with self.assertRaises(ScanError):
+                        self.argv(value)
+        self.assertEqual(rt.load_config_from({**rt.config(), "security_scan_access": "daybreak_blue"})
+                         ["security_scan_access"], "daybreak_blue")
+
+
 class Vector215Checkout(unittest.TestCase):
     """Vector 215: the checkout is a fresh clone at the PR's exact head, and the scan's base is its merge base with
     the PR's base branch, so the scan reads the PR's own change and nothing written into the checkout."""
@@ -628,6 +688,39 @@ class Vector216ReportStep(unittest.TestCase):
                                     "--run-as", "mission-agent", "--private", str(private)])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads((out / secscan.RESULT_FILE).read_text())["conclusion"], "success")
+
+    def test_scan_passes_the_access_program_from_config(self):  # Amendment 041
+        for config, want in (({}, None), ({"security_scan_access": "daybreak_blue"}, "daybreak_blue")):
+            root, out, private = (Path(tempfile.mkdtemp()) for _ in range(3))
+            seen = []
+
+            def fake_run(job_, root_, tools, out_, environ, blast_mode, run_as, node, base, **kw):
+                seen.append(kw["program"])
+                write_results(private / secscan.RESULTS_DIR)
+                return 0
+            with self.subTest(config), mock.patch.object(cli, "load_config", return_value=config), \
+                    mock.patch.object(cli, "_scan_mode", return_value=secscan.ENFORCE), \
+                    mock.patch.object(cli, "_blast_mode", return_value="enforce"), \
+                    mock.patch.object(secscan, "read_merge_base", return_value=BASE), \
+                    mock.patch.object(secscan, "run_scan", side_effect=fake_run):
+                code, _ = self.run_cli(["scan", "--root", str(root), "--tools", str(root), "--out", str(out),
+                                        "--run-as", "mission-agent", "--private", str(private)])
+                self.assertEqual(code, 0)
+                self.assertEqual(seen, [want])
+
+    def test_scan_with_an_unknown_access_program_writes_a_red_result(self):  # Amendment 041
+        root, out, private = (Path(tempfile.mkdtemp()) for _ in range(3))
+        with mock.patch.object(cli, "load_config", return_value={"security_scan_access": "daybreak_red"}), \
+                mock.patch.object(cli, "_scan_mode", return_value=secscan.ENFORCE), \
+                mock.patch.object(cli, "_blast_mode", return_value="enforce"), \
+                mock.patch.object(secscan, "read_merge_base", return_value=BASE), \
+                mock.patch.object(secscan, "run_scan") as run:
+            self.run_cli(["scan", "--root", str(root), "--tools", str(root), "--out", str(out),
+                          "--run-as", "mission-agent", "--private", str(private)])
+        run.assert_not_called()
+        result = json.loads((out / secscan.RESULT_FILE).read_text())
+        self.assertEqual(result["conclusion"], "failure")
+        self.assertIn("security_scan_access", result["reason"])
 
     def test_evidence_actions_are_listed(self):
         self.assertEqual(record.ACTIONS["dispatch.scan"], "decide")
