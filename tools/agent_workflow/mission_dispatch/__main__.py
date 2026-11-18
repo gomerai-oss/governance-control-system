@@ -253,8 +253,10 @@ def cmd_scan(args) -> int:
         base = secscan.read_merge_base(root)
         table = supply_chain.read_pins(Path(__file__).resolve().parents[1] / supply_chain.PINS_TABLE)
         node = ((table.get("tools") or {}).get(secscan.TOOL) or {}).get("version", "")
+        program = secscan.access_program(config)  # Amendment 041: absent asks for no program, as before
         code = secscan.run_scan(job, root, Path(args.tools), out, os.environ, _blast_mode(config), args.run_as,
-                                node, base, timeout=args.timeout, log=_log, private=Path(args.private))
+                                node, base, timeout=args.timeout, log=_log, private=Path(args.private),
+                                program=program)
     except (secscan.ScanError, DispatchError, supply_chain.SupplyChainError, OSError) as exc:
         error = str(exc) or type(exc).__name__
     failure = secscan.scanner_failure(root / secscan.SCAN_LOG) if code not in (0, None) else ""

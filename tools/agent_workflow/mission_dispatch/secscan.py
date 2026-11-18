@@ -55,6 +55,9 @@ RESULTS_DIR = "results"  # the scanner's --output-dir, in the private area (Amen
 STATE_DIR = "state"  # CODEX_SECURITY_STATE_DIR and CODEX_HOME, in the private area
 PRIVATE = "/srv/mission-scan"  # root-owned: the scanner refuses state or output under a parent another user owns
 MAX_THREADS = 2  # the scanner's concurrent threads, parent included; its default of 9 outran a 1M tokens-a-minute limit (Amendment 039)
+ACCESS_KEY = "security_scan_access"  # config.json: the scanner's Cyber access program (Amendment 041)
+DAYBREAK_BLUE = "daybreak_blue"  # Trusted Access for Cyber's defensive program, granted to an API project by OpenAI
+ACCESS_PROGRAMS = (DAYBREAK_BLUE,)
 MAX_FINDINGS = 200  # findings kept in result.json; the count is always exact
 LISTED = 20  # findings listed in the comment and the check
 TEXT_MAX = 300
@@ -72,6 +75,19 @@ def mode(config: Mapping[str, Any]) -> str:
     value = config.get(CONFIG_KEY, OFF)
     if value not in MODES:
         raise ScanError(f"config.json: {CONFIG_KEY} must be one of {', '.join(MODES)}, not {value!r}")
+    return value
+
+
+def access_program(config: Mapping[str, Any]) -> Optional[str]:
+    """``"security_scan_access"`` (Amendment 041). Absent: no program is asked for, so the provider's default
+    (``standard`` without Trusted Access for Cyber) applies, as before. ``"daybreak_blue"``: the scan asks for
+    Daybreak Blue, which the API key's project must hold; without it every scan fails, red. An unknown value is
+    refused, never read as absent."""
+    if ACCESS_KEY not in config:
+        return None
+    value = config[ACCESS_KEY]
+    if value not in ACCESS_PROGRAMS:
+        raise ScanError(f"config.json: {ACCESS_KEY} must be one of {', '.join(ACCESS_PROGRAMS)} or absent, not {value!r}")
     return value
 
 
@@ -187,15 +203,25 @@ def provider_args(port: int) -> List[str]:
     return [arg for setting in settings for arg in ("--codex", setting)]
 
 
-def scan_argv(node: Path, cli: Path, merge_base: str, out_dir: Path, port: int) -> List[str]:
+def scan_argv(node: Path, cli: Path, merge_base: str, out_dir: Path, port: int,
+              program: Optional[str] = None) -> List[str]:
     """``codex-security scan . --diff <merge base>``: the committed change only, every vulnerability type, no cost
     cap, results to ``out_dir`` (outside the checkout), JSON on stdout. At most ``MAX_THREADS`` threads at once, so
-    the scan stays under the account's tokens-a-minute limit; the cap slows the scan and narrows nothing it covers."""
+    the scan stays under the account's tokens-a-minute limit; the cap slows the scan and narrows nothing it covers.
+
+    With a ``program`` (Amendment 041) the scan asks for that Cyber access program, and the proxy's provider declares
+    it may carry one: the scanner sends a program only for its built-in OpenAI provider unless the provider says so."""
     if not SHA_RE.fullmatch(merge_base):
         raise ScanError(f"the merge base {merge_base!r} is not a commit")
-    return [str(node), str(cli), "scan", ".", "--diff", merge_base, "--output-dir", str(out_dir), "--json",
+    argv = [str(node), str(cli), "scan", ".", "--diff", merge_base, "--output-dir", str(out_dir), "--json",
             "--auth", "api-key", *provider_args(port),
             "--codex", f"features.multi_agent_v2.max_concurrent_threads_per_session={int(MAX_THREADS)}"]
+    if program is not None:
+        if program not in ACCESS_PROGRAMS:
+            raise ScanError(f"{program!r} is not a Cyber access program the scan may ask for")
+        argv += ["--cyber-access-program", program,
+                 "--codex", f"model_providers.{PROVIDER}.capabilities.cyber_access_programs=true"]
+    return argv
 
 
 def scan_env(base: Mapping[str, str], standin: str, state_dir: Path, node_bin: Path) -> Dict[str, str]:
@@ -397,7 +423,7 @@ def run_scan(job: ScanJob, root: Path, tools: Path, out_dir: Path, environ: Mapp
              run_as: str, node_version: str, merge_base: str, timeout: float = SCAN_TIMEOUT,
              egress: Optional["blast.AgentEgress"] = None, run: Callable[..., Any] = subprocess.run,
              log: Callable[[str], None] = print, private: Path = Path(PRIVATE),
-             check_private: Callable[[Path], None] = require_trusted_parent) -> int:
+             check_private: Callable[[Path], None] = require_trusted_parent, program: Optional[str] = None) -> int:
     """Run the scanner on ``root/checkout`` as ``run_as``, its only way out the proxy, which holds the key. Its state
     and output are in ``private``, a root-owned area outside the job root (Amendment 038). Returns its exit code.
     Raises ``ScanError`` before the scanner starts when the key cannot be kept from it."""
@@ -434,7 +460,7 @@ def run_scan(job: ScanJob, root: Path, tools: Path, out_dir: Path, environ: Mapp
             raise ScanError(f"the key is not accepted through the proxy ({ready['reason']}); the scanner was not "
                             "started")
         log(f"scan: the proxy holds the key; readiness {ready['reason']}")
-        argv = scan_argv(node_bin / "node", cli, merge_base, results, egress.port)
+        argv = scan_argv(node_bin / "node", cli, merge_base, results, egress.port, program)
         env = blast.account_env(env, run_as, environ.get("HOME", ""))
         for folder in (state_dir, results):  # the scanner's own, 0700, under root's parent
             made = egress.run(["sudo", "-n", "install", "-d", "-o", run_as, "-g", run_as, "-m", "0700", str(folder)])

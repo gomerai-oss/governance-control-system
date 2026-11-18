@@ -208,6 +208,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     evidence.mode(config)  # ring 6 (MISSION-DISPATCH-001 §3m): likewise (vectors 111, 119)
     challenge_mod.mode(config)  # the challenge loop (MISSION-DISPATCH-001 §3n): likewise (vectors 120, 126)
     _scan_mode(config)  # the security scan (Amendment 021): likewise (vector 139)
+    _scan_access(config)  # its Cyber access program (MISSION-DISPATCH-001 Amendment 041): likewise (vector 228)
     config_accounts(config)
     store = config.get("evidence_store")
     if store is not None and not (isinstance(store, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", store)):
@@ -251,6 +252,13 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 def _scan_mode(config: dict) -> str:
     try:
         return secscan.mode(config)
+    except secscan.ScanError as exc:
+        raise ValueError(str(exc)) from None
+
+
+def _scan_access(config: dict) -> Optional[str]:
+    try:
+        return secscan.access_program(config)
     except secscan.ScanError as exc:
         raise ValueError(str(exc)) from None
 

@@ -289,6 +289,24 @@ no finding.
   and words accept-scan as "the scan not completed". Whether the result is green or red is unchanged.
 
 Vector 227.
+**Amendment 041 (2026-11-17, the security scan pilot, after AST-SCAN.2):** the scan can ask for Daybreak Blue.
+- **Why:** under the standard program the model provider refused the scanner's validating step on a planted flaw
+  (Amendment 040). A clean change scanned in full, so the standard program fails exactly when there is something to
+  find. HITL chose (2026-11-17) to apply for Trusted Access for Cyber, Daybreak Blue, which supersedes the
+  2026-11-12 choice of the standard program and settles SECURITY-SCAN-SPEC-001 §8.
+- **The setting:** `config.json` `"security_scan_access"`. Absent, the scan asks for no program, as before.
+  `"daybreak_blue"` asks for Daybreak Blue; the API key's project must hold it, or every scan fails, red. Any other
+  value stops the router and the dispatcher (`secscan.access_program`).
+- **The flags** (§3q item 9): `--cyber-access-program daybreak_blue`, and `--codex
+  model_providers.egress.capabilities.cyber_access_programs=true`. The scanner sends a program only for its
+  built-in OpenAI provider (its `scan-settings.js`: "OpenAI provider only"), and the scan's provider is the proxy's;
+  its Codex declares provider capabilities, `cyber_access_programs` among them (read from the pinned binary's
+  strings, as data). That second flag is the reading of a name, not yet an observation: the pilot's rerun confirms it.
+  A wrong reading fails closed: the scan errors, and its check is red.
+- **The proxy is unchanged:** it forwards the request body as sent and every header but credentials
+  (`egress/proxy.py`), so the program reaches the provider as the scanner wrote it.
+
+Vector 228.
 
 ## 1. Purpose
 
@@ -2211,6 +2229,9 @@ Part 3 (Amendment 036) builds the scan job itself, reporting only (`mission_disp
    - **At most 2 threads at once (Amendment 039):** the scanner's `--codex
      features.multi_agent_v2.max_concurrent_threads_per_session=2`, so a scan stays under the account's
      tokens-a-minute limit. This is the only `--codex` setting besides the provider's and analytics.
+   - **Its Cyber access program (Amendment 041):** with `"security_scan_access": "daybreak_blue"` in `config.json`,
+     `--cyber-access-program daybreak_blue` and the provider's `--codex
+     model_providers.egress.capabilities.cyber_access_programs=true`. Without the key, neither flag, as before.
    - **Its state and output (Amendment 038)** are in `/srv/mission-scan`, which the job makes, owned by root, mode
      755. The step first checks that it and every folder above it are root's real directories, writable by no one
      else unless sticky, which is the scanner's own rule for its parents. It then makes `state` (the scanner's
@@ -2732,3 +2753,4 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 225 | The private area: root's chain, a sticky parent; a folder another user owns, one writable by others, a symlink, a file, a missing folder; one already holding `results`; a folder that cannot be made; output not taken back; the workflow | Passes, and the scanner's state and output are made there, its own, 0700, with only the checkout handed over and `results` taken back; refused before the scanner starts in every other case; a problem after the run, so red; the job makes it root-owned and passes it (Amendment 038) |
 | 226 | The scanner's command | Ends with `--codex features.multi_agent_v2.max_concurrent_threads_per_session=2`, once, the only thread setting (Amendment 039) |
 | 227 | A scanner that failed with its own error in the log; none; a long or steering message; a red result with a finding | The reason is "the scanner exited N: code: message", bounded and on one line, plain without one; a failed scan's comment says no finding is recorded and the report may say "No findings", accept-scan reads "the scan not completed"; a result with a finding is as before (Amendment 040) |
+| 228 | `security_scan_access` absent, `"daybreak_blue"`, `"daybreak_red"`, `"standard"`, a number; the command with each | Absent: no program flag, the command as before; `"daybreak_blue"`: `--cyber-access-program daybreak_blue` and the provider's `cyber_access_programs` capability, once each; any other value stops the router and the dispatcher (Amendment 041) |
