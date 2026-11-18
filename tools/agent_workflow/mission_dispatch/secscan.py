@@ -54,6 +54,7 @@ SCAN_LOG = "scan.log"
 RESULTS_DIR = "results"  # the scanner's --output-dir, in the private area (Amendment 038)
 STATE_DIR = "state"  # CODEX_SECURITY_STATE_DIR and CODEX_HOME, in the private area
 PRIVATE = "/srv/mission-scan"  # root-owned: the scanner refuses state or output under a parent another user owns
+MAX_THREADS = 2  # the scanner's concurrent threads, parent included; its default of 9 outran a 1M tokens-a-minute limit (Amendment 039)
 MAX_FINDINGS = 200  # findings kept in result.json; the count is always exact
 LISTED = 20  # findings listed in the comment and the check
 TEXT_MAX = 300
@@ -188,11 +189,13 @@ def provider_args(port: int) -> List[str]:
 
 def scan_argv(node: Path, cli: Path, merge_base: str, out_dir: Path, port: int) -> List[str]:
     """``codex-security scan . --diff <merge base>``: the committed change only, every vulnerability type, no cost
-    cap, results to ``out_dir`` (outside the checkout), JSON on stdout."""
+    cap, results to ``out_dir`` (outside the checkout), JSON on stdout. At most ``MAX_THREADS`` threads at once, so
+    the scan stays under the account's tokens-a-minute limit; the cap slows the scan and narrows nothing it covers."""
     if not SHA_RE.fullmatch(merge_base):
         raise ScanError(f"the merge base {merge_base!r} is not a commit")
     return [str(node), str(cli), "scan", ".", "--diff", merge_base, "--output-dir", str(out_dir), "--json",
-            "--auth", "api-key", *provider_args(port)]
+            "--auth", "api-key", *provider_args(port),
+            "--codex", f"features.multi_agent_v2.max_concurrent_threads_per_session={int(MAX_THREADS)}"]
 
 
 def scan_env(base: Mapping[str, str], standin: str, state_dir: Path, node_bin: Path) -> Dict[str, str]:
