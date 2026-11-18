@@ -4,7 +4,7 @@ Covers the switch, what is due (the router's targets, a scan already set, a scan
 command and environment, the result and the check it gives, the run (the key kept in the proxy), the checkout, the
 CLI's report step and the workflow's jobs. Vectors 209 to 216. Part 4 (Amendment 037; MISSION-ROUTER-001 Amendment
 021): the router's hold and HITL's /mission accept-scan and /mission send-back. Vectors 217 to 224. Amendment 038:
-the scanner's root-owned private area (AST-SCAN.1). Vector 225.
+the scanner's root-owned private area (AST-SCAN.1). Vector 225. Amendment 039: at most 2 threads. Vector 226.
 """
 
 from __future__ import annotations
@@ -442,6 +442,26 @@ class Vector225PrivateArea(unittest.TestCase):
         self.assertIn("sudo install -d -o root -g root -m 755 /srv/mission-scan", text)
         self.assertIn("--run-as mission-agent --private /srv/mission-scan", text)
         self.assertEqual(secscan.PRIVATE, "/srv/mission-scan")
+
+
+class Vector226Threads(unittest.TestCase):
+    """Vector 226 (Amendment 039): the scanner runs at most 2 threads at once, set once, with its own setting."""
+
+    SETTING = "features.multi_agent_v2.max_concurrent_threads_per_session"
+
+    def test_the_command_caps_the_threads_at_two(self):
+        argv = secscan.scan_argv(Path("/n/node"), Path("/t/cli.mjs"), BASE, Path("/r/results"), 4321)
+        self.assertEqual(secscan.MAX_THREADS, 2)
+        caps = [i for i, arg in enumerate(argv) if self.SETTING in arg]
+        self.assertEqual(len(caps), 1)
+        self.assertEqual(argv[caps[0] - 1], "--codex")
+        self.assertEqual(argv[caps[0]], f"{self.SETTING}=2")
+
+    def test_no_other_setting_raises_it(self):
+        argv = secscan.scan_argv(Path("/n/node"), Path("/t/cli.mjs"), BASE, Path("/r/results"), 4321)
+        joined = " ".join(argv)
+        for never in ("--workers", "--subagents", "--mode deep", "multi_agent_v2.enabled", "multi_agent_v2="):
+            self.assertNotIn(never, joined)
 
 
 class Vector215Checkout(unittest.TestCase):
