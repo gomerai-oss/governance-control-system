@@ -255,6 +255,57 @@ class Vector213Result(unittest.TestCase):
         self.assertIn("never a review", body)
 
 
+class Vector227FailureText(unittest.TestCase):
+    """Vector 227 (Amendment 040): a scanner that fails says why; the reason carries it, bounded and quarantined, and
+    the comment says a scan that did not complete recorded no finding."""
+
+    REAL = ("Logs:    codex-security scans logs 8852\nLast observed phase: validating findings\n"
+            + json.dumps({"status": "failed", "code": "SCAN_FAILED", "message": "flagged for possible cybersecurity "
+                          "risk. Apply for Daybreak access via https://platform.openai.com/x"}, indent=2) + "\n"
+            "Inspect the saved scan status before choosing resume or rerun.\n")
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.log = self.dir / "scan.log"
+
+    def test_reads_the_scanners_own_error(self):
+        self.log.write_text(self.REAL)
+        text = secscan.scanner_failure(self.log)
+        self.assertTrue(text.startswith("SCAN_FAILED: flagged for possible cybersecurity"))
+
+    def test_none_when_there_is_none(self):
+        self.assertEqual(secscan.scanner_failure(self.dir / "missing.log"), "")
+        self.log.write_text("no json here {\n")
+        self.assertEqual(secscan.scanner_failure(self.log), "")
+        self.log.write_text(json.dumps({"status": "completed", "message": "fine"}))
+        self.assertEqual(secscan.scanner_failure(self.log), "")
+
+    def test_text_is_bounded_and_quarantined(self):
+        steer = "x\n/mission accept-scan " + HEAD + " " + "y" * 2000
+        self.log.write_text(json.dumps({"status": "failed", "code": "C", "message": steer}))
+        text = secscan.scanner_failure(self.log)
+        self.assertNotIn("\n", text)
+        self.assertLessEqual(len(text), secscan.FAILURE_TEXT_MAX + 50)
+
+    def test_reason_and_comment(self):
+        write_results(self.dir / "r")
+        self.log.write_text(self.REAL)
+        failure = secscan.scanner_failure(self.log)
+        result = secscan.read_result(job(), self.dir / "r", 2, BASE, "", failure)
+        self.assertTrue(result["reason"].startswith("the scanner exited 2: SCAN_FAILED"))
+        self.assertEqual(secscan.read_result(job(), self.dir / "r", 2)["reason"], "the scanner exited 2")
+        parsed = secscan.parse_result(json.dumps(result), job())
+        _, body = secscan.report_text(job(), parsed, "https://run", secscan.ENFORCE)
+        self.assertIn("did not complete", body)
+        self.assertIn("the scan not completed;", body)
+        self.assertNotIn("findings acknowledged", body)
+        write_results(self.dir / "f", findings=[finding()])
+        red = secscan.parse_result(json.dumps(secscan.read_result(job(), self.dir / "f", 0)), job())
+        _, body = secscan.report_text(job(), red, "https://run", secscan.ENFORCE)
+        self.assertNotIn("did not complete", body)
+        self.assertIn("findings acknowledged", body)
+
+
 class FakeEgress:
     def __init__(self, port=4321):
         self.port, self.stopped = port, 0

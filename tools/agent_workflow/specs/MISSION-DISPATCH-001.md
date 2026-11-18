@@ -277,6 +277,19 @@ at once.
 
 Vector 226.
 
+**Amendment 040 (2026-11-17, the security scan pilot, AST-SCAN.2):** a failed scan says why, and says it recorded
+no finding.
+- **What the run showed:** the scanner's model provider refused the validating step as a cybersecurity risk. The
+  scanner exited 2, as it does for every failure. The result said only "the scanner exited 2", and the report it
+  saved said "No findings", which is a stub, not a result.
+- **The fix** (§3q item 10): the scan step reads the scanner's last JSON object with `status` `failed` from the end
+  of its log (`secscan.scanner_failure`) and puts `<code>: <message>` after "the scanner exited N", bounded to 300
+  characters and quarantined like every other text of the scanner's. The comment for a red result with no finding
+  says that no finding is recorded because the scan did not complete, that the saved report may say "No findings",
+  and words accept-scan as "the scan not completed". Whether the result is green or red is unchanged.
+
+Vector 227.
+
 ## 1. Purpose
 
 When a mission waits on A2 (build) or A3 (review), the dispatcher does three things:
@@ -2718,3 +2731,4 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 224 | The report under enforce, red, for a mission and for a stack; green; under observe | Names both commands, the head and where to post them, never at the start of a line; says the router merges only with it green; says reporting only |
 | 225 | The private area: root's chain, a sticky parent; a folder another user owns, one writable by others, a symlink, a file, a missing folder; one already holding `results`; a folder that cannot be made; output not taken back; the workflow | Passes, and the scanner's state and output are made there, its own, 0700, with only the checkout handed over and `results` taken back; refused before the scanner starts in every other case; a problem after the run, so red; the job makes it root-owned and passes it (Amendment 038) |
 | 226 | The scanner's command | Ends with `--codex features.multi_agent_v2.max_concurrent_threads_per_session=2`, once, the only thread setting (Amendment 039) |
+| 227 | A scanner that failed with its own error in the log; none; a long or steering message; a red result with a finding | The reason is "the scanner exited N: code: message", bounded and on one line, plain without one; a failed scan's comment says no finding is recorded and the report may say "No findings", accept-scan reads "the scan not completed"; a result with a finding is as before (Amendment 040) |

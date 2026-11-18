@@ -257,7 +257,8 @@ def cmd_scan(args) -> int:
                                 node, base, timeout=args.timeout, log=_log, private=Path(args.private))
     except (secscan.ScanError, DispatchError, supply_chain.SupplyChainError, OSError) as exc:
         error = str(exc) or type(exc).__name__
-    result = secscan.read_result(job, Path(args.private) / secscan.RESULTS_DIR, code, base, error)
+    failure = secscan.scanner_failure(root / secscan.SCAN_LOG) if code not in (0, None) else ""
+    result = secscan.read_result(job, Path(args.private) / secscan.RESULTS_DIR, code, base, error, failure)
     secscan.write_result(out / secscan.RESULT_FILE, result)
     _NOTE.update(result=evidence_producer.text_digest(json.dumps(result, sort_keys=True)),
                  conclusion=result["conclusion"])
