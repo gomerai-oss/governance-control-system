@@ -350,6 +350,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
+          # App keys by slot, only for the seat whose resources name the slot's app (A2; Amendment 043). The run
+          # gives a key to the egress proxy only, and only while "app_gateway" grants an app tool.
+          APP_KEY_1: ${{ matrix.job.role == 'A2' && secrets.APP_KEY_1 || '' }}
           JOB_ROOT: ${{ steps.blast.outputs.root }}
           RUN_AS: ${{ steps.blast.outputs.run_as }}
           PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
@@ -364,6 +367,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
+          APP_KEY_1: ${{ matrix.job.role == 'A2' && secrets.APP_KEY_1 || '' }}  # only to refuse a change holding it
           JOB_ROOT: ${{ steps.blast.outputs.root }}
           PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
         run: >-
@@ -880,9 +884,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m mission_dispatch perform --stage check --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/perform-plan"
 
-      # No GitHub token here. Build part 6 adds each registered app's key (APP_KEY_<n>) to this step's env only.
+      # No GitHub token here. Each registered app's key by slot (Amendment 043), in this step's env only; the step
+      # gives the proxy only the keys of the apps the drafted list names.
       - name: Make the listed calls through the app gateway, as the service principal
         if: steps.check.outputs.perform == 'true'
+        env:
+          APP_KEY_1: ${{ secrets.APP_KEY_1 }}
         run: python3 -m mission_dispatch perform --stage call --plan "$RUNNER_TEMP/perform-plan" --out "$RUNNER_TEMP/perform"
 
       - name: Report which calls were made

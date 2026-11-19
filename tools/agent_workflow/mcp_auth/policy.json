@@ -1,6 +1,6 @@
 {
   "schema": "mcp-auth-policy-v1",
-  "policy_version": "MCP-AUTH-POLICY-2026-11-16.2",
+  "policy_version": "MCP-AUTH-POLICY-2026-11-18.1",
   "session": {
     "max_ttl_seconds": 3600
   },
@@ -62,7 +62,8 @@
   },
   "resources": {
     "corpus:governance-doctrine": {"class": "rag", "restricted": false, "credential_bearing": false},
-    "index:epap-evidence": {"class": "epap", "restricted": false, "credential_bearing": false}
+    "index:epap-evidence": {"class": "epap", "restricted": false, "credential_bearing": false},
+    "app:slack": {"class": "app", "restricted": true, "credential_bearing": false}
   },
   "missions": {},
   "grants": [
@@ -113,6 +114,10 @@
     {"id": "G-MISSION-REVIEWER-EPAP-READ", "effect": "allow", "role": "REVIEWER", "class": "epap",
      "resources": ["index:epap-evidence"],
      "actions": ["epap.artifact_lookup", "epap.artifact_status", "epap.evidence_chain"],
+     "authority_ref": "MISSION-ROUTER-001", "evidence": "audit_record"},
+    {"id": "G-MISSION-BUILDER-SLACK-READ", "effect": "allow", "role": "BUILDER", "class": "app",
+     "resources": ["app:slack"],
+     "actions": ["app.read"],
      "authority_ref": "MISSION-ROUTER-001", "evidence": "audit_record"}
   ]
 }

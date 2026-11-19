@@ -488,9 +488,16 @@ def not_due(job: Job, survey: Survey) -> Optional[str]:
 
 
 # ------------------------------------------------------------- secret guard
+# An app's key by its register slot (APP-CONTROL-HARNESS-SPEC-001 §4.2): the workflow gives it to the run and collect
+# steps of the seat that may use the app (Amendment 043), and it must never leave the agent job either.
+APP_KEY_ENV = re.compile(r"APP_KEY_[0-9]{1,2}")
+
+
 def secret_values(environ: Mapping[str, str]) -> List[str]:
-    """The model logins the runtime was given; they must never leave the agent job."""
-    return sorted({environ[k] for k in KEEP_ENV if len(environ.get(k, "")) >= SECRET_MIN_CHARS})
+    """The model logins the runtime was given, and the app keys this job holds; they must never leave the agent
+    job. ``collect`` refuses a change containing any of them, and the agent's log is scrubbed of them."""
+    names = set(KEEP_ENV) | {k for k in environ if APP_KEY_ENV.fullmatch(k)}
+    return sorted({environ[k] for k in names if len(environ.get(k, "")) >= SECRET_MIN_CHARS})
 
 
 def leaks(text: str, secrets: Sequence[str]) -> bool:
@@ -1388,10 +1395,10 @@ def collect(job: Job, root: Path, out_dir: Path, environ: Mapping[str, str],
     message = read_message(raw, job, verdict)
     values = login_values(root, environ)
     if leaks(patch, values) or leaks(message, values):
-        raise DispatchError("the change contains the runtime's model login; refusing to hand it on")
+        raise DispatchError("the change contains the runtime's model login or an app key; refusing to hand it on")
     encoded = login.encodings_found(patch + "\n" + message, values)
     if encoded:
-        reason = "the change contains the runtime's model login encoded (" + ", ".join(encoded) + ")"
+        reason = "the change contains the runtime's model login or an app key encoded (" + ", ".join(encoded) + ")"
         if login_mode == login.ENFORCE:
             raise DispatchError(reason + "; refusing to hand it on")
         log(f"::warning::{reason}; observe: not refused")

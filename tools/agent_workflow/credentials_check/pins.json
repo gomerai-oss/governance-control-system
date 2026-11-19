@@ -55,7 +55,22 @@
    }
   }
  },
- "harnesses": {},
+ "harnesses": {
+  "slack_read": {
+   "app": "slack",
+   "sha256": "088e26bc7ccdc7f7503c2f2a4468c09dd24c1f41d3a4bdb659f24eeda1f97655",
+   "commit": "04eabe031733d28ee2f3dd1dcaf2d66432f3c610",
+   "built_by": {"seat": "Claude Code", "vendor": "Anthropic", "model": "claude-opus-5-5"},
+   "review": {
+    "seat": "A3",
+    "vendor": "OpenAI",
+    "model": "gpt-5.6-sol",
+    "commit": "04eabe031733d28ee2f3dd1dcaf2d66432f3c610",
+    "date": "2026-11-18",
+    "report": "https://github.com/gomerai-oss/governance-control-system/blob/main/tools/agent_workflow/mcp_gateway/HARNESS-REVIEWS.md"
+   }
+  }
+ },
  "tools": {
   "node": {
    "version": "v22.23.5",

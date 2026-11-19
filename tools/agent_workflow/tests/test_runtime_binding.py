@@ -175,7 +175,8 @@ class SpecVectors(Base):
                     "principal": PRINCIPAL[seat], "acting_identity": PRINCIPAL[seat], "role": fabric,
                     "mission": {"id": MISSION_ID, "authority_ref": "MISSION-ROUTER-001", "base_sha": BASE_SHA,
                                 "round": 1},
-                    "resources": ["corpus:governance-doctrine", "index:epap-evidence"],
+                    "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
+                    + (["app:slack"] if seat == "A2" else []),  # the writer seat's app (Amendment 043)
                     "issued_at": NOW, "expires_at": NOW + 3600})
                 self.session_path.write_text(json.dumps(b.session), encoding="utf-8")
                 session = GS.load(self.session_path, self.checkout)
@@ -238,7 +239,10 @@ class SpecVectors(Base):
                 # The bound surface follows from the per-tool outcomes alone.
                 admitted = R.reconstruct_surface(record)
                 self.assertEqual({by["binding"]["tool_map"][n] for n in admitted},
-                                 set(b.tools) | set(b.mcp_tools))
+                                 set(b.tools) | set(b.mcp_tools) | set(b.app_mcp_tools))
+                # The writer seat is admitted the Slack tools (Amendment 043); the reviewer seat no app tool.
+                self.assertEqual(set(b.app_mcp_tools),
+                                 {"slack_list_channels", "slack_read_channel"} if seat == "A2" else set())
                 self.assertEqual(by["binding"]["tools"], list(b.tools))
                 self.assertEqual(by["binding"]["allowed_rules"], b.allowed_rules)
                 self.assertEqual(by["binding"]["session"], b.session)
@@ -253,17 +257,18 @@ class SpecVectors(Base):
                                                         block["signatures"][0]["sig"]))
 
     def test_vector7_matrix_differs_from_v1_exactly_by_d2_and_amendments_026_and_031(self):
-        # doctrine-s4-v4: D2, plus MISSION-DISPATCH-001 Amendment 026 (four app capabilities, admitted by no row;
-        # every row blocks app_send and app_delete, and the read-only rows block app_write) and Amendment 031
-        # (app_draft, of class write, admitted by no row and blocked in the read-only rows).
+        # doctrine-s4-v4: D2, plus MISSION-DISPATCH-001 Amendment 026 (four app capabilities; every row blocks
+        # app_send and app_delete, and the read-only rows block app_write), Amendment 031 (app_draft, of class
+        # write, admitted by no row and blocked in the read-only rows) and Amendment 043 (the writer row admits
+        # app_read, for the first harness; no other row admits an app capability).
         matrix = M.load_file()
         self.assertEqual(matrix["matrix_version"], "doctrine-s4-v4")
         rows = matrix["roles"]
-        self.assertEqual(rows["writer"]["admit"], V1_WRITER_ADMIT + D2_WRITER)
+        self.assertEqual(rows["writer"]["admit"], V1_WRITER_ADMIT + D2_WRITER + ["app_read"])
         self.assertEqual(rows["reviewer"]["admit"], V1_REVIEWER_ADMIT + D2_REVIEWER)
         self.assertEqual(rows["router"]["admit"], ["artifact_lookup", "doctrine_lookup", "evidence_class_routing",
                                                    "citation_extract", "corpus_search"])
-        self.assertTrue(all(matrix["capabilities"][c] == "read" for c in D2_WRITER + D2_REVIEWER))
+        self.assertTrue(all(matrix["capabilities"][c] == "read" for c in D2_WRITER + D2_REVIEWER + ["app_read"]))
         self.assertEqual(sorted(rows["writer"]["blocked"]),
                          ["app_delete", "app_send", "credential_access", "merge", "production_runtime",
                           "review_disposition", "self_approval"])
@@ -311,7 +316,8 @@ class Hardening(Base):
         doc = json.loads(RB.REGISTRY_PATH.read_text(encoding="utf-8"))
         names = {t["name"] for t in doc["tools"]}
         self.assertEqual(names, {"Read", "Glob", "Grep", "Edit", "Write", "Write:reviews"}
-                         | {RB.GATEWAY_PREFIX + t for t in GATEWAY_TOOLS})
+                         | {RB.GATEWAY_PREFIX + t for t in GATEWAY_TOOLS}
+                         | {RB.APP_GATEWAY_PREFIX + t for t in ("slack_list_channels", "slack_read_channel")})
         self.assertEqual({n.split(":", 1)[0] for n in names if not n.startswith("mcp__")}, set(RB.BUILTINS))
         self.assertEqual(set(RB.BUILTINS), set(dispatch_binding.BUILTIN_CEILING))
 

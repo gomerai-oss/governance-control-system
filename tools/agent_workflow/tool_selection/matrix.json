@@ -44,7 +44,7 @@
       "evidence_classes": ["read", "draft", "write", "execute"],
       "admit": ["file_edit", "branch_create", "commit", "pr_create", "local_test", "artifact_create",
                 "doctrine_draft", "architecture_map", "repo_read", "doctrine_lookup", "corpus_search",
-                "citation_extract", "artifact_lookup"],
+                "citation_extract", "artifact_lookup", "app_read"],
       "blocked": {
         "review_disposition": "final review authority and reviewer disposition are not on the writer surface",
         "self_approval": "self-review and self-approval are prohibited (doctrine section 4.1)",

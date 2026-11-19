@@ -6,7 +6,7 @@
       "mission_type": "IMPLEMENT",
       "fabric_role": "BUILDER",
       "principal": "a2",
-      "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
+      "resources": ["corpus:governance-doctrine", "index:epap-evidence", "app:slack"]
     },
     "A3": {
       "role": "reviewer",

@@ -1,5 +1,55 @@
 {
   "schema": "mcp-app-gateway-tools-v1",
-  "catalog_version": "app-tools-v1",
-  "tools": []
+  "catalog_version": "app-tools-v2",
+  "tools": [
+    {
+      "name": "slack_list_channels",
+      "description": "List the Slack workspace's public channels that are not archived, one page of at most 100, with whether the bot is a member. Read-only.",
+      "app": "slack",
+      "action": "app.read",
+      "resource": "app:slack",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "The next page's cursor from an earlier answer (optional)."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "slack_read_channel",
+      "description": "Read one public Slack channel's messages, newest first, one page of at most 100. Only a channel the bot has joined can be read. Read-only.",
+      "app": "slack",
+      "action": "app.read",
+      "resource": "app:slack",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel's id, as slack_list_channels gives it."
+          },
+          "oldest": {
+            "type": "string",
+            "description": "Only messages after this Slack timestamp (optional)."
+          },
+          "latest": {
+            "type": "string",
+            "description": "Only messages before this Slack timestamp (optional)."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "The next page's cursor from an earlier answer (optional)."
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
 }

@@ -318,6 +318,18 @@ Slack harness reads only an HTTP 200 answer.
 - **Then:** the fixed file has a new SHA-256, so A3 reviews it again before part 6b pins it. Still unpinned, and not
   shipped.
 
+Vectors 229 to 233.
+**Amendment 043 (2026-11-18, APP-CONTROL-HARNESS-BUILD-PLAN-001 build part 6b; APP-CONTROL-HARNESS-SPEC-001 §4.2 to
+§4.5):** the first harness is pinned, and Slack is registered, read-only and still off (§3p items 51 to 56).
+- **The review that admits it:** A3, on `gpt-5.6-sol` in Cursor, reviewed the fixed file (SHA-256
+  `088e26bc…7655`) in probe mission M-HREVIEW-002 and passed it, with no findings. The builder was Claude Code, an
+  Anthropic model, so the review is of another seat and another vendor's model, of the commit pinned.
+- **HITL chose (2026-11-18)** to register Slack in governance, Core and GCS alike. The pin's report is the probe's
+  PR, which a public release cannot link, so the release ships a review record (`mcp_gateway/HARNESS-REVIEWS.md`),
+  and the GCS release's translation points the pin's report at it.
+- **Nothing a mission can do changes** while `"app_gateway"` is off: the binding drops the writer seat's admitted
+  Slack tools, writes no second server and gives the proxy no key (item 56).
+
 Vector 194.
 
 ## 1. Purpose
@@ -2170,6 +2182,33 @@ Part 6a (Amendment 033): the first harness, Slack, read-only, unpinned.
     independent review of the commit that adds it (§4.5: another seat, another vendor's model), so the file is
     merged first and pinned in part 6b with that review.
 
+Part 6b (Amendment 043): the pin, the register entry, the catalog, the grant, the seat and the key. Still off.
+
+51. **The pin** (`credentials_check/pins.json` `harnesses.slack_read`): app `slack`, the file's SHA-256, the commit
+    pinned, `built_by` (Claude Code, Anthropic) and `review` (seat A3, OpenAI, `gpt-5.6-sol`, the same commit, the
+    date and the report). `supply_chain.check_harnesses` admits it: another seat, another vendor, the same commit.
+    `mcp_gateway/HARNESS-REVIEWS.md` records the review; a public release links to it (Amendment 043).
+52. **The register entry** (`tool_selection/apps.json` `slack`): classes `read`, no writes; its two tools; host
+    `slack.com`; its two `GET` requests, of class `read`; resource `app:slack`, restricted, since a workspace's
+    messages are business data (§4.3), so the register approves `app:slack` and the `external_exposure` implication;
+    key slot `APP_KEY_1`; the register's bounds.
+53. **The catalog and the selection.** `mcp_gateway/app_tools.json` lists the two tools, each `app.read` on
+    `app:slack`, with plain string arguments as the harness takes them. `tool_selection/runtime_registry.json`
+    registers them as `mcp__governed-apps__<tool>`, capability `app_read`.
+54. **The grant and the seat.** `mcp_auth/policy.json` (`MCP-AUTH-POLICY-2026-11-18.1`) adds the resource `app:slack`
+    and one grant, `G-MISSION-BUILDER-SLACK-READ`: role `BUILDER`, action `app.read`, evidence `audit_record`. The matrix's
+    writer row admits `app_read`, and A2's seat names `app:slack` in its `resources`. No other row or seat changes:
+    A3 and AR are admitted no app capability.
+55. **The key** (`APP_KEY_1`, environment `mission-runtime`, a row in the credentials register). The workflow names
+    it outright, by slot: in the `agent` job, in the run and collect steps only, and only when the job's seat is one
+    whose resources name the slot's app (`matrix.job.role == 'A2'`); in the `perform` job, in the call step. The run
+    gives it to the egress proxy only, the runtime's environment drops it (both Amendment 028), and `collect`
+    refuses a change holding it, or an encoding of it, and scrubs the agent's log of it, as it does the model login
+    (`dispatch.secret_values`).
+56. **Off.** `"app_gateway"` stays absent, so `binding.bind` drops the admitted Slack tools before the agent starts,
+    writes no `governed-apps` server, and `app_keys_plan` gives the proxy nothing. Part 7 sets it, after AST-H.1 to
+    H.9.
+
 ### 3q. The security scan (Amendments 035 on)
 
 Part 2 of SECURITY-SCAN-SPEC-001 builds the scanner's way to its model. The scanner is `@openai/codex-security`,
@@ -2766,3 +2805,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 226 | The scanner's command | Ends with `--codex features.multi_agent_v2.max_concurrent_threads_per_session=2`, once, the only thread setting (Amendment 039) |
 | 227 | A scanner that failed with its own error in the log; none; a long or steering message; a red result with a finding | The reason is "the scanner exited N: code: message", bounded and on one line, plain without one; a failed scan's comment says no finding is recorded and the report may say "No findings", accept-scan reads "the scan not completed"; a result with a finding is as before (Amendment 040) |
 | 228 | `security_scan_access` absent, `"daybreak_blue"`, `"daybreak_red"`, `"standard"`, a number; the command with each | Absent: no program flag, the command as before; `"daybreak_blue"`: `--cyber-access-program daybreak_blue` and the provider's `cyber_access_programs` capability, once each; any other value stops the router and the dispatcher (Amendment 041) |
+| 229 | The shipped pin, the harness file, the review record; the file's SHA-256 changed; the public release's translation | The pin admits the file: its SHA-256, a review of the same commit by another seat and vendor; the record names them; a changed file is not run; the public release links the record, no internal name (Amendment 043) |
+| 230 | The register, catalog, policy, seats and matrix; each seat bound | One app, read-only, `GET` only; only A2's seat names `app:slack`, only the writer row admits `app_read`, one `app.read` grant to its fabric role; A2 is admitted the two tools, A3 and AR none (Amendment 043) |
+| 231 | Each `APP_KEY_<n>` the workflow names | Exactly the register's slots, never by a computed name; each only in the `agent` job's run and collect steps, gated on the seats whose resources name its app, and the `perform` job's call step (Amendment 043) |
+| 232 | A job's environment with an app key | `collect` knows the key, so a change holding it is refused and the log scrubbed; the runtime's environment drops it (Amendment 043) |
+| 233 | A2 bound with `"app_gateway"` off | No app tool granted, only `governed-retrieval` written, the two admitted tools logged as not granted, no app endpoint planned (Amendment 043) |
