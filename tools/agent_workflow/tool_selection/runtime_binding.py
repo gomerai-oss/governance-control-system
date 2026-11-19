@@ -383,6 +383,8 @@ def bind(seat: Any, runtime: Any, mission: Any, checkout: Path, session_path: Pa
         if app_pinned is None:
             raise BindingRefused("the app catalog has no canonical form")
         session["app_catalog"] = {"sha256": app_pinned, "mode": catalog_mode}
+    if app_tools:  # Amendment 044: the app gateway serves this seat only the app tools admitted here
+        session["app_tools"] = list(app_tools)
     denied: list = []
     bound_doc = {"seat": seat, "runtime": runtime, "mission": mission, "tools": list(tools),
                  "allowed_rules": list(allowed), "denied_rules": list(denied), "mcp_tools": list(mcp_tools),

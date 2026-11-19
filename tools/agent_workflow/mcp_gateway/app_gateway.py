@@ -40,7 +40,7 @@ mistake, not a hostile harness: the harness runs in the gateway's process, so th
 records is what admits it (APP-CONTROL-HARNESS-SPEC-001 §4.5).
 
 Each line of ``app-decisions.jsonl`` in the evidence directory is one JSON object with an ``entry`` field:
-``decision``, ``refusal`` (a tool not in the catalog), ``bound`` (a call over the run's bounds), ``harness`` (a
+``decision``, ``refusal`` (a tool not in the catalog, or not admitted to the seat), ``bound`` (a call over the run's bounds), ``harness`` (a
 harness that is not run), ``result`` and ``result_error`` (after an ALLOW), ``draft`` and ``draft_refused`` (a
 draft tool's call, Amendment 031), ``boundary``, and ``catalog_pin`` (``"observe"`` only). The directory is the
 app gateway's own, never the retrieval gateway's, so ``collect`` never records a harness call as a retrieval call.
@@ -557,8 +557,16 @@ class AppGateway:
         now = self.clock() if now is None else now
         if self.session is None or not self.session.live_at(now):
             return []
-        return [t for t in self.tools
-                if self.evaluate(t, [t.action], now, self._request_id(f"list.{t.name}"))[1].allowed]
+        return [t for t in self.tools if self.admitted(t)
+                and self.evaluate(t, [t.action], now, self._request_id(f"list.{t.name}"))[1].allowed]
+
+    def admitted(self, tool: AppTool) -> bool:
+        """Whether the binding admitted ``tool`` for this seat (Amendment 044): an ``agent`` session names its app
+        tools, and only those are listed or run. The perform step's ``service`` session is not narrowed by it, and
+        an invalid session is left to the fabric, which denies every call (stop 13)."""
+        if self.session is None or self.kind == SERVICE_KIND:
+            return True
+        return tool.name in self.session.app_tools
 
     def bound_problem(self, tool: AppTool, now: int) -> Optional[str]:
         """Why one more call of ``tool`` would pass the run's bounds (the register's, or the app's lower ones)."""
@@ -604,6 +612,10 @@ class AppGateway:
                 self._append({"entry": "refusal", "request_id": request_id, "tool": name, "mission": self._mission(),
                               "timestamp": _timestamp(now), "reason": "tool is not in the app catalog"})
                 return _refused(request_id, name, f"tool {name!r} is not served by this gateway")
+            if not self.admitted(tool):
+                self._append({"entry": "refusal", "request_id": request_id, "tool": name, "mission": self._mission(),
+                              "timestamp": _timestamp(now), "reason": "tool is not admitted to this seat"})
+                return _refused(request_id, name, f"tool {name!r} is not admitted to this seat")
             over = self.bound_problem(tool, now)
             if over:
                 self._append({"entry": "bound", "request_id": request_id, "tool": tool.name, "app": tool.app,

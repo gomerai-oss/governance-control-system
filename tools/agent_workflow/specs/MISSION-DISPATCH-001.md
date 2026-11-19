@@ -330,6 +330,22 @@ Vectors 229 to 233.
 - **Nothing a mission can do changes** while `"app_gateway"` is off: the binding drops the writer seat's admitted
   Slack tools, writes no second server and gives the proxy no key (item 56).
 
+**Amendment 044 (2026-11-19, APP-CONTROL-HARNESS-SPEC-001 §7a, AST-H.3's scripted run):** the app gateway serves a
+seat only the app tools its binding admitted (§3p item 57).
+- **What the test found:** with `slack_read_channel` taken out of the runtime registry in the run's copy of the
+  tooling (probe run 44451139569), the binding admitted only `slack_list_channels`, so the runtime's allow rules
+  named only that tool. But the app gateway, started as the runtime starts it, still listed `slack_read_channel` and
+  ran it, because the catalog and the fabric allowed it. Only the runtime's allow rules stood between an agent and a
+  tool its binding had dropped.
+- **The change:** the binding names the admitted app tools in the seat's session (`app_tools`), and the app gateway
+  lists and runs, for an `agent` session, only the catalog tools that list names. A call to any other is refused
+  and logged as a `refusal` ("tool is not admitted to this seat"). An `agent` session naming none is served none.
+  The perform step's `service` session is not narrowed by it.
+- **Unchanged:** the retrieval gateway, the catalog, the fabric and every register. While `"app_gateway"` is off no
+  app tool is granted, so no mission changes.
+
+Vectors 234 and 235.
+
 Vector 194.
 
 ## 1. Purpose
@@ -2206,8 +2222,14 @@ Part 6b (Amendment 043): the pin, the register entry, the catalog, the grant, th
     refuses a change holding it, or an encoding of it, and scrubs the agent's log of it, as it does the model login
     (`dispatch.secret_values`).
 56. **Off.** `"app_gateway"` stays absent, so `binding.bind` drops the admitted Slack tools before the agent starts,
-    writes no `governed-apps` server, and `app_keys_plan` gives the proxy nothing. Part 7 sets it, after AST-H.1 to
-    H.9.
+    writes no `governed-apps` server, and `app_keys_plan` gives the proxy nothing. Part 7 sets it, after the live
+    tests of APP-CONTROL-HARNESS-SPEC-001 §7a.
+57. **Only the admitted tools** (Amendment 044). `tool_selection/runtime_binding.py` writes the seat's admitted app
+    tools into its session as `app_tools`, a seat with none gets no such field, and `mcp_gateway/session.py` reads it
+    (a non-empty list of distinct names, or the session is invalid). For an `agent` session the app gateway lists and
+    runs only the catalog tools it names; any other call is refused before the fabric is asked and logged as a
+    `refusal`. A `service` session is not narrowed by it, and an invalid session is still denied by the fabric
+    (stop 13).
 
 ### 3q. The security scan (Amendments 035 on)
 
@@ -2810,3 +2832,5 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 231 | Each `APP_KEY_<n>` the workflow names | Exactly the register's slots, never by a computed name; each only in the `agent` job's run and collect steps, gated on the seats whose resources name its app, and the `perform` job's call step (Amendment 043) |
 | 232 | A job's environment with an app key | `collect` knows the key, so a change holding it is refused and the log scrubbed; the runtime's environment drops it (Amendment 043) |
 | 233 | A2 bound with `"app_gateway"` off | No app tool granted, only `governed-retrieval` written, the two admitted tools logged as not granted, no app endpoint planned (Amendment 043) |
+| 234 | A catalog tool the fabric allows but the session does not name; an `agent` session naming none; a malformed `app_tools` | Not listed; a call is refused and logged as a `refusal`, and no harness runs; the admitted tool still runs; a session naming none is served none; a malformed list is an invalid session (Amendment 044) |
+| 235 | Each seat bound | Its session names exactly the app tools the binding admitted, and a seat with none has no `app_tools` field (Amendment 044) |

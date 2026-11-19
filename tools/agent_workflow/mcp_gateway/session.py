@@ -10,13 +10,19 @@ checkout. It has exactly these fields, and no other key at either level::
      "issued_at": <epoch seconds>, "expires_at": <epoch seconds>,
      "catalog": {"sha256": <64 lowercase hex>, "mode": "observe" | "enforce"},       (optional)
      "app_catalog": {"sha256": <64 lowercase hex>, "mode": "observe" | "enforce"},   (optional)
-     "kind": "agent" | "service"}                                                     (optional)
+     "kind": "agent" | "service",                                                     (optional)
+     "app_tools": [<app catalog tool name>, ...]}                                     (optional)
 
 ``catalog`` (MISSION-DISPATCH-001 §3k item 1, ring 2) is the gateway catalog the seat was bound against. The gateway
 compares it with the catalog it loads: under ``"enforce"`` a different catalog refuses its start; under
 ``"observe"`` the difference is recorded in the evidence log. ``app_catalog`` (APP-CONTROL-HARNESS-SPEC-001 §4.1
 Proposal B, MISSION-DISPATCH-001 Amendment 027) is the same pin for the app gateway's catalog; only the app gateway
 reads it.
+
+``app_tools`` (MISSION-DISPATCH-001 Amendment 044) names the app tools the binding admitted for the seat: the app
+gateway serves an ``agent`` session only those, so a tool the binding dropped is neither listed nor run, whatever
+the catalog and the fabric allow. An ``agent`` session without it is served no app tool. The perform step's
+``service`` session is not narrowed by it.
 
 ``kind`` (§4.3) says whose session it is. A file that names none is an agent's, as every session file before
 Amendment 027 is. ``load(path, root, kind)`` refuses a session whose kind is not the one its caller asked for; both
@@ -60,7 +66,7 @@ SESSION_KINDS = ("agent", "service")
 SESSION_FIELDS = frozenset({"principal", "acting_identity", "role", "mission", "resources",
                             "issued_at", "expires_at"})
 MISSION_FIELDS = frozenset({"id", "authority_ref", "base_sha", "round"})
-OPTIONAL_FIELDS = frozenset({"catalog", "app_catalog", "kind"})
+OPTIONAL_FIELDS = frozenset({"catalog", "app_catalog", "kind", "app_tools"})
 CATALOG_FIELDS = frozenset({"sha256", "mode"})
 CATALOG_MODES = ("observe", "enforce")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -90,6 +96,7 @@ class Session:
     app_catalog_sha256: str = ""
     app_catalog_mode: str = ""
     kind: str = PRINCIPAL_KIND
+    app_tools: Tuple[str, ...] = ()  # the app tools the binding admitted (Amendment 044); none when absent
 
     def live_at(self, now: int) -> bool:
         return self.issued_at <= now < self.expires_at
@@ -154,6 +161,10 @@ def parse(data: bytes) -> Session:
     if (not isinstance(resources, list) or not resources or not all(P.is_name(r) for r in resources)
             or len(set(resources)) != len(resources)):
         raise SessionError("session resources must be a non-empty list of distinct resource ids")
+    app_tools = doc.get("app_tools", [])
+    if "app_tools" in doc and (not isinstance(app_tools, list) or not app_tools
+                               or not all(P.is_name(t) for t in app_tools) or len(set(app_tools)) != len(app_tools)):
+        raise SessionError("session app_tools must be a non-empty list of distinct tool names")
     issued, expires = doc["issued_at"], doc["expires_at"]
     if not (P.is_int(issued) and P.is_int(expires)) or not 0 <= issued < expires <= MAX_EPOCH:
         raise SessionError("session time bounds must be integer epoch seconds with issued_at < expires_at")
@@ -164,7 +175,8 @@ def parse(data: bytes) -> Session:
         base_sha=mission["base_sha"], round=mission["round"],
         resources=tuple(resources), issued_at=issued, expires_at=expires,
         catalog_sha256=catalog["sha256"], catalog_mode=catalog["mode"],
-        app_catalog_sha256=app_catalog["sha256"], app_catalog_mode=app_catalog["mode"], kind=kind)
+        app_catalog_sha256=app_catalog["sha256"], app_catalog_mode=app_catalog["mode"], kind=kind,
+        app_tools=tuple(app_tools))
 
 
 def _inside(path: Path, root: Path) -> bool:

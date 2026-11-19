@@ -177,7 +177,9 @@ class SpecVectors(Base):
                                 "round": 1},
                     "resources": ["corpus:governance-doctrine", "index:epap-evidence"]
                     + (["app:slack"] if seat == "A2" else []),  # the writer seat's app (Amendment 043)
-                    "issued_at": NOW, "expires_at": NOW + 3600})
+                    "issued_at": NOW, "expires_at": NOW + 3600,
+                    # the app tools the binding admitted, which the app gateway serves alone (Amendment 044)
+                    **({"app_tools": ["slack_list_channels", "slack_read_channel"]} if seat == "A2" else {})})
                 self.session_path.write_text(json.dumps(b.session), encoding="utf-8")
                 session = GS.load(self.session_path, self.checkout)
                 self.assertTrue(session.live_at(NOW))
