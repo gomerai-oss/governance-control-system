@@ -352,7 +352,8 @@ class HardeningTests(GatewayCase):
         names = sorted(p.name for p in PKG.iterdir() if p.name not in ("__pycache__", "harnesses"))
         self.assertEqual(names, sorted(["protocol.py", "tools.json", "session.py", "server.py", "__main__.py",
                                         "IMPLEMENTATION-DECISIONS.md",
-                                        "app_gateway.py", "app_tools.json"]))  # the app gateway (Amendment 027)
+                                        "app_gateway.py", "app_tools.json",  # the app gateway (Amendment 027)
+                                        "HARNESS-REVIEWS.md"]))  # each pinned harness's review (Amendment 043)
         harnesses = PKG / "harnesses"  # the harness files (Amendment 029), where a tree has them (Amendment 033)
         if harnesses.exists():
             self.assertTrue(harnesses.is_dir() and not harnesses.is_symlink())
@@ -510,7 +511,7 @@ class SecretsBoundaryTests(GatewayCase):
 class ShippedDataTests(unittest.TestCase):
     def test_policy_adds_mission_seats_and_read_only_mission_grants(self):
         policy = P.load_file()
-        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-16.2")
+        self.assertEqual(policy["policy_version"], "MCP-AUTH-POLICY-2026-11-18.1")
         self.assertEqual(policy["authority_refs"]["MISSION-ROUTER-001"],
                          {"kind": "HITL", "source": "tools/agent_workflow/specs/MISSION-ROUTER-001.md",
                           "missions": []})
@@ -524,8 +525,12 @@ class ShippedDataTests(unittest.TestCase):
         grants = {g["id"]: g for g in policy["grants"]}
         mission_grants = sorted(g["id"] for g in policy["grants"] if g["authority_ref"] == "MISSION-ROUTER-001")
         self.assertEqual(mission_grants, ["G-MISSION-BUILDER-EPAP-READ", "G-MISSION-BUILDER-RAG-READ",
-                                          "G-MISSION-REVIEWER-EPAP-READ", "G-MISSION-REVIEWER-RAG-READ"])
-        for gid in mission_grants:
+                                          "G-MISSION-BUILDER-SLACK-READ", "G-MISSION-REVIEWER-EPAP-READ",
+                                          "G-MISSION-REVIEWER-RAG-READ"])
+        # The Slack read (Amendment 043) is a mission grant only: no role outside a mission holds an app action.
+        self.assertNotIn("G-BUILDER-SLACK-READ", grants)
+        self.assertEqual(policy["actions"]["app.read"]["kind"], "read")
+        for gid in [g for g in mission_grants if g != "G-MISSION-BUILDER-SLACK-READ"]:
             twin = grants[gid.replace("G-MISSION-", "G-")]
             mine = dict(grants[gid])
             self.assertEqual(mine.pop("authority_ref"), "MISSION-ROUTER-001")

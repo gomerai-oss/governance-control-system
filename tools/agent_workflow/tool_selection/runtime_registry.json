@@ -94,6 +94,22 @@
       "resource": {"repo": "checkout", "path": "."},
       "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
                        "additionalProperties": true}
+    },
+    {
+      "name": "mcp__governed-apps__slack_list_channels",
+      "capability": "app_read",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"cursor": {"type": "string"}}, "additionalProperties": false}
+    },
+    {
+      "name": "mcp__governed-apps__slack_read_channel",
+      "capability": "app_read",
+      "evidence_class": "read",
+      "resource": {"repo": "checkout", "path": "."},
+      "input_schema": {"type": "object", "properties": {"channel": {"type": "string"}, "oldest": {"type": "string"},
+                                                        "latest": {"type": "string"}, "cursor": {"type": "string"}},
+                       "required": ["channel"], "additionalProperties": false}
     }
   ]
 }

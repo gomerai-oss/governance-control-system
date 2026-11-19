@@ -157,6 +157,9 @@ class PinChangeTests(unittest.TestCase):  # vector 93; AST-4.5
             (root / ".github" / "workflows").mkdir(parents=True)
             shutil.copy(AW / sc.PINS_TABLE, root / "tools" / "agent_workflow" / sc.PINS_TABLE)
             shutil.copy(WORKFLOWS / "mission-agent.yml", root / ".github" / "workflows" / "mission-agent.yml")
+            harness = sc.harness_path(root / "tools" / "agent_workflow", "slack_read")  # the shipped pin's file
+            harness.parent.mkdir(parents=True)
+            shutil.copy(sc.harness_path(AW, "slack_read"), harness)
 
     def lines(self):
         return sc.pin_lines(self.base, self.head, "tools/agent_workflow", ".github/workflows")
@@ -168,7 +171,9 @@ class PinChangeTests(unittest.TestCase):  # vector 93; AST-4.5
         (self.base / "tools" / "agent_workflow" / sc.PINS_TABLE).unlink()
         lines = self.lines()
         self.assertIn("pins.json adds runtime claude-code at 2.1.305", lines)
-        self.assertFalse(any("re-run before merging" in line for line in lines), lines)
+        # Only the harness pin owes a test (AST-H.6, its live run); a new table's other rows owe nothing.
+        self.assertEqual([line for line in lines if "re-run before merging" in line],
+                         [line for line in lines if line.startswith("pins.json adds harness slack_read")])
 
     def test_a_moved_action_and_a_changed_runtime_are_listed_with_what_they_owe(self):
         path = self.head / "tools" / "agent_workflow" / sc.PINS_TABLE

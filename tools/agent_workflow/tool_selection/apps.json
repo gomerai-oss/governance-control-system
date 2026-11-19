@@ -3,5 +3,20 @@
   "spec": "APP-CONTROL-HARNESS-SPEC-001",
   "register_version": "apps-v1",
   "bounds": {"calls": 50, "minutes": 15},
-  "apps": {}
+  "apps": {
+    "slack": {
+      "classes": ["read"],
+      "writes": null,
+      "tools": ["slack_list_channels", "slack_read_channel"],
+      "hosts": ["slack.com"],
+      "requests": [
+        {"method": "GET", "path": "/api/conversations.list", "class": "read"},
+        {"method": "GET", "path": "/api/conversations.history", "class": "read"}
+      ],
+      "resources": ["app:slack"],
+      "approvals": {"restricted": ["app:slack"], "runtime": ["external_exposure"]},
+      "key_slot": "APP_KEY_1",
+      "bounds": null
+    }
+  }
 }
