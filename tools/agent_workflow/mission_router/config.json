@@ -13,10 +13,12 @@
   "model_login": "enforce",
   "supply_chain": "enforce",
   "evidence": "observe",
+  "challenge": "enforce",
   "identity_registry": "docs/IDENTITY-REGISTRY.md",
   "credentials_register": "docs/CREDENTIALS-REGISTER.md",
   "agents": {
     "a2": "yourorg-agent-a2[bot]",
-    "a3": "yourorg-agent-a3[bot]"
+    "a3": "yourorg-agent-a3[bot]",
+    "ar": "yourorg-agent-ar[bot]"
   }
 }

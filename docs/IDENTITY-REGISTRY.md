@@ -8,6 +8,7 @@ by a mission.
 |---|---|---|---|---|---|
 | a2 | 1000002 | 2000002 | ACTIVE | contents write, PRs write | 3000002 |
 | a3 | 1000003 | 2000003 | ACTIVE | contents write, PRs write | 3000003 |
+| ar | 1000004 | 2000004 | ACTIVE | contents write, PRs write | 3000004 |
 
 Replace the example IDs with your Apps' IDs (App settings → General), installation IDs (the number at the end of
 the installation's settings URL) and account IDs. An App's account ID is the `id` GitHub returns for its bot:
