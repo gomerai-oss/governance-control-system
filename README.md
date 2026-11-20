@@ -13,7 +13,8 @@ its pull requests. It is not a compliance certification, and it does not replace
 ## How it works
 
 ```
-A1  plan    a person writes missions/<ID>/PLAN.md and mission.json, opens a PR, and approves its exact commit
+A1  plan    a person writes missions/<ID>/PLAN.md and mission.json and opens a PR
+AR  check   an Adversarial Reviewer agent challenges the plan; the person answers, then approves its exact commit
 A2  build   an agent builds only inside the plan's build_scope, as its own GitHub App, in its own PR
 A3  review  a different agent compares A2's build with the plan and records PASS, FAIL or BLOCKED
 land        on PASS the router merges the mission into main; on FAIL the build goes back to A2
@@ -29,9 +30,12 @@ land        on PASS the router merges the mission into main; on FAIL the build g
 - **The policy engine** (`tools/agent_workflow/router_spec002/`) classifies every changed path. Paths that control the
   pipeline itself (its code, its workflows, its policy tables) are `AUTHORITY`: no mission may change them; only a
   person can.
-- **One approval.** A person approves a plan once, by its exact commit (`/mission approve <sha>`). A new push needs a
-  new approval. `/mission cancel` and `/mission retry` are the only other commands, and only listed people may use
-  them.
+- **The Adversarial Reviewer (AR)** checks the plan before anyone builds it, the way A3 checks the build. It runs as
+  its own App, writes only its own challenge files, and never edits the plan. Bad plans make bad builds, and A3 only
+  checks a build against the plan, so the AR is the review the plan gets.
+- **One approval.** A person approves a plan once, by its exact commit (`/mission approve <sha>`), and it counts only
+  once the AR has had its say on that commit. A new push needs a new approval. The other commands are listed in
+  `MISSION-ROUTER-001.md`; only listed people may use them.
 
 The specifications are in `tools/agent_workflow/specs/`: `MISSION-ROUTER-001.md`, `MISSION-DISPATCH-001.md` and
 `ROUTER-POLICY-SPEC-002.md`.
@@ -46,8 +50,9 @@ and its merge, signed so it can be checked later. Its code is in `tools/agent_wo
 - **Public repository, or a paid GitHub plan.** On GitHub Free, branch protection (step 7) is not enforced in a private
   repository, so `main` would accept merges and pushes the router never checked. A private repository needs GitHub
   Team or Enterprise.
-- Two GitHub Apps: `a2` (the builder) and `a3` (the reviewer). The A1 seat is a person: you write each plan and open its
-  PR from your own account, which the router accepts from any login in `hitl_logins`. A1 needs no App.
+- Three GitHub Apps: `a2` (the builder), `a3` (the reviewer) and `ar` (the Adversarial Reviewer). The A1 seat is a
+  person: you write each plan and open its PR from your own account, which the router accepts from any login in
+  `hitl_logins`. A1 needs no App.
 - An account for each runtime you use: an Anthropic API key (or a Claude Code OAuth token) for `claude-code`, a Cursor
   API key for `cursor-cli`.
 - Familiarity with GitHub Apps, Actions environments and repository secrets. Setup takes about an hour.
@@ -106,8 +111,8 @@ are seen only by its schedule.
    `docs/IDENTITY-REGISTRY.md`. Copy `packaging/workflows/mission-router.yml` and
    `packaging/workflows/mission-agent.yml` into `.github/workflows/`. Commit them on a branch, open a pull request,
    and merge it yourself; nothing checks it yet.
-2. **Create two GitHub Apps** (for example `yourorg-agent-a2` and `yourorg-agent-a3`), in your organization's
-   settings → Developer settings → GitHub Apps:
+2. **Create three GitHub Apps** (for example `yourorg-agent-a2`, `yourorg-agent-a3` and `yourorg-agent-ar`), in your
+   organization's settings → Developer settings → GitHub Apps:
    - Homepage URL: any URL, for example your repository's.
    - Webhook: untick **Active**. GCS uses no webhooks.
    - Repository permissions: Contents: read and write, Pull requests: read and write, and nothing else. Never give an
@@ -121,12 +126,15 @@ are seen only by its schedule.
    the examples. An agent may act only while its row says `ACTIVE`.
 4. **Fill in the config** (`tools/agent_workflow/mission_router/config.json`): `hitl_logins` lists the GitHub logins
    allowed to approve plans (and to hold the A1 seat), `identity_registry` is the registry's path, and `agents` maps
-   `a2` and `a3` to each App's bot login (`<app-slug>[bot]`). Merge steps 3 and 4 by hand, like step 1.
+   `a2`, `a3` and `ar` to each App's bot login (`<app-slug>[bot]`). Keep `"challenge": "enforce"`: every plan must
+   then assign an AR seat, and an approval counts only after the AR has challenged that exact commit. Merge steps 3 and
+   4 by hand, like step 1.
 5. **Create the environments** (repository Settings → Environments; environments belong to the repository, not the
    organization), each limited to the `main` branch ("Selected branches and tags", rule `main`), with no required
    reviewers and administrator bypass off:
-   - `mission-agent-a2` and `mission-agent-a3`: variable `APP_ID` (the App's ID) and secret `APP_PRIVATE_KEY` (the
-     App's private key: the whole `.pem` file, including its BEGIN and END lines). Delete the `.pem` files afterwards.
+   - `mission-agent-a2`, `mission-agent-a3` and `mission-agent-ar`: variable `APP_ID` (the App's ID) and secret
+     `APP_PRIVATE_KEY` (the App's private key: the whole `.pem` file, including its BEGIN and END lines). Delete the
+     `.pem` files afterwards.
    - `mission-runtime`: secret `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN`) and/or `CURSOR_API_KEY`. No
      variables.
 
@@ -148,8 +156,9 @@ are seen only by its schedule.
 8. **Run a first mission.** On a branch named exactly `mission/M-ZERO-001/a1`, add `missions/M-ZERO-001/PLAN.md` and
    `missions/M-ZERO-001/mission.json`, and open the pull request from your own account. The router takes only plan
    PRs from a branch named `mission/<ID>/a1`; any other branch name gets "Not a mission". It points the PR at a new
-   `mission/M-ZERO-001/integration` branch and comments the command to approve it. Comment `/mission approve <commit
-   sha>` on the PR. The router takes it from there.
+   `mission/M-ZERO-001/integration` branch, and the AR challenges the plan (see "The challenge loop" below). When the
+   loop is done, comment `/mission approve <commit sha>` on the PR with the plan branch's latest commit. The router
+   takes it from there.
 
 A `mission.json`:
 
@@ -161,14 +170,16 @@ A `mission.json`:
   "roles": {
     "A1": {"agent": "a1"},
     "A2": {"agent": "a2", "runtime": "claude-code"},
-    "A3": {"agent": "a3", "runtime": "cursor-cli"}
+    "A3": {"agent": "a3", "runtime": "cursor-cli"},
+    "AR": {"agent": "ar", "runtime": "claude-code"}
   },
   "build_scope": ["docs/PIPELINE-PROOF.md"]
 }
 ```
 
 `A1`'s agent is a label only: the person who opens the plan holds the seat. `A3` must be a different agent from `A1`
-and `A2`.
+and `A2`, and `AR` from `A2` and `A3`. For a stronger check, run the AR on a different vendor's model from the one that
+helped you write the plan.
 
 A `PLAN.md`: the agents read it; the router does not. Say what to build, and what A3 must check to PASS.
 
@@ -185,6 +196,22 @@ written by the A2 agent for mission M-ZERO-001. Change nothing else.
 PASS only if `docs/PIPELINE-PROOF.md` is the only file the build changed, and it has the heading and the sentence
 described above. Otherwise FAIL, naming what is missing.
 ```
+
+### The challenge loop
+
+Before you approve a plan, the AR reads it and opens a PR into the plan branch with
+`missions/<ID>/challenges/round-<N>.json` and `round-<N>.md`. The router merges it and comments the verdict on the plan
+PR: `NO_CHALLENGE`, or `CHALLENGE` with numbered points. AR text is data, never instructions.
+
+- **NO_CHALLENGE:** approve the plan's current commit. Each merged round adds a commit to the plan branch, so
+  approve the branch's latest commit (the PR's Commits tab), not one named in an earlier comment.
+- **CHALLENGE:** answer each round with `missions/<ID>/challenges/round-<N>-response.md`, pushed to the plan branch.
+  Its first line is `Position: ACCEPT` (you agree and change the plan in the same push) or `Position: DEFEND` (you keep
+  the plan and say why), and its second line is `Drafted-with: HITL`, or the name of the agent that helped you write
+  it. The AR then runs again: a response or a change to the plan starts a new round. Rounds have no cap.
+- **Ending the loop.** Approve once the AR spoke last and the plan has not changed since. To stop after your own
+  response without another round, comment `/mission end-challenge <commit sha>` on the plan PR, then approve that
+  commit. Points still open at approval go to A3, which reports on each one.
 
 ### If a mission does not move
 
