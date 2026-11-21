@@ -9,7 +9,7 @@ import json
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from epap import ed25519
@@ -109,6 +109,62 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(record.ACTIONS["evidence.verify"], "decide")
 
 
+class Vector236FetchById(unittest.TestCase):
+    """236 (Amendment 045): a record's commit that the clone lacks, because its PR was rebased after the router
+    recorded its head, is asked of the clone's origin by id before it is refused; one the origin lacks is refused."""
+
+    def orphaned(self, s):
+        """s.repo as the origin, holding the records' commit only as an orphan (on no branch), and a clone of it."""
+        first = git("symbolic-ref", "--short", "HEAD", cwd=s.repo)
+        git("checkout", "-q", "--orphan", "other", cwd=s.repo)
+        git("commit", "-q", "--allow-empty", "-m", "other", cwd=s.repo)
+        git("branch", "-q", "-D", first, cwd=s.repo)
+        git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=s.repo)  # as GitHub serves a commit by id
+        clone = s.root / "clone"
+        git("clone", "-q", "--no-local", str(s.repo), str(clone), cwd=s.root)  # reachable objects only
+        self.assertNotEqual(subprocess.run(["git", "-C", str(clone), "cat-file", "-e", s.commit + "^{commit}"],
+                                           capture_output=True).returncode, 0)
+        return clone
+
+    def test_the_checker_fetches_an_orphaned_commit_by_id(self):
+        s = Setup(self)
+        clone = self.orphaned(s)
+        result = checker.check(s.store, s.keys, clone)
+        self.assertEqual((result["ok"], result["commits"], result["failures"]), (True, 1, []))
+
+    def test_a_commit_the_origin_lacks_is_still_refused(self):
+        s = Setup(self)
+        other = s.root / "other"
+        other.mkdir()
+        git("init", "-q", cwd=other)
+        clone = s.root / "clone"
+        git("clone", "-q", "--no-local", str(other), str(clone), cwd=s.root)
+        result = checker.check(s.store, s.keys, clone)
+        self.assertTrue(any("is not in the repository" in f for f in result["failures"]))
+
+    def test_only_the_checker_fetches(self):
+        s = Setup(self)
+        clone = self.orphaned(s)
+        self.assertIn("is not in the repository", verify.verify_store(s.store, s.keys, git=clone).failure)
+
+    def test_a_failed_fetch_says_why(self):
+        """237 (Amendment 046): a fetch that cannot reach its origin prints git's reason; the commit is still refused."""
+        s = Setup(self)
+        clone = self.orphaned(s)
+        git("remote", "set-url", "origin", str(s.root / "gone"), cwd=clone)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            result = checker.check(s.store, s.keys, clone)
+        self.assertTrue(any("is not in the repository" in f for f in result["failures"]))
+        self.assertIn(f"fetch of commit {s.commit[:12]} from origin failed: ", err.getvalue())
+        self.assertNotIn("exit ", err.getvalue().split("failed: ", 1)[1], "git's own reason, not just its exit code")
+
+    def test_only_a_full_commit_id_is_ever_fetched(self):
+        self.assertIsNone(verify._SHA_RE.fullmatch("--upload-pack=x"))
+        self.assertIsNone(verify._SHA_RE.fullmatch("a" * 39))
+        self.assertIsNotNone(verify._SHA_RE.fullmatch("a" * 40))
+
+
 class FakeGH:
     def __init__(self, open_issue=None):
         self.checks, self.comments, self.created, self.labels = [], [], [], []
@@ -202,6 +258,20 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(trigger, on)
         self.assertNotIn("workflow_run", on, "the seal workflow seals the checker's record: no loop")
         self.assertIn("Evidence Verify", self.text("evidence-seal.yml"))
+
+    def test_vector_237_both_fetches_are_signed_in_through_the_environment(self):
+        text = self.text("evidence-verify.yml")
+        verify_job = text[text.index("\n  verify:\n"):text.index("\n  report:\n")]
+        self.assertIn("persist-credentials: false", verify_job)
+        self.assertNotRegex(text, r"https://[^\s\"']*@github\.com", "no token in a URL")
+        for name in ("- name: Fetch this repository's PR heads", "- name: Verify the whole store"):
+            step = verify_job[verify_job.index(name):]
+            step = step[:step.index("\n      - name:", 1)] if "\n      - name:" in step[1:] else step
+            with self.subTest(name):
+                self.assertIn("REPO_TOKEN: ${{ github.token }}", step)
+                self.assertIn('echo "::add-mask::$auth"', step)
+                self.assertIn("GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", step)
+                self.assertLess(step.index("::add-mask::"), step.index("GIT_CONFIG_VALUE_0"))
 
 
 if __name__ == "__main__":

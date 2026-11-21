@@ -346,6 +346,34 @@ seat only the app tools its binding admitted (§3p item 57).
 
 Vectors 234 and 235.
 
+**Amendment 045 (2026-11-20, ring 6 checker, HITL issue "Evidence verification failed"):** the checker asks the
+repository for a record's commit by its id before it refuses it (§3m item 7).
+- **What was found:** from 2026-11-11 every checker run refused the store on one record: a router record of PR
+  #1288's head, `ef067e05`. That PR was rebased before it merged, so its old head is on no branch, tag or PR head,
+  and the checker's clone does not hold it. The repository still holds it and serves it by id. A withdrawal would
+  not help: every record's commit is checked, withdrawn or not.
+- **The change:** when the checker's clone lacks a record's commit, it runs `git fetch --depth=1 origin <id>` for
+  that one commit, a full 40-hex id only, and checks again. A commit the repository does not hold is still refused.
+  `verify` run by hand does not fetch.
+- **Keep PR heads in place:** a PR the router has seen is not rebased or force-pushed. A fetch by id depends on the
+  repository keeping a commit no ref names, which it does not promise.
+
+Vector 236.
+
+**Amendment 046 (2026-11-20, ring 6 checker, after Amendment 045's first run):** the checker's two fetches are given
+the job's own token.
+- **What was found:** the first run after Amendment 045 merged still refused `ef067e05`. The repository is private,
+  and the checker's clone is made with `persist-credentials: false`, so neither the fetch by id nor the fetch of PR
+  heads could sign in; both failed quietly. The fetch of PR heads had never worked here. Amendment 045's tests used
+  a local origin, which needs no sign-in. A signed-in fetch of `ef067e05` by id was tried by hand and succeeded.
+- **The change:** the step that fetches PR heads and the step that runs the checker pass the job's `github.token`
+  (this repository, contents read) to git in the environment as an `http.extraheader`, masked in the log, as the
+  store's clone does. It is never in a URL and never written to the clone's config. The checker's code is the
+  default branch's; the store's records stay data it reads. A fetch by id that fails prints git's reason on stderr,
+  in the run's log; the commit is still refused, as before.
+
+Vector 237.
+
 Vector 194.
 
 ## 1. Purpose
@@ -1588,7 +1616,7 @@ on" below).
      - its seal against the pinned keys (an unsealed run is refused);
      - the store's history (every file added once, never changed);
      - every record's commit, in this repository's full history and its PR heads (a refused stage branch is deleted,
-       but its commit stays on its PR).
+       but its commit stays on its PR), and otherwise asked of the repository by its id (Amendment 045).
    - **Its result.** One `evidence.verify` record, a new action (class `decide`) in the closed list. The `report`
      job, which holds no secret, sets the `evidence-verified` check on the commit. On a refusal it opens the HITL
      issue "Evidence verification failed" (label `evidence:failed`), or comments on the open one. The checker never
@@ -1602,8 +1630,10 @@ on" below).
      loop. New seals are verified on the next push or the next day.
    - **Not built: the independent review of ring 6's own PRs** (item 7's last two sentences; router vector 109;
      gate G-R6-02, "builder ≠ sole security reviewer"). Who may review or approve governance PRs is HITL's design
-     decision, and it is not made here: the item's mention of an A3 seat is not a commitment. G-R6-02 stays open.
-     Until it is decided, a ring 6 PR has only the builder's self-check and HITL's hand merge.
+     decision, and it is not made here: the item's mention of an A3 seat is not a commitment. HITL decided G-R6-02
+     on 2026-11-20 (G-R6-02-INDEPENDENT-REVIEW-001 §8): the gap is accepted and recorded. Hand-built changes are
+     system updates that HITL alone reviews, approves and hand-merges, so a ring 6 PR has the builder's self-check
+     and HITL's review and merge.
 
    **Clarified in the WORM part (item 3, HITL direction 2026-11-09: Google Cloud Storage, governance mode first, then
    compliance):**
@@ -2834,3 +2864,5 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 233 | A2 bound with `"app_gateway"` off | No app tool granted, only `governed-retrieval` written, the two admitted tools logged as not granted, no app endpoint planned (Amendment 043) |
 | 234 | A catalog tool the fabric allows but the session does not name; an `agent` session naming none; a malformed `app_tools` | Not listed; a call is refused and logged as a `refusal`, and no harness runs; the admitted tool still runs; a session naming none is served none; a malformed list is an invalid session (Amendment 044) |
 | 235 | Each seat bound | Its session names exactly the app tools the binding admitted, and a seat with none has no `app_tools` field (Amendment 044) |
+| 236 | A record's commit on no ref of the checker's clone but held by its origin; one the origin lacks; `verify` by hand; an id that is not 40 hex | The checker fetches it by id and verifies it; the other is refused; `verify` by hand does not fetch; only a full 40-hex id is ever fetched (Amendment 045) |
+| 237 | The checker workflow's fetch of PR heads and its checker step; a fetch by id that fails | Each passes the job's `github.token` to git in its environment as an `http.extraheader`, masked; no token is in a URL; the clone keeps `persist-credentials: false`; the failed fetch prints git's reason on stderr and the commit is still refused (Amendment 046) |

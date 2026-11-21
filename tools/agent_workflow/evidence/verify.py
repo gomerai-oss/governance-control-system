@@ -15,7 +15,9 @@ decision that allowed it. A decision's inputs are recorded by digest only, so th
 
 from __future__ import annotations
 
+import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -24,6 +26,8 @@ from evidence import EvidenceError
 from evidence import chain as chain_mod
 from evidence import record as rec_mod
 from evidence import seal as seal_mod
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}")  # only a full commit id is ever passed to git fetch
 
 RUNS = "runs"
 
@@ -125,9 +129,27 @@ def file_index(files: Path) -> Tuple[Dict[str, Path], List[str]]:
     return index, sorted(twice)
 
 
+def _has_commit(git: Path, sha: str) -> bool:
+    return subprocess.run(["git", "-C", str(git), "cat-file", "-e", f"{sha}^{{commit}}"],
+                          capture_output=True).returncode == 0
+
+
+def _fetch_commit(git: Path, sha: str) -> None:
+    """Ask the clone's ``origin`` for one commit by its id (Amendment 045): a PR rebased or force-pushed after the router
+    recorded its head leaves that commit on no branch, tag or PR head, but the repository still serves it by id. A
+    failed fetch says why on stderr (Amendment 046): the refusal that follows names the commit, not the cause."""
+    done = subprocess.run(["git", "-C", str(git), "fetch", "--quiet", "--no-tags", "--depth=1", "origin", sha],
+                          capture_output=True, text=True, timeout=120)
+    if done.returncode != 0:
+        lines = [line for line in done.stderr.splitlines() if line.strip()]
+        reason = lines[-1].strip() if lines else f"exit {done.returncode}"
+        print(f"fetch of commit {sha[:12]} from origin failed: {reason}", file=sys.stderr)
+
+
 def _check_content(records, index: Optional[Dict[str, Path]], git: Optional[Path], report: "Report",
-                   seen: set) -> None:
-    """The recorded digests against what is still held (§3m item 5): files, and commits in git."""
+                   seen: set, fetch: bool = False) -> None:
+    """The recorded digests against what is still held (§3m item 5): files, and commits in git. With ``fetch``, a
+    commit the clone lacks is asked of its ``origin`` by id before it is refused (the checker; Amendment 045)."""
     from evidence.producer import file_digest  # producer imports this module
     for rec in records:
         for side in ("inputs", "outputs"):
@@ -140,9 +162,12 @@ def _check_content(records, index: Optional[Dict[str, Path]], git: Optional[Path
                 report.files_checked += 1
         sha = rec["subject"]["commit"]
         if git is not None and sha and sha not in seen:
-            done = subprocess.run(["git", "-C", str(git), "cat-file", "-e", f"{sha}^{{commit}}"],
-                                  capture_output=True)
-            if done.returncode != 0:
+            if not _has_commit(git, sha) and fetch and _SHA_RE.fullmatch(sha):
+                try:
+                    _fetch_commit(git, sha)
+                except subprocess.TimeoutExpired:
+                    pass
+            if not _has_commit(git, sha):
                 raise Refused(f"record {rec['id']}: commit {sha[:12]} is not in the repository")
             seen.add(sha)
             report.commits_checked += 1
@@ -170,7 +195,8 @@ def _withdrawals_elsewhere(base: Path, runs: set, keys: Mapping[str, str]) -> Li
 
 
 def verify_store(store: Path, keys: Mapping[str, str], run: Optional[str] = None,
-                 require_seal: bool = False, files: Optional[Path] = None, git: Optional[Path] = None) -> Report:
+                 require_seal: bool = False, files: Optional[Path] = None, git: Optional[Path] = None,
+                 fetch: bool = False) -> Report:
     report = Report()
     seen: set = set()
     index = None
@@ -183,7 +209,7 @@ def verify_store(store: Path, keys: Mapping[str, str], run: Optional[str] = None
     try:
         for name in names:
             records, sealed = verify_run(base / name, name, keys)
-            _check_content(records, index, git, report, seen)
+            _check_content(records, index, git, report, seen, fetch)
             report.runs += 1
             report.records += len(records)
             if not sealed:

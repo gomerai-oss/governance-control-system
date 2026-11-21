@@ -94,12 +94,27 @@ jobs:
 
       - name: Fetch this repository's PR heads (a refused stage branch is deleted; its commit stays on its PR)
         if: steps.store.outputs.full != ''
-        run: git -C tooling fetch --quiet --no-tags origin '+refs/pull/*/head:refs/remotes/pull/*' || true
+        env:
+          REPO_TOKEN: ${{ github.token }}  # this job's token, contents read; passed to git in its environment (Amendment 046)
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$REPO_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git -C tooling fetch --quiet --no-tags origin '+refs/pull/*/head:refs/remotes/pull/*' || true
 
       - name: Verify the whole store and record the result
         if: steps.store.outputs.full != ''
+        env:
+          REPO_TOKEN: ${{ github.token }}  # for the checker's fetch of a record's commit by its id (Amendments 045, 046)
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/result"
+          auth=$(printf 'x-access-token:%s' "$REPO_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           python3 -B -m evidence check --store "$RUNNER_TEMP/store" --git tooling --out "$RUNNER_TEMP/result/result.json"
 
       - name: Hand the result to the report job
