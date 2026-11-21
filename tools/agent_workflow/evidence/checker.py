@@ -2,9 +2,9 @@
 write the store.
 
 ``check`` verifies a clone of the store: every run's chain and seal against the pinned keys (``--sealed``), the
-store's history (every file added once, never changed), and every record's commit in this repository's clone. It
-writes the result as JSON and records it as one ``evidence.verify`` record in the job's chain, which the seal job
-then seals like any other. It never fails the job itself: ``report`` turns the result into the ``evidence-verified``
+store's history (every file added once, never changed), and every record's commit in this repository's clone. A
+commit the clone lacks is first asked of the repository by its id (Amendment 045). It writes the result as JSON and
+records it as one ``evidence.verify`` record in the job's chain, which the seal job then seals like any other. It never fails the job itself: ``report`` turns the result into the ``evidence-verified``
 check on the commit and, when verification failed, an issue for HITL.
 """
 
@@ -30,7 +30,7 @@ def check(store: Path, keys: Mapping[str, str], git: Optional[Path], recorder=No
     """``{"ok", "runs", "records", "commits", "unsealed", "withdrawn", "failures", "worm"}`` for the whole store. With
     ``worm`` (a declared WORM bucket), every stored file must also have its copy there, byte-identical and retained
     for ``retention_years``."""
-    report = verify.verify_store(Path(store), keys, require_seal=True, git=git)
+    report = verify.verify_store(Path(store), keys, require_seal=True, git=git, fetch=True)
     failures = ([report.failure] if report.failure else []) + store_mod.history_problems(Path(store))
     from evidence import pack as pack_mod
     failures += pack_mod.store_problems(Path(store), keys)  # every landing attestation (§3m item 2)
