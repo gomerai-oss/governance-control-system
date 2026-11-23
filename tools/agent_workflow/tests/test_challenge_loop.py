@@ -264,6 +264,62 @@ class ChallengeRouterTests(unittest.TestCase):
         self.assertTrue(self.started(), self.logs)
         self.assertIn(f"missions/{MID}/challenges/round-2.json", self.gh.commits[self.gh.branches[INT]][1])
 
+    # ---- router vector 143, Amendment 025: one approval, given at any point, carries once AR passes the plan
+    def test_v143_an_approval_before_ar_carries_to_the_head_ar_passes(self):
+        self.open_plan()
+        approved = self.gh.branches[PLAN]
+        self.approve()
+        self.assertFalse(self.started(), "not before AR has read it")
+        self.ar_round(1, "NO_CHALLENGE")
+        self.assertNotEqual(self.gh.branches[PLAN], approved, "AR's round moved the head")
+        self.sweep()  # the next sweep reads the plan at its new head
+        self.assertTrue(self.started(), self.logs)
+        self.assertTrue(any(f"approval of {approved[:12]} carries to" in line for line in self.logs))
+        self.assertFalse(any("approval-carried" in c or "carries to `" in c for c in self.bot_comments(self.plan)),
+                         "the plan did not change: nothing to tell HITL")
+
+    def test_v143_it_carries_over_a1_changes_once_ar_passes_them_and_says_what_changed(self):
+        self.open_plan()
+        self.approve()
+        self.ar_round(1)  # CHALLENGE
+        self.assertFalse(self.started())
+        self.respond(1, "Position: ACCEPT\nDrafted-with: HITL\n\nP1 fixed in the plan.",
+                     extra={f"missions/{MID}/PLAN.md": "plan v2"})
+        self.assertFalse(self.started(), "AR has not read the changed plan yet")
+        self.ar_round(2, "NO_CHALLENGE")
+        self.sweep()
+        self.assertTrue(self.started(), self.logs)
+        said = [c for c in self.bot_comments(self.plan) if "carries to `" in c]
+        self.assertEqual(len(said), 1)
+        self.assertIn(f"missions/{MID}/PLAN.md", said[0])
+        self.assertIn("/mission halt", said[0])
+
+    def test_v143_it_never_carries_onto_a_challenge(self):
+        self.open_plan()
+        self.approve()
+        self.ar_round(1)  # CHALLENGE, unanswered: AR spoke last on the unchanged plan
+        self.assertFalse(self.started(), "an early approval is not an approval over AR's challenge")
+        self.approve()  # HITL approves the challenged head itself: approving over AR, as before
+        self.assertTrue(self.started(), self.logs)
+
+    def test_v143_a_defended_plan_carries_with_nothing_to_report(self):
+        self.open_plan()
+        self.approve()
+        self.ar_round(1)
+        self.respond(1)  # DEFEND, the plan unchanged
+        self.ar_round(2, "NO_CHALLENGE")
+        self.sweep()
+        self.assertTrue(self.started(), self.logs)
+        self.assertFalse(any("carries to `" in c for c in self.bot_comments(self.plan)))
+
+    def test_v143_an_approval_of_a_commit_outside_the_plan_history_does_not_carry(self):
+        self.open_plan()
+        self.gh.push("side/other", {f"missions/{MID}/PLAN.md": "another plan"}, base="main")
+        self.gh.comment_as(self.plan, HITL, f"/mission approve {self.gh.branches['side/other']}")
+        self.ar_round(1, "NO_CHALLENGE")
+        self.sweep()
+        self.assertFalse(self.started())
+
     def test_vector_120_approval_with_no_round_is_not_counted(self):
         self.open_plan()
         self.approve()

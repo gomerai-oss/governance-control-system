@@ -139,6 +139,44 @@ against the repository's own path policy before HITL approves it.
   Absent, nothing changes. An unusable value stops the router.
 
 Vector 141.
+**Amendment 024 (2026-11-23, HITL direction: "if an older legacy process has been replaced, deprecate it and fix
+the new process to fill any gaps"):** the review flow this router replaced is deprecated, and the router gains the
+completion check it served.
+- **What is deprecated:** the PR Handoff Event Router and its closeout gate (`pr_handoff_router.py`,
+  `mission_state.py`), the VRT dispatch (`tools/vrt`, `vrt_auto_dispatch.py`, the two VRT workflows), the live
+  reviewer dispatch and its substrate hook (`reviewer_substrate_hook.py`), the delegated-merge chain (`merge_dispatch.py`,
+  `merge_delegation_evaluator.py`, `implementation_authority_gate.py`, `review_disposition_classifier.py`,
+  `tools/reviewer_execution`, `governance/reviewer_execution`) and `release_control_*.py`, which composed
+  `mission_state.py` and was never wired in. Nothing ran them: the router owns `route-handoff-block` and is the only
+  merge path. Their records under `change-specs/` stay as history.
+- **The gap filled:** `AGENTS.md` and `CLAUDE.md` bound every agent to `mission_state.py --assert-closeout` before
+  reporting work done. `python3 -m mission_router.status --repo <owner/repo> (--mission <ID> | --pr <N>)` takes its
+  place (`mission_router/status.py`). For a mission it reads the router's own derivation, read-only (a router made
+  with `dry_run`): done means stage `DONE`, and, for a stack that lands as a whole, the stack `LANDED`. For a
+  hand-built PR, done means merged by one of `hitl_logins`. It prints one `DONE:` or `NOT DONE:` line and exits 0
+  when done, 3 when not, 2 when it cannot tell. `AGENTS.md` and `CLAUDE.md` now name it, and keep the invariants it
+  served: requested is not completed, and a self-check is never independent review.
+- **Kept:** the PR producer preflight, the repo-control preflight and the handoff-block parser they use, which
+  every hand-built PR still goes through.
+
+Vector 142.
+**Amendment 025 (2026-11-23, HITL direction: "My approval is supposed to be an approval to challenge the A1 plan by
+the AR until it passes then have A2 code the plan... I should not have to approve the mission more than once"):**
+approve once.
+- **What was found:** an approval counted only for the exact plan head it named, and only once the challenge loop was
+  complete there. The router's own merge of each AR round moves the plan head, so an approval given before AR finished
+  was lost even when AR then passed the plan unchanged. M-GCS-DEMO-PROOF-003 took four approvals.
+- **The change:** a HITL approval of an earlier plan head carries to the current head when the approved commit is in
+  the head's history and AR has passed the plan at the head: the loop is complete there, not ended by HITL's
+  `/mission end-challenge`, and AR's latest round is `NO_CHALLENGE`. That includes plan changes A1 made in answer to
+  AR, since AR passed them; the router then posts, once, which plan files changed since the approval, with a compare
+  link, and how to stop the mission (`/mission halt`, `/mission cancel`). The merge's record names the approved commit
+  and that it was carried (ring 6).
+- **What does not carry:** an approval onto a head whose latest AR round is a `CHALLENGE` (approving over AR stays a
+  deliberate approval of that exact head); onto a loop HITL ended; from a commit outside the head's history; or
+  without an AR seat. The approval request and the "not counted yet" comment now say that one approval is enough.
+
+Vector 143.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -855,3 +893,5 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 139 | `config.json` `"security_scan"`: `"enforce"`; an unknown value | Read; the router stops |
 | 140 | GitHub refuses a merge, then refuses it again for another reason | The log and the `failed` record carry GitHub's message; the PR gets one "will not merge it yet" comment per reason (Amendment 022) |
 | 141 | `landing_path_check` named; a plan whose deliverable it refuses; one it allows; a command that cannot run, exits 2, or names no path of the plan; none named; an unusable value | Refused before approval, naming the path; started as before; refused; nothing runs; the router stops (Amendment 023) |
+| 142 | `mission_router.status` on a mission through each stage; on a hand-built PR merged by HITL, by a bot, open, or closed unmerged; a read that fails | `NOT DONE` until the A3 PASS is merged, then `DONE` (exit 0), writing nothing; `DONE` only for the HITL merge; `NOT DONE: cannot tell`, exit 2 (Amendment 024) |
+| 143 | HITL approves the plan before AR runs; AR passes it unchanged; AR challenges, A1 changes the plan, AR passes it; AR challenges and nobody answers; A1 defends; an approval of a commit outside the plan's history | The mission starts with no second approval; it starts, and the router lists the changed plan files once; it waits until HITL approves the challenged head itself; it starts, nothing listed; it does not start (Amendment 025) |

@@ -42,7 +42,7 @@
       "stage": "8.5",
       "id": "INDEPENDENT_REVIEW",
       "activity": "Exact-head, session-independent review of the implementation and of graph behavior under test.",
-      "control": "mission_state.py invariant: REVIEW_REQUESTED != REVIEW_COMPLETED; a builder's own adversarial self-check is never independent review.",
+      "control": "Lifecycle invariant (mission_router.status, MISSION-ROUTER-001 Amendment 024): REVIEW_REQUESTED != REVIEW_COMPLETED; a builder's own adversarial self-check is never independent review.",
       "control_kind": "VERIFICATION",
       "invariants": ["SELF_CHECK_NEVER_EQUALS_INDEPENDENT_REVIEW", "NO_SELF_SATISFIED_GATES"],
       "node_output_satisfies": false,
