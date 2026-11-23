@@ -1,35 +1,34 @@
-"""The seal sweep (§3m item 2; Amendment 022): find the ended runs the seal job was never started for.
+"""The seal sweep (§3m item 2; Amendments 022 and 047): find the ended runs whose evidence is not all sealed.
 
-The seal workflow starts on ``workflow_run``. GitHub does not send that event when the run that ended was started with
-a workflow's own ``GITHUB_TOKEN``, and the router starts every Mission Agent run it dispatches that way. Such a run's
-chains would never be sealed, its stage PR never marked ``evidence-sealed``, and under ``"evidence": "enforce"`` the
-router would hold that PR for good.
+The seal workflow runs on a schedule only (Amendment 047). It used to start on ``workflow_run`` as well, after every
+run of the sealed workflows; most of those runs (router sweeps and dispatcher plans that found nothing to do) kept no
+evidence, and each still cost two jobs. GitHub sends no ``workflow_run`` for a run started with a workflow's own
+``GITHUB_TOKEN`` anyway, which is how the router starts every Mission Agent run it dispatches (Amendment 022), so the
+schedule was already the only path for those.
 
-So the seal workflow also runs on a schedule. Each sweep lists the ended runs of the sealed workflows that were
-started by ``github-actions[bot]`` in the last ``LOOKBACK_DAYS`` days, and names each one whose evidence artifacts
-outnumber its sealed chains in the store. The seal job then downloads those runs' ``evidence-*`` artifacts and seals
-them as it would for ``workflow_run``. A run started any other way gets ``workflow_run`` and is never swept, so the two
-paths never seal the same run. A chain already sealed (an earlier sweep that stopped part way) is not sealed again:
+Each sweep lists this repository's unexpired ``evidence-*`` artifacts from the last ``LOOKBACK_DAYS`` days, in one
+paged call, and counts them per run. A run with more evidence artifacts than chains sealed in the store is read once:
+it is named when it has ended and is a run of a sealed workflow. The seal job then downloads those runs' ``evidence-*``
+artifacts and seals them. A chain already sealed (an earlier sweep that stopped part way) is not sealed again:
 ``seal_runs`` with ``resume=True`` reads its records back for the PRs to mark and makes no second seal.
 """
 
 from __future__ import annotations
 
 import datetime
-from typing import Callable, Dict, Iterable, List, Set
+from typing import Callable, Dict, List, Set
 
 from evidence import EvidenceError
 from evidence import seal as seal_mod
 from evidence import store as store_mod
 
-# The workflows the seal workflow's ``workflow_run`` names (its file, by name) and their files.
+# The sealed workflows, by name, and their files.
 WORKFLOWS = {
     "Mission Agent": "mission-agent.yml",
     "Mission Router": "mission-router.yml",
     "Credentials Check": "credentials-check.yml",
     "Evidence Verify": "evidence-verify.yml",
 }
-TOKEN_ACTOR = "github-actions[bot]"  # who a run started with GITHUB_TOKEN is triggered by
 LOOKBACK_DAYS = 2
 EVIDENCE_PREFIX = "evidence-"
 
@@ -57,40 +56,46 @@ def sealed_chains(store_request: Callable) -> Set[str]:
     return out
 
 
-def _token_runs(request: Callable, workflow_file: str, since: str) -> Iterable[dict]:
-    """The ended runs of one workflow, started by workflow_dispatch since ``since``, whose triggering actor is the
-    token. GITHUB_TOKEN can start no other event a sealed workflow listens to."""
+def _evidence_counts(request: Callable, since: str) -> Dict[int, int]:
+    """``{run id: unexpired evidence-* artifacts}`` for the artifacts created since ``since``. GitHub lists a
+    repository's artifacts newest first, though not strictly, so paging stops only after a whole page older than
+    ``since``, or at the last page."""
+    counts: Dict[int, int] = {}
     page = 1
     while True:
-        batch = request("GET", f"/actions/workflows/{workflow_file}/runs?event=workflow_dispatch&status=completed"
-                               f"&created=%3E%3D{since}&per_page=100&page={page}")
-        runs = batch.get("workflow_runs") or []
-        for run in runs:
-            if (run.get("triggering_actor") or {}).get("login") == TOKEN_ACTOR:
-                yield run
-        if len(runs) < 100:
-            return
+        batch = request("GET", f"/actions/artifacts?per_page=100&page={page}")
+        artifacts = batch.get("artifacts") or []
+        for a in artifacts:
+            run = (a.get("workflow_run") or {}).get("id")
+            if (str(a.get("name", "")).startswith(EVIDENCE_PREFIX) and not a.get("expired") and run
+                    and str(a.get("created_at", "")) >= since):
+                counts[int(run)] = counts.get(int(run), 0) + 1
+        if len(artifacts) < 100 or all(str(a.get("created_at", "")) < since for a in artifacts):
+            return counts
         page += 1
 
 
-def _evidence_artifacts(request: Callable, run_id: int) -> int:
-    batch = request("GET", f"/actions/runs/{int(run_id)}/artifacts?per_page=100")
-    return sum(1 for a in batch.get("artifacts") or []
-               if str(a.get("name", "")).startswith(EVIDENCE_PREFIX) and not a.get("expired"))
+def _workflow_file(run: dict) -> str:
+    """``mission-agent.yml`` from a run's ``path`` (``.github/workflows/mission-agent.yml``, maybe ``@ref``)."""
+    return str(run.get("path") or "").split("@", 1)[0].rsplit("/", 1)[-1]
 
 
 def unsealed_runs(request: Callable, store_request: Callable, now: datetime.datetime) -> List[Dict[str, int]]:
-    """``[{"id", "attempt"}]``: each token-started run of a sealed workflow, in the lookback, with an evidence
-    artifact the store holds no seal for. ``request`` reads this repository (Actions read); ``store_request`` the
-    store."""
+    """``[{"id", "attempt"}]``: each ended run of a sealed workflow, with an evidence artifact from the lookback, that
+    holds more evidence artifacts than the store holds seals for. ``request`` reads this repository (Actions read);
+    ``store_request`` the store."""
     since = (now - datetime.timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     sealed = sealed_chains(store_request)
+    files = set(WORKFLOWS.values())
     out = []
-    for workflow_file in WORKFLOWS.values():
-        for run in _token_runs(request, workflow_file, since):
-            attempt = int(run.get("run_attempt") or 1)
-            prefix = run_prefix(run["id"], attempt)
-            have = sum(1 for chain in sealed if chain.startswith(prefix))
-            if _evidence_artifacts(request, run["id"]) > have:
-                out.append({"id": int(run["id"]), "attempt": attempt})
+    for run_id, count in sorted(_evidence_counts(request, since).items()):
+        if count <= sum(1 for chain in sealed if chain.startswith(f"gh-{run_id}-")):
+            continue  # every artifact has its seal: no need to read the run
+        run = request("GET", f"/actions/runs/{run_id}")
+        if run.get("status") != "completed" or _workflow_file(run) not in files:
+            continue  # still running (the next sweep has it), or not a sealed workflow
+        attempt = int(run.get("run_attempt") or 1)
+        prefix = run_prefix(run_id, attempt)
+        if count > sum(1 for chain in sealed if chain.startswith(prefix)):
+            out.append({"id": run_id, "attempt": attempt})
     return out

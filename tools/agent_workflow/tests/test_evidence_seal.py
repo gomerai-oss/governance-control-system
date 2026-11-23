@@ -107,6 +107,49 @@ class SealTests(Base):
         self.assertNotIn(f"runs/{bad}/seal.json", self.fake.files)
         self.assertEqual(sealer.mark(result, None, "example-org/evidence-store"), [])
 
+    def test_v239_a_refused_chain_holds_back_only_its_own_runs_prs(self):  # Amendment 047
+        good = self.job("publish")  # run gh-1-1-, publishes PR 7
+        other = "gh-2-1-publish-" + LANE
+        rec = producer.Recorder(self.chains / f"evidence-publish-2-{LANE}", other)
+        rec.record(actor="mission-dispatch", account_id=None, action="dispatch.publish", result="done", pr=8,
+                   commit="a" * 40, authority_kind="plan", authority_ref="M-DEMO-002 A2 round 1")
+        path = self.chains / f"evidence-publish-2-{LANE}" / verify.RUNS / other / chain.RECORDS
+        path.write_bytes(path.read_bytes() + b"{}\n")  # a record that does not verify
+        result = self.seal()
+        self.assertEqual((result["sealed"], [r["run"] for r in result["refused"]]), ([good], [other]))
+        self.assertEqual(sealer.to_mark(result), [{"pr": 7, "run": good, "chains": [good]}])
+
+        class GH:
+            def __init__(self):
+                self.checks = []
+
+            def request(self, method, path, body=None):
+                return {"head": {"sha": "b" * 40}}
+
+            def create_check_run(self, name, sha, status, conclusion, title, summary):
+                self.checks.append((name, sha, conclusion, summary))
+
+        gh = GH()
+        self.assertEqual(sealer.mark(result, gh, "example-org/evidence-store"), [7])
+        self.assertEqual(len(gh.checks), 1)
+        self.assertIn(good, gh.checks[0][3])
+        self.assertNotIn(other, gh.checks[0][3])
+
+    def test_v239_count_prints_the_prs_to_mark(self):
+        from evidence import __main__ as cli
+        import contextlib
+        import io
+        out = self.tmp / "sealed.json"
+        for result, want in (({"sealed": ["gh-5-1-publish-x"], "refused": [], "prs": [{"pr": 3, "run": "gh-5-1-publish-x"}]}, "prs=1"),
+                             ({"sealed": ["gh-5-1-agent-x"], "refused": [], "prs": []}, "prs=0"),
+                             ({"sealed": [], "refused": [{"run": "gh-5-1-publish-x", "reason": "r"}],
+                               "prs": [{"pr": 3, "run": "gh-5-1-publish-x"}]}, "prs=0")):
+            out.write_text(json.dumps(result))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(cli.main(["count", "--result", str(out)]), 0)
+            self.assertEqual(buf.getvalue().strip(), want)
+
     def test_a_rerun_stores_nothing_new_and_never_replaces(self):
         run = self.job("agent")
         self.seal()
@@ -400,8 +443,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("secrets.EVIDENCE_SEAL_KEY", seal_job)
         self.assertNotIn("secrets.", mark_job)
         self.assertNotIn("environment:", mark_job)
-        self.assertIn("types: [completed]", text)
+        on = text[text.index("\non:\n"):text.index("\npermissions:")]
+        self.assertIn("schedule:", on)
+        self.assertNotIn("workflow_run", on, "the sweep is the only way in (Amendment 047)")
         self.assertIn("permissions: {}", text)
+
+    def test_v240_the_mark_job_runs_only_when_a_sealed_run_published_a_pr(self):  # Amendment 047
+        text = self.text()
+        seal_job, mark_job = text[text.index("\n  seal:\n"):text.index("\n  mark:\n")], text[text.index("\n  mark:\n"):]
+        self.assertIn("prs: ${{ steps.count.outputs.prs }}", seal_job)
+        self.assertIn("python3 -B -m evidence count --result", seal_job)
+        head = mark_job[:mark_job.index("\n    steps:")]
+        self.assertIn("needs.seal.outputs.prs != '0'", head)
+        self.assertIn("always()", head, "a refused chain fails the seal job; the other runs' PRs are still marked")
+        upload = seal_job[seal_job.index("Hand the result to the mark job"):]
+        self.assertIn("steps.count.outputs.prs != '0'", upload[:upload.index("uses:")])
 
 
 if __name__ == "__main__":
@@ -409,22 +465,27 @@ if __name__ == "__main__":
 
 
 class SweepTests(Base):
-    """Amendment 022, vectors 122 and 123: the router starts Mission Agent runs with GITHUB_TOKEN, and GitHub sends no
-    workflow_run for those, so the scheduled sweep finds and seals them."""
+    """Amendments 022 and 047, vectors 122, 123 and 238: the scheduled sweep is the only way in. It lists the
+    repository's evidence artifacts and seals every ended run of a sealed workflow whose evidence is not all sealed,
+    however the run was started."""
 
     NOW = __import__("datetime").datetime(2026, 11, 10, 5, 0, tzinfo=__import__("datetime").timezone.utc)
 
     class Actions:
+        """``/actions/artifacts`` (newest first, 100 a page) and ``/actions/runs/<id>``."""
+
         def __init__(self, runs, artifacts):
-            self.runs, self.artifacts, self.paths = runs, artifacts, []
+            self.runs, self.paths = {r["id"]: r for r in runs}, []
+            self.artifacts = artifacts  # [(run id, name, created_at)], newest first
 
         def __call__(self, method, path, body=None):
             self.paths.append(path)
-            if path.startswith("/actions/workflows/"):
-                name = path.split("/")[3]
-                return {"workflow_runs": [r for r in self.runs if r["_file"] == name]}
-            run = int(path.split("/")[3])
-            return {"artifacts": [{"name": n, "expired": False} for n in self.artifacts.get(run, [])]}
+            if path.startswith("/actions/artifacts?"):
+                page = int(path.rsplit("page=", 1)[1])
+                rows = self.artifacts[(page - 1) * 100:page * 100]
+                return {"artifacts": [{"name": n, "expired": False, "created_at": t, "workflow_run": {"id": r}}
+                                      for r, n, t in rows]}
+            return self.runs[int(path.split("/")[3])]
 
     class Trees:
         def __init__(self, chains, truncated=False):
@@ -441,21 +502,46 @@ class SweepTests(Base):
                     out.append({"path": f"{chain_name}/seal.json", "type": "blob"})
             return {"tree": out, "truncated": self.truncated}
 
-    def run_(self, rid, actor="github-actions[bot]", f="mission-agent.yml", attempt=1):
-        return {"id": rid, "run_attempt": attempt, "_file": f, "triggering_actor": {"login": actor}}
+    def run_(self, rid, f="mission-agent.yml", attempt=1, status="completed"):
+        return {"id": rid, "run_attempt": attempt, "path": f".github/workflows/{f}", "status": status}
 
-    def test_v122_a_token_started_run_with_unsealed_evidence_is_named(self):
+    T = "2026-11-10T04:00:00Z"
+
+    def test_v122_a_run_with_unsealed_evidence_is_named(self):
         from evidence import sweep
-        actions = self.Actions([self.run_(11), self.run_(12, actor="example-user"), self.run_(13)],
-                               {11: ["evidence-agent-x", "evidence-publish-x", "change-x"], 12: ["evidence-agent-y"],
-                                13: ["evidence-agent-z"]})
+        actions = self.Actions([self.run_(11), self.run_(13)],
+                               [(11, "evidence-agent-x", self.T), (11, "evidence-publish-x", self.T),
+                                (11, "change-x", self.T), (13, "evidence-agent-z", self.T)])
         store_ = self.Trees({"gh-11-1-agent-x": True, "gh-11-1-publish-x": False, "gh-13-1-agent-z": True})
         self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW), [{"id": 11, "attempt": 1}])
-        listed = [p for p in actions.paths if p.startswith("/actions/workflows/")]
-        self.assertEqual(sorted(p.split("/")[3] for p in listed), sorted(sweep.WORKFLOWS.values()))
-        self.assertTrue(all("event=workflow_dispatch" in p and "created=%3E%3D2026-11-08T05:00:00Z" in p
-                            for p in listed))
-        self.assertNotIn("/actions/runs/12/artifacts?per_page=100", actions.paths, "a user-started run is never swept")
+        self.assertNotIn("/actions/runs/13", actions.paths, "a run whose evidence is all sealed is not read")
+
+    def test_v238_any_ended_run_of_a_sealed_workflow_however_started(self):
+        from evidence import sweep
+        old = "2026-11-08T04:59:59Z"  # before the 2-day lookback
+        actions = self.Actions(
+            [self.run_(21, "mission-router.yml"), self.run_(22, "credentials-check.yml", attempt=2),
+             self.run_(23, status="in_progress"), self.run_(24, "policy-ci.yml"), self.run_(25)],
+            [(21, "evidence-router", self.T), (22, "evidence-credentials", self.T), (22, "evidence-credentials", self.T),
+             (23, "evidence-agent-a", self.T), (24, "evidence-other", self.T), (25, "evidence-agent-b", old)])
+        store_ = self.Trees({"gh-22-1-credentials": True})  # a re-run keeps attempt 1's artifact; attempt 2's is unsealed
+        self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW),
+                         [{"id": 21, "attempt": 1}, {"id": 22, "attempt": 2}])
+        self.assertNotIn("/actions/runs/25", actions.paths, "an artifact older than the lookback is not counted")
+        both = self.Trees({"gh-22-1-credentials": True, "gh-22-2-credentials": True})
+        self.assertNotIn({"id": 22, "attempt": 2}, sweep.unsealed_runs(actions, both, self.NOW),
+                         "once both attempts are sealed the re-run is not named again")
+
+    def test_v238_paging_stops_after_a_page_wholly_before_the_lookback(self):
+        from evidence import sweep
+        old = "2026-11-01T00:00:00Z"
+        rows = [(30, "sealed", self.T)] * 99 + [(31, "evidence-agent-c", old)]  # page 1: one old row, not all
+        rows += [(32, "evidence-agent-d", self.T)] + [(33, "x", old)] * 99  # page 2: out of order, one new row
+        rows += [(34, "evidence-agent-e", old)] * 100 + [(35, "evidence-agent-f", self.T)]  # page 3: all old
+        actions = self.Actions([self.run_(32), self.run_(35)], rows)
+        self.assertEqual(sweep.unsealed_runs(actions, self.Trees({}), self.NOW), [{"id": 32, "attempt": 1}])
+        pages = [p for p in actions.paths if p.startswith("/actions/artifacts?")]
+        self.assertEqual(len(pages), 3, "page 3 is wholly before the lookback, so page 4 is never asked for")
 
     def test_a_truncated_store_listing_sweeps_nothing(self):
         from evidence import sweep
@@ -484,20 +570,17 @@ class SweepTests(Base):
         with self.assertRaisesRegex(EvidenceError, "never replaced"):
             sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request), "2026-11-10T05:00:00Z")
 
-    def test_the_sweep_covers_the_workflows_the_seal_workflow_waits_for(self):
-        import re
+    def test_the_sweep_covers_the_sealed_workflows(self):
         from evidence import sweep
         def workflow(name):  # live here; under packaging/workflows in a built release tree
             live = ROOT / ".github" / "workflows" / name
             return (live if live.is_file() else ROOT / "packaging" / "workflows" / name).read_text(encoding="utf-8")
         text = workflow("evidence-seal.yml")
-        listed = re.search(r"workflows: \[([^\]]*)\]", text).group(1)
-        self.assertEqual(sorted(w.strip() for w in listed.split(",")), sorted(sweep.WORKFLOWS))
         self.assertIn("schedule:", text)
         self.assertIn("evidence sweep --repo", text)
-        self.assertIn("$RESUME", text)
+        self.assertIn("--resume", text[text.index("python3 -B -m evidence seal"):])
         for name, file_ in sweep.WORKFLOWS.items():
             wf = workflow(file_)
             with self.subTest(file_):
                 self.assertIn(f"\nname: {name}\n", "\n" + wf)
-                self.assertNotIn("repository_dispatch", wf, "the sweep lists workflow_dispatch runs only")
+                self.assertIn(name, text, "the seal workflow's header names every sealed workflow")

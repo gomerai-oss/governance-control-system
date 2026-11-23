@@ -1147,7 +1147,7 @@ class MissionRouter:
                                  mission=ref.mission_id, round_n=ref.round, pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this PR, but GitHub will not merge it yet: {exc.message}. "
                                    "The router retries every sweep (about 5 minutes).")
                 return False
@@ -1346,7 +1346,7 @@ class MissionRouter:
                                  "router.merge", mission=mid, round_n=ref.round, pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this challenge, but GitHub will not merge it yet: "
                                    f"{exc.message}. The router retries every sweep (about 5 minutes).", mission=mid)
                 return False
@@ -1591,7 +1591,11 @@ class MissionRouter:
         try:
             return fn()
         except GitHubError as exc:
-            self._record(action, f"{what}: GitHub refused it ({exc.status})", result="failed", **subject)
+            # GitHub's own reason, in the log and the record (MISSION-ROUTER-001 Amendment 022): "405" alone does not say which check
+            # or rule refused the write. The record's reason passes the quarantine and is cut at 300 characters.
+            refused = f"GitHub refused it ({exc.status}): {_one_line(exc.message)}"
+            self.log(f"    {refused}")
+            self._record(action, f"{what}: {refused}", result="failed", **subject)
             raise
 
     def _record_decision(self, number: int, head_sha: str, base: str, decision, mission: Optional[str] = None,
@@ -1731,7 +1735,7 @@ class MissionRouter:
                                  "router.landing", pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this landing PR, but GitHub will not merge it yet: {exc.message}. "
                                    "The router retries every sweep.")
                 return False
@@ -1787,7 +1791,7 @@ class MissionRouter:
                                  "router.merge", pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this capture, but GitHub will not merge it yet: {exc.message}. "
                                    "The router retries every sweep.")
                 return False
@@ -1921,6 +1925,16 @@ class MissionRouter:
                                                                self._open_points_note(state)),
                                   before=commands, mission=state.mission_id):
                 self._start_agent(state, manifest)
+
+
+def _one_line(text: str, limit: int = 240) -> str:
+    """GitHub's error message on one line, cut to ``limit`` characters."""
+    return " ".join(str(text or "").split())[:limit]
+
+
+def _waiting_key(head_sha: str, message: str) -> str:
+    """The "GitHub will not merge it yet" comment is posted once per head and reason, so a new reason is said."""
+    return f"waiting:{head_sha[:12]}:{evidence_producer.text_digest(_one_line(message))[:12]}"
 
 
 def _target(state: MissionState) -> Optional[str]:

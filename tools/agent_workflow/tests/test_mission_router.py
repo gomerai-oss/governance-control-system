@@ -884,7 +884,8 @@ class FakeGitHub:
         if p["base_ref"] in self.protected:  # branch protection: the required check must have passed on this commit
             check = self.latest_check(sha)
             if self.merge_blocked or not check or check.get("conclusion") != "success":
-                raise GitHubError(405, "Required status check \"route-handoff-block\" is expected", "merge")
+                raise GitHubError(405, getattr(self, "merge_reason", "Required status check \"route-handoff-block\" is expected"),
+                                  "merge")
         if p["base_ref"] in self.review_required and not any(r["state"] == "APPROVED" and r["commit_id"] == sha
                                                             for r in self.reviews.get(n, [])):
             raise GitHubError(405, "At least 1 approving review is required", "merge")
@@ -1253,6 +1254,27 @@ class RouterLoopTests(unittest.TestCase):
         n = self.a3_round(1, "PASS")
         self.assertEqual(self.gh.prs[n]["state"], "open")
         self.assertTrue(any("will not merge it yet" in c for c in self.bot_comments(n)))
+        self.gh.merge_blocked = False
+        self.sweep()
+        self.assertEqual(self.gh.prs[n]["state"], "closed")
+
+    def test_v140_a_refused_merge_says_githubs_reason_and_a_new_reason_is_said_again(self):  # Amendment 022
+        self.start_mission()
+        self.a2_round(1)
+        self.gh.merge_blocked = True
+        n = self.a3_round(1, "PASS")
+        self.sweep()
+        first = [c for c in self.bot_comments(n) if "will not merge it yet" in c]
+        self.assertEqual(len(first), 1, "one comment per head and reason, however many sweeps")
+        self.assertTrue(any("GitHub refused it (405): Required status check" in line for line in self.logs))
+        self.gh.merge_reason = "Changes must be made through a pull request.\n  (second line)"
+        self.sweep()
+        self.sweep()
+        said = [c for c in self.bot_comments(n) if "will not merge it yet" in c]
+        self.assertEqual(len(said), 2)
+        self.assertIn("Changes must be made through a pull request.", said[-1])
+        self.assertTrue(any("GitHub refused it (405): Changes must be made through a pull request. (second line)" in line
+                            for line in self.logs), "the message is put on one line")
         self.gh.merge_blocked = False
         self.sweep()
         self.assertEqual(self.gh.prs[n]["state"], "closed")

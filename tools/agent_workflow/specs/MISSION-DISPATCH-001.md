@@ -374,6 +374,30 @@ the job's own token.
 
 Vector 237.
 
+**Amendment 047 (2026-11-23, HITL direction: Actions minutes, ring 6 seal only):** the seal workflow runs on its
+schedule only.
+- **What was found:** on 2026-11-22 the seal workflow ran 406 and 448 times in the two repositories that run the
+  pipeline, two jobs each, about 70% of each repository's Actions minutes (each job is billed at least a minute).
+  It started on `workflow_run` after every Mission Agent, Mission Router, Credentials Check and Evidence Verify run,
+  and most of those were router sweeps and dispatcher plans that kept no evidence. The runs that matter most, the A2 and A3 runs
+  the router starts with its `GITHUB_TOKEN`, never sent `workflow_run`; the schedule (Amendment 022) already sealed
+  them.
+- **The change:** `evidence-seal.yml` no longer listens to `workflow_run`. The sweep is the only way in, every 10
+  minutes, for every run however it was started. `evidence sweep` lists this repository's unexpired `evidence-*`
+  artifacts from the last 2 days (`/actions/artifacts`, newest first; paging stops after a whole page older than
+  that, since the order is not strict) and counts them per run. A run with no more artifacts than seals in the store
+  is not read. Any other is read once: it is named when it has ended and is a run of one of the four sealed workflows.
+  A run still going is left for the next sweep.
+- **The mark job runs only when there is a PR to mark.** The seal job outputs `prs`, the count `evidence count` gives
+  from the seal result, and the mark job and the hand-over run only when it is not 0. A sweep seals several runs at
+  once, so a refused chain now holds back only its own run's PRs (`sealer.to_mark`): the seal step still fails, the
+  result is still handed over, and the other runs' PRs are marked. With no result (the step stopped before writing
+  one, for example when the WORM copy is refused), nothing is marked, as before.
+- **What it costs:** a run that ended waits for the next sweep, up to 10 minutes, as the router's A2 and A3 runs
+  already did. Nothing else changes: same environment, same credentials, same store, same checks.
+
+Vectors 122 (restated), 238, 239 and 240.
+
 Vector 194.
 
 ## 1. Purpose
@@ -1533,28 +1557,30 @@ on" below).
      (limit 32).
 
    **Clarified in part 4 (the seal job, the evidence key, the evidence store and item 6):**
-   - **The seal workflow.** `evidence-seal.yml` runs when a Mission Agent, Mission Router or Credentials Check run
-     ends. Its `seal` job runs in the `evidence-seal` environment, deployable from the default branch only, with
+   - **The seal workflow.** `evidence-seal.yml` runs every 10 minutes and seals the Mission Agent, Mission Router,
+     Credentials Check and Evidence Verify runs that have ended since (Amendment 047; until then it also ran when
+     each such run ended). Its `seal` job runs in the `evidence-seal` environment, deployable from the default branch only, with
      three credentials: the evidence key (`EVIDENCE_SEAL_KEY`), the evidence App's key (`EVIDENCE_APP_PRIVATE_KEY`)
-     and the App's id. Its own token can only read the ended run's artifacts.
-     - It fetches the run's `evidence-*` artifacts and checks each chain (`verify.verify_run`).
+     and the App's id. Its own token can only read this repository's runs and artifacts.
+     - It fetches each swept run's `evidence-*` artifacts and checks each chain (`verify.verify_run`).
      - It signs each chain's head, and adds the records and the seal to the store
        (`runs/<run>/records.jsonl`, `runs/<run>/seal.json`).
      - A chain that does not verify is neither sealed nor stored, and the job fails. A seal's `artifacts` is empty,
        because the records already hold the artifacts' digests.
      - The key must be a pinned one (`key.json`): a seal no verifier would accept is never made.
      - Nothing runs until `config.json` names the store (`evidence_store`, `owner/name`).
-   - **The sweep (Amendment 022).** GitHub sends no `workflow_run` for a run started with `GITHUB_TOKEN`, and the
-     router starts every Mission Agent run that way. So the seal job also runs on a schedule. `evidence sweep` lists
-     the ended `workflow_dispatch` runs of the four sealed workflows. It keeps those whose triggering actor is
-     `github-actions[bot]`, from the last 2 days, that hold more unexpired `evidence-*` artifacts than the store
-     holds seals for under `gh-<run id>-<attempt>-`. The job downloads those runs' `evidence-*` artifacts and runs
-     `seal --resume`. A chain whose seal is already stored is not sealed again: its records must equal the stored
-     ones, and it counts as sealed for the mark job, with no second seal and no second landing attestation. The
-     store's `runs/` tree is listed in one call. A truncated listing sweeps nothing.
-   - **The mark job.** It holds no secret. Its token can set check runs and read PRs. When every chain of the run
-     was sealed, it sets the `evidence-sealed` check on the head of each PR the run published (the run's
-     `dispatch.publish` records).
+   - **The sweep (Amendments 022 and 047).** It is the only way in. `evidence sweep` lists this repository's
+     unexpired `evidence-*` artifacts from the last 2 days and counts them per run. It names each ended run of the
+     four sealed workflows that holds more of them than the store holds seals for under `gh-<run id>-`, at the run's
+     latest attempt. A run whose artifacts all have seals is not read; a run still going is left for the next sweep.
+     The job downloads those runs' `evidence-*` artifacts and runs `seal --resume`. A chain whose seal is already
+     stored is not sealed again: its records must equal the stored ones, and it counts as sealed for the mark job,
+     with no second seal and no second landing attestation. The store's `runs/` tree is listed in one call. A
+     truncated listing sweeps nothing.
+   - **The mark job.** It holds no secret. Its token can set check runs and read PRs. For each run every chain of
+     which was sealed, it sets the `evidence-sealed` check on the head of each PR the run published (the run's
+     `dispatch.publish` records). A refused chain holds back only its own run's PRs. It runs only when there is a PR
+     to mark (Amendment 047).
    - **Item 6 is that check.** Under `"evidence": "enforce"`, the router merges an A2 or A3 stage PR only when
      `evidence-sealed` passed on its head, set by `github-actions` as its own check is. Otherwise it holds the PR and
      says why (router vector 118). So the router needs no credential for the store. Two kinds of PR are not held:
@@ -2750,7 +2776,7 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 119 | Observed challenge; any of the router's vectors 120 to 126 | Reported, recorded; the approval counts as before |
 | 120 | `"challenge"` set to an unknown value | The job fails |
 | 121 | Many rounds | No cap: AR keeps answering until HITL approves or cancels |
-| 122 | A sealed workflow's run started with `GITHUB_TOKEN` (no `workflow_run`) ends | The next sweep seals it and marks its PRs |
+| 122 | A sealed workflow's run ends, however it was started (Amendment 047) | The next sweep seals it and marks its PRs |
 | 123 | A sweep stopped after sealing some of a run's chains | The next sweep seals the rest; no chain is sealed twice |
 | 124 | An A3 job for a mission whose approved plan ends on a `CHALLENGE` round | `AR-OPEN-POINTS.md` holds its points, quarantined, with A1's response if any; A3's task names the point ids, says they are advisory, and asks for one `AR <id>:` line each |
 | 125 | An A3 job whose approved plan ends on `NO_CHALLENGE`, or has no round | No open-points file and no such section in the task |
@@ -2866,3 +2892,6 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 235 | Each seat bound | Its session names exactly the app tools the binding admitted, and a seat with none has no `app_tools` field (Amendment 044) |
 | 236 | A record's commit on no ref of the checker's clone but held by its origin; one the origin lacks; `verify` by hand; an id that is not 40 hex | The checker fetches it by id and verifies it; the other is refused; `verify` by hand does not fetch; only a full 40-hex id is ever fetched (Amendment 045) |
 | 237 | The checker workflow's fetch of PR heads and its checker step; a fetch by id that fails | Each passes the job's `github.token` to git in its environment as an `http.extraheader`, masked; no token is in a URL; the clone keeps `persist-credentials: false`; the failed fetch prints git's reason on stderr and the commit is still refused (Amendment 046) |
+| 238 | Sweeps over: a router run and a re-run Credentials Check run with unsealed evidence; a run still going; a run of another workflow; an artifact older than 2 days; a listing out of order across pages | The first two are named, the re-run at its latest attempt; the others are not; a run whose artifacts all have seals is not read; paging stops after a whole page older than the lookback (Amendment 047) |
+| 239 | A sweep seals two runs and refuses a chain of one | The other run's PRs are marked and the refused run's are not; `evidence count` prints `prs=<n>` for the PRs `mark` would mark (Amendment 047) |
+| 240 | The seal workflow | It has no `workflow_run` trigger; the mark job and the hand-over run only when the seal job's `prs` is not 0, even after a refused chain failed the seal job (Amendment 047) |

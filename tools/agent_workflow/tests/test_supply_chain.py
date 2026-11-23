@@ -59,8 +59,10 @@ class TableTests(unittest.TestCase):
         self.assertEqual(found, [])
         used = {ref.split("@")[0] for p in WORKFLOWS.glob("*.y*ml") for _, ref in sc._uses(p.read_text())}
         self.assertLessEqual(used, set(TABLE["actions"]))
-        if (REPO / "products" / "gcs").is_dir():  # governance, the table's source: every listed action is used.
-            self.assertEqual(used, set(TABLE["actions"]))  # a synced copy's own workflows may use a subset.
+        # Governance, the table's source, is the tree that holds the release manifest: every listed action is used
+        # there. A synced copy's own workflows may use a subset, and may hold products/gcs/ pages built by missions.
+        if any(AW.glob("*/manifest-gcs.json")):
+            self.assertEqual(used, set(TABLE["actions"]))
 
     def test_the_runtime_rows_match_the_workflow_and_carry_provenance(self):
         text = (WORKFLOWS / "mission-agent.yml").read_text(encoding="utf-8")

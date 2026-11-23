@@ -114,6 +114,17 @@ Amendment 037):** under `"security_scan": "enforce"`, a landing waits for the se
 
 `"observe"` only logs what it would hold, and `"off"` (or the key absent) reads nothing. An unknown value stops the
 router (vectors 133-139).
+**Amendment 022 (2026-11-23, HITL direction, after M-GCS-DEMO-PROOF-002's landing PR was held):** when GitHub
+refuses a write, the router says GitHub's reason.
+- **What was found:** the router recorded a refused merge as `GitHub refused it (405)`, and it said why on the PR only
+  once per head. On that mission's landing PR the first reason (a failing required check) was fixed, GitHub kept
+  refusing, and neither the log nor the record said what for; the comment on the PR still gave the first reason.
+- **The change:** a refused write logs `GitHub refused it (<status>): <GitHub's message>` and records the same in its
+  `failed` record, the message on one line, cut to 240 characters (the record's reason passes the quarantine and is
+  cut at 300, as every reason is). The "GitHub will not merge it yet" comment is posted once per head and reason, so a
+  new reason is said on the PR. Nothing the router decides changes.
+
+Vector 140.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -828,3 +839,4 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 137 | A stack's landing PR under enforce with no scan, then green; red, then HITL's accept-scan on the stack's issue | Held, then landed; the comment names the stack's issue, and the accept lands it and is recorded |
 | 138 | HITL's `/mission send-back` on the stack's issue once every mission passed; while a mission still runs | Stack blocked, "Stack sent back", landing not merged, nothing on `main`, command recorded; not blocked |
 | 139 | `config.json` `"security_scan"`: `"enforce"`; an unknown value | Read; the router stops |
+| 140 | GitHub refuses a merge, then refuses it again for another reason | The log and the `failed` record carry GitHub's message; the PR gets one "will not merge it yet" comment per reason (Amendment 022) |
