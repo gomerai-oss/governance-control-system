@@ -1258,6 +1258,32 @@ class RouterLoopTests(unittest.TestCase):
         self.sweep()
         self.assertEqual(self.gh.prs[n]["state"], "closed")
 
+    PATH_POLICY = ("import sys\n"
+                   "bad = [l.strip() for l in sys.stdin if l.startswith('products/')]\n"
+                   "print('\\n'.join(bad)); sys.exit(1 if bad else 0)\n")
+
+    def test_v141_a_plan_the_repositorys_path_policy_refuses_is_refused_before_approval(self):  # Amendment 023
+        self.router = MissionRouter(self.gh, {**config(), "landing_path_check": [sys.executable, "-c", self.PATH_POLICY]},
+                                    CLASSIFY, log=self.logs.append)
+        branch = f"mission/{MID}/a1"
+        doc = manifest_doc(scope=("products/gcs/**", "tools/demo/app.py"), deliverables=["products/gcs/index.md"])
+        self.gh.push(branch, {f"missions/{MID}/mission.json": doc, f"missions/{MID}/PLAN.md": "plan"}, base="main")
+        n = self.gh.open_pr(branch, "main", A1B)
+        self.sweep()
+        said = "\n".join(self.bot_comments(n))
+        self.assertIn("products/gcs/index.md is not allowed in this repository by its path policy", said)
+        self.assertNotIn("tools/demo/app.py is not allowed", said, "a path the policy allows is not named")
+        self.assertNotIn("/mission approve", said, "a plan that could not land is not offered for approval")
+        self.assertEqual(self.gh.prs[n]["state"], "open")
+
+    def test_v141_a_plan_the_path_policy_allows_starts_as_before(self):
+        self.router = MissionRouter(self.gh, {**config(), "landing_path_check": [sys.executable, "-c", self.PATH_POLICY]},
+                                    CLASSIFY, log=self.logs.append)
+        self.start_mission(deliverables=["tools/demo/app.py"])
+        self.a2_round(1)
+        n = self.a3_round(1, "PASS")
+        self.assertEqual(self.gh.prs[n]["state"], "closed")
+
     def test_v140_a_refused_merge_says_githubs_reason_and_a_new_reason_is_said_again(self):  # Amendment 022
         self.start_mission()
         self.a2_round(1)
@@ -2688,3 +2714,53 @@ class QuarantineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LandingPathCheckTests(unittest.TestCase):
+    """MISSION-ROUTER-001 Amendment 023 and MISSION-DISPATCH-001 Amendment 048: the config keys and the path check."""
+
+    def test_v141_a_check_that_cannot_answer_refuses_and_none_named_changes_nothing(self):
+        from mission_router import landing
+        calls = []
+        self.assertEqual(landing.path_findings((), ["a.md"], run=lambda *a, **k: calls.append(a)), [])
+        self.assertEqual(calls, [], "no command named: nothing runs")
+        missing = landing.path_findings(["/nonexistent/policy-check"], ["a.md"])
+        self.assertEqual(len(missing), 1)
+        self.assertIn("could not run, so the plan's paths are not known to be allowed", missing[0])
+        broken = landing.path_findings([sys.executable, "-c", "import sys; sys.exit(2)"], ["a.md"])
+        self.assertIn("exited 2 without naming a path it refuses", broken[0])
+        quiet = landing.path_findings([sys.executable, "-c", "import sys; print('other.md'); sys.exit(1)"], ["a.md"])
+        self.assertIn("exited 1 without naming a path it refuses", quiet[0], "only the plan's own paths count")
+
+    def test_v141_the_check_gets_paths_on_stdin_and_no_token(self):
+        from mission_router import landing
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(kw)
+            return type("Done", (), {"returncode": 0, "stdout": ""})()
+
+        import os
+        os.environ["GITHUB_TOKEN"] = "ghs_" + "x" * 36
+        try:
+            self.assertEqual(landing.path_findings(["check"], ["b.md", "a.md", "a.md"], run=run), [])
+        finally:
+            del os.environ["GITHUB_TOKEN"]
+        self.assertEqual(seen["input"], "a.md\nb.md\n")
+        self.assertEqual(set(seen["env"]), {"PATH", "LANG"})
+
+    def test_v141_v245_an_unusable_value_stops_the_router(self):
+        import tempfile
+        from pathlib import Path
+        for key, value in (("landing_path_check", "python3 check.py"), ("landing_path_check", []),
+                           ("landing_checks", ["ok", ""]), ("landing_checks", ["x"] * 11)):
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.json"
+                path.write_text(json.dumps({**config(), key: value}))
+                with self.assertRaisesRegex(ValueError, key):
+                    load_config(path)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({**config(), "landing_checks": ["python3 -m unittest"],
+                                        "landing_path_check": ["python3", "check.py", "--check-paths"]}))
+            self.assertEqual(load_config(path)["landing_checks"], ["python3 -m unittest"])

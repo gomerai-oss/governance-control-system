@@ -13,6 +13,9 @@ name: Mission Agent
 # - checks (A3 only): its own VM with no credential at all. Runs the plan's
 #   HITL-approved checks on the commit A3 reviews as a separate unprivileged
 #   account, killed before anything is uploaded; the results are evidence for A3.
+#   It also runs the landing branch's own checks (config.json landing_checks) on
+#   that commit merged onto the landing branch; an A3 PASS is published only when
+#   each one exited 0 (MISSION-DISPATCH-001 Amendment 048).
 # - agent: its own VM. The runtime (pinned by SHA-256) gets only its model login
 #   (environment mission-runtime); the read-only token is used in earlier steps and
 #   is never in the agent's process tree. It can only edit files in the checkout.
@@ -165,7 +168,7 @@ jobs:
 
       - name: Is this lane still due?
         id: due
-        if: matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
+        if: matrix.job.role == 'A3'  # the plan's checks, and the landing branch's own (Amendment 048)
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
@@ -176,7 +179,14 @@ jobs:
         with:
           ref: ${{ matrix.job.base_sha }}
           path: review
+          fetch-depth: 0  # the landing branch's head, for the landing tree (Amendment 048)
           persist-credentials: false
+
+      # Amendment 048: the commit under review merged onto its landing branch, as the landing PR's checks will see
+      # it. Only git runs (hooks off); nothing is built when config.json names no landing_checks.
+      - name: Merge the commit under review onto its landing branch (landing checks)
+        if: steps.due.outputs.due == 'true'
+        run: python3 -m mission_dispatch landing-tree --review review --out landing --info "$RUNNER_TEMP/landing.json"
 
       # The code under review must not reach the runner's processes: their environment
       # holds the token Actions uses for artifacts, which could plant a forged change.
@@ -186,7 +196,13 @@ jobs:
           sudo useradd --create-home --shell /bin/bash mission-checks
           sudo cp -a review /home/mission-checks/review
           sudo chown -R mission-checks:mission-checks /home/mission-checks/review
-          python3 -m mission_dispatch checks --root /home/mission-checks/review --out "$RUNNER_TEMP/checks" --run-as mission-checks
+          LANDING=()
+          if [ -d landing ]; then
+            sudo cp -a landing /home/mission-checks/landing
+            sudo chown -R mission-checks:mission-checks /home/mission-checks/landing
+            LANDING=(--landing-root /home/mission-checks/landing --landing-info "$RUNNER_TEMP/landing.json")
+          fi
+          python3 -m mission_dispatch checks --root /home/mission-checks/review --out "$RUNNER_TEMP/checks" --run-as mission-checks "${LANDING[@]}"
           sudo pkill -KILL -u mission-checks || true
           if pgrep -u mission-checks >/dev/null; then echo "::error::check processes survived"; exit 1; fi
 
@@ -272,7 +288,7 @@ jobs:
           fi
 
       - name: Fetch the checks results
-        if: steps.due.outputs.due == 'true' && matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
+        if: steps.due.outputs.due == 'true' && matrix.job.role == 'A3'
         continue-on-error: true  # without them A3 is told every check is "not run"
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -476,7 +492,7 @@ jobs:
           path: ${{ runner.temp }}/artifact
 
       - name: Fetch the checks results (an A3 PASS needs every check to have exited 0)
-        if: steps.fetch.outcome == 'success' && matrix.job.role == 'A3' && toJSON(matrix.job.checks) != '[]'
+        if: steps.fetch.outcome == 'success' && matrix.job.role == 'A3'
         continue-on-error: true  # without them no check is recorded as run, and a PASS is refused under enforce
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

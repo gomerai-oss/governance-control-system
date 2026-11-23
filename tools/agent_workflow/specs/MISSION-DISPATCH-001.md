@@ -398,6 +398,26 @@ schedule only.
 
 Vectors 122 (restated), 238, 239 and 240.
 
+**Amendment 048 (2026-11-23, HITL direction, with MISSION-ROUTER-001 Amendment 023):** an A3 PASS needs the landing
+branch's own checks to pass.
+- **What was found:** M-GCS-DEMO-PROOF-002's build passed every plan check and A3, and its landing PR then failed the
+  landing repository's own test suite, in a test outside the mission's build_scope that the mission's files tripped.
+  Only a hand fix and a cancel got the pipeline out.
+- **The change:** `config.json` may name `landing_checks`, the shell commands the landing branch requires (1 to 10).
+  For each A3 job, the checks job now always runs (not only when the plan has checks). Its checkout of the commit under
+  review has the whole history, and `mission_dispatch landing-tree` copies it and merges the landing branch's head
+  into the copy, as the landing PR's own checks will see it: git only, with hooks off, and a conflict recorded, never
+  resolved. The landing checks run there exactly as the plan's checks do: as the unprivileged checks account, with no
+  credential, each exit code recorded by the dispatcher (`checks.json` `"landing"`), each output quarantined.
+- **The gate:** the publish job refuses an A3 PASS unless every landing check ran once on the merged tree and exited 0
+  (`landing_failures`), beside the plan checks' gate (§3j item 3), under `"quarantine": "enforce"`; under observe it
+  logs what it would refuse. A FAIL or BLOCKED is published as before, with the record. A3 is told the rule: FAIL when
+  A2 can fix the failure within build_scope, BLOCKED, naming the check, when the fix is outside it, so HITL can fix
+  the repository and comment `/mission retry`. The A3 PR body shows the landing checks' record.
+- **Absent, nothing changes.** An unusable value stops the router and the dispatcher.
+
+Vectors 241 to 245.
+
 Vector 194.
 
 ## 1. Purpose
@@ -2895,3 +2915,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 238 | Sweeps over: a router run and a re-run Credentials Check run with unsealed evidence; a run still going; a run of another workflow; an artifact older than 2 days; a listing out of order across pages | The first two are named, the re-run at its latest attempt; the others are not; a run whose artifacts all have seals is not read; paging stops after a whole page older than the lookback (Amendment 047) |
 | 239 | A sweep seals two runs and refuses a chain of one | The other run's PRs are marked and the refused run's are not; `evidence count` prints `prs=<n>` for the PRs `mark` would mark (Amendment 047) |
 | 240 | The seal workflow | It has no `workflow_run` trigger; the mark job and the hand-over run only when the seal job's `prs` is not 0, even after a refused chain failed the seal job (Amendment 047) |
+| 241 | The landing tree: the commit under review and a landing branch moved on since; a conflict; a landing branch the checkout lacks | Merged into a copy, the checkout left as it was; recorded as not merged with git's reason and the merge aborted; recorded as not in the checkout (Amendment 048) |
+| 242 | An A3 PASS with `landing_checks` named: one failed; all exited 0 | Refused, nothing pushed; published, the PR body and `CHECKS.md` showing the landing record (Amendment 048) |
+| 243 | A build that does not merge onto the landing branch; landing checks named but none recorded; none named; A3's task | A PASS is refused and a FAIL published with the record; refused; nothing changes; A3 is told the FAIL or BLOCKED rule only when landing checks are named (Amendment 048) |
+| 244 | The checks job | Runs for every A3, its checkout with the whole history, builds the landing tree and hands it to the checks account (Amendment 048) |
+| 245 | `landing_checks` or `landing_path_check` not a list of 1 to 10 (20) non-empty strings | The router stops (Amendments 048 and router 023) |

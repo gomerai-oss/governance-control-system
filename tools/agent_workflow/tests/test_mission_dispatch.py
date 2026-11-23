@@ -943,6 +943,105 @@ class FlowTests(unittest.TestCase):
         self.assertIn("quarantine (observe): would refuse: an A3 PASS needs every plan check to have passed: "
                       "check 1 (`exit 2`) exited 2", logs)
 
+    # ---- MISSION-DISPATCH-001 Amendment 048: the landing branch's own checks
+    IDENT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+
+    def push_to_main(self, path, text):
+        other = self.root / f"other-{len(list(self.root.glob('other-*')))}"
+        git("clone", "--quiet", self.remote.url, str(other), cwd=self.root)
+        (other / path).parent.mkdir(parents=True, exist_ok=True)
+        (other / path).write_text(text)
+        git("add", "-A", cwd=other)
+        git("commit", "--quiet", "-m", f"main: {path}", cwd=other, env=self.IDENT)
+        git("push", "--quiet", "origin", "HEAD:main", cwd=other)
+        return git("rev-parse", "HEAD", cwd=other)
+
+    def review_checkout(self):
+        tree = self.root / "review"
+        git("clone", "--quiet", self.remote.url, str(tree), cwd=self.root)
+        return tree
+
+    def test_v241_the_landing_tree_is_the_review_merged_onto_the_landing_branch(self):
+        tree = self.review_checkout()
+        head = self.push_to_main("docs/landed.md", "on main since\n")
+        git("fetch", "--quiet", "origin", cwd=tree)
+        info = dispatch.landing_tree(tree, self.root / "landing", "main", self.env)
+        self.assertEqual(info, {"branch": "main", "head": head, "merged": True, "error": ""})
+        self.assertTrue((self.root / "landing" / "docs" / "landed.md").is_file())
+        self.assertFalse((tree / "docs" / "landed.md").exists(), "the checkout under review is left as it was")
+
+    def test_v241_a_conflict_is_recorded_and_never_resolved(self):
+        tree = self.review_checkout()
+        self.push_to_main("tools/demo/app.py", "print('main')\n")
+        (tree / "tools" / "demo" / "app.py").write_text("print('review')\n")
+        git("commit", "--quiet", "-am", "review", cwd=tree, env=self.IDENT)
+        git("fetch", "--quiet", "origin", cwd=tree)
+        info = dispatch.landing_tree(tree, self.root / "landing", "main", self.env)
+        self.assertFalse(info["merged"])
+        self.assertIn("CONFLICT", info["error"])
+        self.assertFalse((self.root / "landing" / ".git" / "MERGE_HEAD").exists(), "the merge is aborted")
+        missing = dispatch.landing_tree(tree, self.root / "landing2", "release/none", self.env)
+        self.assertEqual((missing["merged"], missing["error"]), (False, "origin/release/none is not in the checkout"))
+
+    def landing_record(self, commands, merged=True, error=""):
+        job = self.job("A3")
+        tree = self.review_checkout()
+        run_checks(job, tree, self.root / "checks", self.env, timeout=30,
+                   landing={"commands": commands, "branch": "main", "head": "b" * 40, "merged": merged,
+                            "error": error, "root": tree})
+        return job
+
+    def publish_landing(self, job, verdict, commands, mode="enforce"):
+        work = self.agent(job, self.verdict_body(verdict, findings=["x"] if verdict != "PASS" else []))
+        collect(job, work, self.root / "out", self.env)
+        return publish(job, self.survey(job), self.root / "out", self.root / "pub", self.remote.url, "", "ghs_agent",
+                       job.login, self.env, self.create_pull, checks_dir=self.root / "checks", quarantine_mode=mode,
+                       landing_checks=commands)
+
+    def test_v242_a_pass_over_a_failed_landing_check_is_refused(self):
+        job = self.landing_record(("true", "echo green; exit 5"))
+        self.assertEqual(dispatch.landing_failures(job, self.root / "checks", ("true", "echo green; exit 5")),
+                         ["landing check 2 (`echo green; exit 5`) exited 5"])
+        with self.assertRaises(DispatchError) as caught:
+            self.publish_landing(job, "PASS", ("true", "echo green; exit 5"))
+        self.assertIn("an A3 PASS needs every landing check to have passed: landing check 2", str(caught.exception))
+        self.assertIsNone(self.remote.branch(job.branch), "nothing is pushed")
+
+    def test_v242_a_pass_over_passing_landing_checks_is_published_with_the_record(self):
+        job = self.landing_record(("true",))
+        result = self.publish_landing(job, "PASS", ("true",))
+        self.assertEqual((result["status"], result["verdict"]), ("published", "PASS"))
+        self.assertIn(f"### Landing checks on `{job.base_sha}` merged onto `main`, recorded by the dispatcher\n\n"
+                      "All 1 exited 0.", self.pulls[0][3])
+        report = (self.root / "checks" / "CHECKS.md").read_text()
+        self.assertIn("# Landing checks:", report)
+        self.assertIn("1 of 1 passed.", report)
+
+    def test_v243_a_build_that_does_not_merge_cannot_pass_and_fail_is_still_published(self):
+        job = self.landing_record(("true",), merged=False, error="CONFLICT (content): Merge conflict in x")
+        failed = dispatch.landing_failures(job, self.root / "checks", ("true",))
+        self.assertEqual(len(failed), 1)
+        self.assertIn(f"{job.base_sha} does not merge onto main, so no landing check ran: CONFLICT", failed[0])
+        self.assertEqual(self.publish_landing(job, "FAIL", ("true",))["verdict"], "FAIL")
+        self.assertIn("does not merge onto main", self.pulls[0][3], "the record goes beside A3's words")
+
+    def test_v243_landing_checks_named_but_not_recorded_refuse_a_pass(self):
+        job = self.a3_with_checks()  # a checks record with no landing section
+        self.assertEqual(dispatch.landing_failures(job, self.root / "checks", ("true",)),
+                         ["no landing checks are recorded for main"])
+        self.assertEqual(dispatch.landing_failures(job, self.root / "checks", ()), [], "none named: nothing changes")
+
+    def test_v243_a3_is_told_about_the_landing_checks_and_gets_their_report(self):
+        job = self.landing_record(("exit 1",))
+        work = self.root / "work"
+        prepare(job, work, self.remote.url, "", self.env, self.root, "main", self.root / "checks", landing_checks=("exit 1",))
+        inbox = (work / "checkout" / INBOX_DIR / "CHECKS.md").read_text()
+        self.assertIn("# Landing checks:", inbox)
+        task = task_text(job, "main", landing_checked=True)
+        self.assertIn("The landing branch's own checks", task)
+        self.assertIn("BLOCKED, naming the failing check", task)
+        self.assertNotIn("The landing branch's own checks", task_text(job, "main"))
+
     def test_a3_re_review_reads_a2s_notes_not_the_blocked_verdicts(self):
         clone = self.root / "rework"
         ident = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
@@ -1998,6 +2097,17 @@ class RefusalRecordTests(unittest.TestCase):
 
 class QuarantineWorkflowTests(unittest.TestCase):
     """The workflow hands the checks record to publish and each refusal to report (§3j items 2 and 3)."""
+
+    def test_v244_the_checks_job_builds_and_hands_over_the_landing_tree(self):  # Amendment 048
+        root = Path(__file__).resolve().parents[3]
+        path = root / ".github" / "workflows" / "mission-agent.yml"
+        text = (path if path.is_file() else root / "packaging" / "workflows" / "mission-agent.yml").read_text()
+        checks_job = text.split("\n  checks:\n", 1)[1].split("\n  agent:\n", 1)[0]
+        self.assertNotIn("toJSON(matrix.job.checks)", text, "every A3 gets the checks job: the landing checks may be named")
+        self.assertIn("fetch-depth: 0", checks_job)
+        self.assertIn("python3 -m mission_dispatch landing-tree --review review --out landing", checks_job)
+        self.assertIn('--landing-root /home/mission-checks/landing --landing-info "$RUNNER_TEMP/landing.json"', checks_job)
+        self.assertIn("--run-as mission-checks", checks_job)
 
     def test_the_workflow_wires_the_records(self):
         root = Path(__file__).resolve().parents[3]
