@@ -110,7 +110,7 @@ class RouterRecordTests(unittest.TestCase):
         loop.t.a3_round(1, "PASS")
         failed = [r for r in loop.records() if r["result"] == "failed"]
         self.assertTrue(failed)
-        self.assertIn("GitHub refused it (405)", failed[-1]["reason"])
+        self.assertIn("GitHub refused it (405): Required status check", failed[-1]["reason"])  # Amendment 022
         self.assertTrue(verify.verify_store(loop.store, {}).ok)
 
     def test_a_refusal_is_recorded(self):

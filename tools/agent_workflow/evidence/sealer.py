@@ -146,22 +146,39 @@ def backfill(request, bucket) -> Dict[str, int]:
     return counts
 
 
-def mark(result: Mapping, gh, store_repo: str) -> List[int]:
-    """Set ``evidence-sealed`` on the head of each PR the run published, when every chain of the run was sealed.
-    Returns the PRs marked."""
-    if result.get("refused") or not result.get("sealed"):
-        return []
-    marked = []
+def _run_of(chain: str) -> str:
+    """``gh-<run id>-<attempt>-``: the run a chain named ``gh-<run id>-<attempt>-<job>...`` belongs to."""
+    return "-".join(chain.split("-")[:3]) + "-"
+
+
+def to_mark(result: Mapping) -> List[dict]:
+    """The PRs a seal result lets the mark job mark: ``[{"pr", "run", "chains"}]``, one for each PR a run published
+    when every chain of that run was sealed. A sweep seals several runs at once (Amendment 047): a chain refused holds
+    back only its own run's PRs."""
+    refused = {_run_of(str(r.get("run", ""))) for r in result.get("refused", [])}
+    sealed = [str(r) for r in result.get("sealed", [])]
+    out = []
     for entry in result.get("prs", []):
-        pr = gh.request("GET", f"/pulls/{int(entry['pr'])}")
+        run = _run_of(str(entry.get("run", "")))
+        chains = [c for c in sealed if c.startswith(run)]
+        if run not in refused and chains:
+            out.append({"pr": int(entry["pr"]), "run": entry["run"], "chains": chains})
+    return out
+
+
+def mark(result: Mapping, gh, store_repo: str) -> List[int]:
+    """Set ``evidence-sealed`` on the head of each PR ``to_mark`` names. Returns the PRs marked."""
+    marked = []
+    for entry in to_mark(result):
+        pr = gh.request("GET", f"/pulls/{entry['pr']}")
         sha = (pr.get("head") or {}).get("sha")
         if not sha:
             continue
-        runs = "\n".join(f"- `{r}`" for r in result["sealed"])
+        runs = "\n".join(f"- `{r}`" for r in entry["chains"])
         gh.create_check_run(CHECK_NAME, sha, "completed", "success", "Evidence sealed and stored",
                             f"Every chain of the run that published this PR is sealed and stored in `{store_repo}`:"
                             f"\n\n{runs}")
-        marked.append(int(entry["pr"]))
+        marked.append(entry["pr"])
     return marked
 
 

@@ -40,6 +40,7 @@ from typing import Callable, Tuple
 
 from mission_router.github import GitHub, GitHubError
 from mission_router.gate import classify_or_raise
+from mission_router import landing as landing_mod
 from mission_router import substrate
 from mission_router.router import MissionRouter, load_config
 from router_spec002.policy import load_tables, normalize_path
@@ -61,6 +62,7 @@ from .dispatch import (
     busy_lanes,
     not_due,
     run_checks,
+    landing_tree,
     Job,
     Survey,
     failure_feedback,
@@ -313,9 +315,47 @@ def cmd_checks(args) -> int:
             _log(f"{job.key}: checks network {network.close()['network']} (blast radius {network.mode})")
         except blast.BlastError as exc:
             raise DispatchError(str(exc)) from None
+    landing = None
+    commands = _landing_checks(load_config())
+    if commands and job.role == "A3":  # Amendment 048: the landing branch's own checks, on the merged tree
+        info = {"branch": job.landing_branch, "head": "", "merged": False, "error": "the landing tree was not built"}
+        if args.landing_info and Path(args.landing_info).is_file() and not Path(args.landing_info).is_symlink():
+            try:
+                read = json.loads(Path(args.landing_info).read_text(encoding="utf-8"))
+                if isinstance(read, dict) and read.get("branch") == job.landing_branch:
+                    info = {k: read.get(k) for k in ("branch", "head", "merged", "error")}
+            except (OSError, ValueError):
+                pass
+        landing = {**info, "commands": commands, "root": args.landing_root or ""}
+        if info["merged"] is True and not args.landing_root:
+            landing["merged"], landing["error"] = False, "no landing tree was handed to the checks"
     results = run_checks(job, Path(args.root), Path(args.out), os.environ, timeout=args.timeout, run_as=args.run_as,
-                         network=network.report if network else None)
+                         network=network.report if network else None, landing=landing)
     _log(f"{job.key}: {sum(r['passed'] for r in results)} of {len(results)} checks passed")
+    if landing is not None:
+        _log(f"{job.key}: landing checks on {job.landing_branch}: "
+             + ("ran" if landing["merged"] is True else f"not run ({landing['error']})"))
+    return 0
+
+
+def _landing_checks(config: dict) -> tuple:
+    try:
+        return landing_mod.checks(config)
+    except ValueError as exc:
+        raise DispatchError(str(exc)) from None
+
+
+def cmd_landing_tree(args) -> int:
+    """Amendment 048: the commit under review merged onto its landing branch, for the landing checks. Nothing is built
+    when ``config.json`` names no ``landing_checks``, or for a job that is not A3."""
+    job = _job()
+    if job.role != "A3" or not _landing_checks(load_config()):
+        _log(f"{job.key}: no landing checks")
+        return 0
+    info = landing_tree(Path(args.review), Path(args.out), job.landing_branch, os.environ)
+    Path(args.info).write_text(json.dumps(info) + "\n", encoding="utf-8")
+    _log(f"{job.key}: landing tree onto {job.landing_branch} at {info['head'] or 'unknown'}: "
+         + ("merged" if info["merged"] else f"not merged ({info['error']})"))
     return 0
 
 
@@ -406,7 +446,8 @@ def cmd_prepare(args) -> int:
             config["default_branch"], Path(args.checks_report) if args.checks_report else None,
             binding_mode=binding_mode, permissions_mode=_permissions_mode(config),
             supply_mode=_supply_mode(config), verify=verify, log=_log,
-            provenance_dir=Path(args.provenance) if args.provenance else None, app_mode=_app_mode(config))
+            provenance_dir=Path(args.provenance) if args.provenance else None, app_mode=_app_mode(config),
+            landing_checks=_landing_checks(config))
     _log(f"{job.key}: checkout ready at {job.base_sha}")
     return 0
 
@@ -540,7 +581,7 @@ def cmd_publish(args) -> int:
                      _env("READ_TOKEN"), _env("AGENT_TOKEN"), f"{_env('AGENT_SLUG')}[bot]", os.environ,
                      agent.create_pull, os.environ.get("RUN_URL", ""),
                      checks_dir=Path(args.checks) if args.checks else None, quarantine_mode=mode, log=_log,
-                     substrate_declared=declared)
+                     substrate_declared=declared, landing_checks=_landing_checks(config))
     if result["status"] == "skipped":
         _log(f"{job.key}: not published: {result['reason']}")
     else:
@@ -969,6 +1010,12 @@ def main(argv=None) -> int:
     sub.choices["checks"].add_argument("--out", required=True)
     sub.choices["checks"].add_argument("--timeout", type=float, default=900.0)
     sub.choices["checks"].add_argument("--run-as", help="unprivileged account to run the checks as")
+    sub.choices["checks"].add_argument("--landing-root", default="", help="the landing tree (Amendment 048)")
+    sub.choices["checks"].add_argument("--landing-info", default="", help="landing-tree's record (Amendment 048)")
+    tree = sub.add_parser("landing-tree", help="the commit under review merged onto its landing branch (Amendment 048)")
+    tree.add_argument("--review", required=True)
+    tree.add_argument("--out", required=True)
+    tree.add_argument("--info", required=True)
     sub.choices["prepare"].add_argument("--checks-report")
     sub.choices["prepare"].add_argument("--provenance", default="", help="policy CI's graph, handed over by plan")
     fetch = sub.add_parser("provenance-fetch")
@@ -1014,7 +1061,7 @@ def main(argv=None) -> int:
     performing.add_argument("--out", required=True, help="the stage's work folder")
     performing.add_argument("--plan", default="", help="where check wrote the plan")
     args = parser.parse_args(argv)
-    steps = {"blast-mode": cmd_blast_mode, "tree-install": cmd_tree_install, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
+    steps = {"blast-mode": cmd_blast_mode, "tree-install": cmd_tree_install, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "landing-tree": cmd_landing_tree, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land, "perform": cmd_perform,
              "scan-prepare": cmd_scan_prepare, "scan": cmd_scan, "scan-report": cmd_scan_report}
     recorder = evidence_producer.Recorder.from_env(os.environ)

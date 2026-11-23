@@ -11,6 +11,8 @@
   ``STORE_TOKEN``;
 - ``mark --repo OWNER/NAME --result FILE --store-repo OWNER/NAME``: the ``evidence-sealed`` checks, with
   ``GITHUB_TOKEN``;
+- ``count --result FILE``: ``prs=<n>``, the PRs ``mark`` would mark from that seal result, for the seal workflow's
+  output (the mark job runs only when it is not 0; Amendment 047);
 - ``check --store DIR --git DIR --out FILE`` and ``report --repo OWNER/NAME --result FILE --sha SHA --store-repo
   OWNER/NAME``: the checker (item 7);
 - ``store-name``: ``config.json``'s ``evidence_store``, for the seal workflow;
@@ -60,6 +62,8 @@ def main(argv=None) -> int:
     m.add_argument("--repo", required=True)
     m.add_argument("--result", required=True)
     m.add_argument("--store-repo", required=True)
+    n = sub.add_parser("count", help="prs=<n>: the PRs mark would mark from a seal result (Amendment 047)")
+    n.add_argument("--result", required=True)
     c = sub.add_parser("check", help="the checker: verify the whole store and record the result (item 7)")
     c.add_argument("--store", required=True)
     c.add_argument("--git", help="this repository's clone, with full history")
@@ -139,6 +143,10 @@ def _other(args) -> int:
                                   os.environ.get("RUN_URL", ""))
             print(done)
             return 0 if result["ok"] else 1
+        if args.command == "count":
+            result = json.loads(Path(args.result).read_text(encoding="utf-8"))
+            print(f"prs={len(sealer.to_mark(result))}")
+            return 0
         if args.command == "store-name":
             from mission_router.router import load_config
             full = load_config().get("evidence_store") or ""

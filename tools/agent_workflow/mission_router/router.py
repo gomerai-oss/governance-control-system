@@ -20,6 +20,7 @@ from .gate import (MERGE, REJECT, WAIT, WAIT_APPROVAL, CapturePR, Decision, File
                    evaluate_capture, evaluate_challenge, evaluate_landing, instruction_build_findings,
                    instruction_plan_findings)
 from . import challenge as challenge_mod
+from . import landing as landing_mod
 from .accounts import AccountGuard, GuardedGitHub, config_accounts, identity_mode
 import os
 
@@ -28,6 +29,7 @@ from evidence import producer as evidence_producer
 from mission_dispatch import login, permissions, quarantine, secscan, supply_chain
 from mission_dispatch.quarantine import inline as quarantined  # §5, Amendment 012: agent text the router posts
 from .github import GitHub, GitHubError
+from .model import is_literal_glob
 from .model import (
     AGENT_RE,
     BOT_LOGIN_RE,
@@ -210,6 +212,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     _scan_mode(config)  # the security scan (Amendment 021): likewise (vector 139)
     _scan_access(config)  # its Cyber access program (MISSION-DISPATCH-001 Amendment 041): likewise (vector 228)
     config_accounts(config)
+    landing_mod.path_check(config)  # MISSION-ROUTER-001 Amendment 023: an unusable value stops the router
+    landing_mod.checks(config)  # MISSION-DISPATCH-001 Amendment 048: likewise
     store = config.get("evidence_store")
     if store is not None and not (isinstance(store, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", store)):
         raise ValueError("config.json: evidence_store must be owner/name")
@@ -305,6 +309,9 @@ class MissionRouter:
         self.per_leg_stacks = frozenset(config.get("per_leg_stacks") or ())
         # Branches a plan may name as its final merge target (Amendment 008); the default branch always may.
         self.targets = frozenset([self.main, *(config.get("landing_branches") or ())])
+        # The repository's own path policy, run on a plan's paths before HITL approves (Amendment 023).
+        self.landing_path_check = landing_mod.path_check(config)
+        self._run_path_check = landing_mod.path_findings  # replaced in tests
         # The L1 capture route (Amendment 005): HITL's DRAFT captures append to one queue file without a mission.
         capture = config.get("l1_capture") or {}
         self.capture_path: Optional[str] = capture.get("path")
@@ -1021,6 +1028,9 @@ class MissionRouter:
                 start_rejects = start_rejects + [
                     "under \"challenge\": \"enforce\" a plan assigns an AR seat, which challenges it before HITL "
                     "approves it (MISSION-DISPATCH-001 §3n item 1)"]
+            # Amendment 023: the paths Amendment 004 checks, against the repository's own path policy.
+            start_rejects = start_rejects + self._run_path_check(
+                self.landing_path_check, [*manifest.deliverables, *(p for p in manifest.build_scope if is_literal_glob(p))])
             target = self.target_branch(manifest)
             if integration_actual is None and target in self.targets and self.gh.branch_head(target) is None:
                 # Nothing can be prepared without the branch, and nothing merges while this holds (Amendment 008).
@@ -1147,7 +1157,7 @@ class MissionRouter:
                                  mission=ref.mission_id, round_n=ref.round, pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this PR, but GitHub will not merge it yet: {exc.message}. "
                                    "The router retries every sweep (about 5 minutes).")
                 return False
@@ -1346,7 +1356,7 @@ class MissionRouter:
                                  "router.merge", mission=mid, round_n=ref.round, pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this challenge, but GitHub will not merge it yet: "
                                    f"{exc.message}. The router retries every sweep (about 5 minutes).", mission=mid)
                 return False
@@ -1591,7 +1601,11 @@ class MissionRouter:
         try:
             return fn()
         except GitHubError as exc:
-            self._record(action, f"{what}: GitHub refused it ({exc.status})", result="failed", **subject)
+            # GitHub's own reason, in the log and the record (MISSION-ROUTER-001 Amendment 022): "405" alone does not say which check
+            # or rule refused the write. The record's reason passes the quarantine and is cut at 300 characters.
+            refused = f"GitHub refused it ({exc.status}): {_one_line(exc.message)}"
+            self.log(f"    {refused}")
+            self._record(action, f"{what}: {refused}", result="failed", **subject)
             raise
 
     def _record_decision(self, number: int, head_sha: str, base: str, decision, mission: Optional[str] = None,
@@ -1731,7 +1745,7 @@ class MissionRouter:
                                  "router.landing", pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this landing PR, but GitHub will not merge it yet: {exc.message}. "
                                    "The router retries every sweep.")
                 return False
@@ -1787,7 +1801,7 @@ class MissionRouter:
                                  "router.merge", pr=number, commit=head_sha)
         except GitHubError as exc:
             if exc.status in (405, 409, 422):
-                self._comment_once(number, f"waiting:{head_sha[:12]}",
+                self._comment_once(number, _waiting_key(head_sha, exc.message),
                                    f"The mission router approved this capture, but GitHub will not merge it yet: {exc.message}. "
                                    "The router retries every sweep.")
                 return False
@@ -1921,6 +1935,16 @@ class MissionRouter:
                                                                self._open_points_note(state)),
                                   before=commands, mission=state.mission_id):
                 self._start_agent(state, manifest)
+
+
+def _one_line(text: str, limit: int = 240) -> str:
+    """GitHub's error message on one line, cut to ``limit`` characters."""
+    return " ".join(str(text or "").split())[:limit]
+
+
+def _waiting_key(head_sha: str, message: str) -> str:
+    """The "GitHub will not merge it yet" comment is posted once per head and reason, so a new reason is said."""
+    return f"waiting:{head_sha[:12]}:{evidence_producer.text_digest(_one_line(message))[:12]}"
 
 
 def _target(state: MissionState) -> Optional[str]:

@@ -232,11 +232,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", text[:text.index("\npermissions:")])
         backfill = text.index("python3 -B -m evidence backfill")
         self.assertIn("github.event_name == 'workflow_dispatch'", text[backfill - 400:backfill])
-        for step in ("python3 -B -m evidence seal", "name: sealed\n"):  # workflow_run or the sweep (Amendment 022)
+        for step in ("python3 -B -m evidence seal", "python3 -B -m evidence count", "name: sealed\n"):  # the sweep only
             at = text.index(step)
-            self.assertIn("github.event_name != 'workflow_dispatch'", text[at - 700:at], step)
+            self.assertIn("github.event_name == 'schedule'", text[at - 700:at], step)
         mark = text[text.index("\n  mark:\n"):]
-        self.assertIn("github.event_name != 'workflow_dispatch'", mark[:mark.index("\n    steps:")], "the mark job")
+        self.assertIn("github.event_name == 'schedule'", mark[:mark.index("\n    steps:")], "the mark job")
 
     def test_both_jobs_ask_for_an_oidc_token_and_hold_no_cloud_key(self):
         root = AW.parents[1]
