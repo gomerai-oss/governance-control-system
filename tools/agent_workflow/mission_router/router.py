@@ -327,6 +327,7 @@ class MissionRouter:
         self.dry_run = dry_run
         self.log = log
         self._comments: Dict[int, list] = {}
+        self._carried: Dict[Tuple[int, str], Tuple[str, Tuple[str, ...]]] = {}  # (PR, head) -> (approved sha, plan files changed)
         # Ring 6 (Amendment 018): every act is recorded before it is made; without a chain nothing is recorded.
         self.evidence = recorder if recorder is not None else evidence_producer.Recorder.from_env(
             os.environ, warn=lambda m: self.log(f"::warning::{m}"))
@@ -720,6 +721,28 @@ class MissionRouter:
                 shas.update(_APPROVE_RE.findall(comment.get("body") or ""))
         return shas
 
+    def _carried_approval(self, mission_id: str, head: str, approvals: set,
+                          manifest: Manifest) -> Optional[Tuple[str, Tuple[str, ...]]]:
+        """Amendment 025: an approval of an earlier plan head that carries to ``head``, as ``(approved sha, plan files
+        changed since)``, or None. It carries only when the approved commit is in ``head``'s history and AR has passed
+        the plan at ``head``: the challenge loop is complete there, not ended by HITL, and AR's latest round is
+        ``NO_CHALLENGE``. Plan files changed since the approval are named (A1 changed the plan in answer to AR, and AR
+        passed it as changed). While AR's last word is a ``CHALLENGE``, only an approval of that exact head counts."""
+        loop = self.challenge_loop(mission_id, head, manifest)
+        if not loop.complete or loop.ended or loop.latest is None or loop.latest.verdict != "NO_CHALLENGE":
+            return None
+        for sha in sorted(approvals):
+            try:
+                files, complete, behind = self._changes(sha, head)
+            except GitHubError:
+                continue
+            if behind != 0 or not complete:
+                continue  # not in the head's history, or too large a change to read
+            changed = sorted({p for f in files for p in (f.path, f.previous_path or "")
+                              if p and challenge_mod.is_plan_file(p, mission_id)})
+            return sha, tuple(changed)
+        return None
+
     def _ended_challenges(self, number: int) -> set:
         """The plan heads HITL ended the challenge loop for on PR ``number`` (§6a, Amendment 020): a HITL user's
         ``/mission end-challenge <sha>`` line, read like an approval."""
@@ -1065,6 +1088,24 @@ class MissionRouter:
             pushers=pushers, head_pushed=head_pushed,
         )
         approvals = self._approvals(raw["number"])
+        if ref.role == "A1" and head_sha not in approvals and manifest is not None:
+            carried = self._carried_approval(ref.mission_id, head_sha, approvals, manifest)
+            if carried is not None:  # Amendment 025: approve once
+                self._carried[(raw["number"], head_sha)] = carried
+                approvals = approvals | {head_sha}
+                self.log(f"  PR #{raw['number']}: HITL's approval of {carried[0][:12]} carries to {head_sha[:12]}"
+                         + (f" (plan changed: {', '.join(carried[1])})" if carried[1] else ""))
+                if carried[1]:
+                    rounds = self.challenge_loop(ref.mission_id, head_sha, manifest).rounds
+                    listed = "\n".join(f"- `{quarantined(p, 200)}`" for p in carried[1][:50])
+                    self._comment_once(raw["number"], f"approval-carried:{head_sha[:12]}",
+                                       f"HITL's approval of `{carried[0]}` carries to `{head_sha}` (MISSION-ROUTER-001 "
+                                       "Amendment 025): A1 changed the plan in answer to AR, and AR passed the plan as "
+                                       f"changed (round {rounds}, NO_CHALLENGE). The plan files changed since that "
+                                       f"approval:\n\n{listed}\n\n[Compare](https://github.com/{self.gh.repo}/compare/"
+                                       f"{carried[0]}...{head_sha}). To stop the mission before A2 starts, comment "
+                                       "`/mission halt` on its tracking issue; `/mission cancel` ends it.",
+                                       mission=ref.mission_id)
         if ref.role == "A1" and self._in_stack(manifest):
             approved, _, _ = self._stack_approved(manifest.stack_id)
             if approved:
@@ -1136,7 +1177,10 @@ class MissionRouter:
                                    + "\n".join(f"- {quarantined(r)}" for r in decision.reasons)
                                    + "\n\n" + (write_grant_line(manifest) if ref.role == "A1" else "")
                                    + f"To approve this exact commit, a HITL login comments:\n\n```\n/mission approve {head_sha}\n```\n\n"
-                                   "A new push needs a new approval.")
+                                   + ("One approval is enough: it carries to later heads of this plan once AR has "
+                                      "passed it (NO_CHALLENGE), including changes A1 makes in answer to AR "
+                                      "(MISSION-ROUTER-001 Amendment 025)." if ref.role == "A1" else
+                                      "A new push needs a new approval."))
             self._add_labels(number, ["agent:needs-hitl"])
             return False
 
@@ -1285,8 +1329,10 @@ class MissionRouter:
             self._comment_once(raw["number"], f"challenge-incomplete:{head[:12]}",
                                "HITL's approval of this head is not counted yet: the challenge loop is not complete "
                                f"for it ({quarantined(loop.missing)}).\n\nThe loop is complete when at least one AR "
-                               "round exists, AR spoke last, and the plan is unchanged since AR read it. Approving "
-                               "again once it is complete is how the mission proceeds. Or, once at least one round "
+                               "round exists, AR spoke last, and the plan is unchanged since AR read it. Once AR "
+                               "passes the plan (NO_CHALLENGE), this approval carries to that head and the mission "
+                               "starts: no second approval is needed (Amendment 025). To approve over an AR "
+                               "CHALLENGE instead, approve the head it challenged. Or, once at least one round "
                                f"exists, end the loop here:\n\n```\n/mission end-challenge {head}\n```\n\n"
                                "(MISSION-ROUTER-001 §6a).",
                                mission=ref.mission_id)
@@ -1611,13 +1657,16 @@ class MissionRouter:
     def _record_decision(self, number: int, head_sha: str, base: str, decision, mission: Optional[str] = None,
                          round_n: Optional[int] = None) -> None:
         """The decision that allows a merge, recorded before the approval and the merge (Amendment 018), with the
-        HITL approvals of this exact commit it acted on."""
+        HITL approvals of this exact commit it acted on, or of the earlier plan head it carried from (Amendment 025)."""
+        carried = self._carried.get((number, head_sha))
+        approved = carried[0] if carried else head_sha
+        note = f" (carried to {head_sha[:12]}, Amendment 025)" if carried else ""
         for comment in self._pr_comments(number):
             user = comment.get("user") or {}
             body = comment.get("body") or ""
             login = str(user.get("login", ""))
-            if user.get("type") == "User" and login.casefold() in self.hitl and head_sha in _APPROVE_RE.findall(body):
-                self._record("router.hitl_command", f"HITL command: /mission approve {head_sha}", actor=login,
+            if user.get("type") == "User" and login.casefold() in self.hitl and approved in _APPROVE_RE.findall(body):
+                self._record("router.hitl_command", f"HITL command: /mission approve {approved}{note}", actor=login,
                              account=user.get("id") if isinstance(user.get("id"), int) else None,
                              authority=("hitl_command", f"comment {comment.get('id')} on #{number}"),
                              mission=mission, round_n=round_n, pr=number, commit=head_sha,
