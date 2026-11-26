@@ -79,10 +79,13 @@ def _stored_records(store: "store_mod.Store") -> List[dict]:
 def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_mod.Store", time: str,
               worm=None, repository: str = "", resume: bool = False) -> dict:
     """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}]}``. With ``worm`` (a declared WORM bucket),
-    each run's records and seal are also copied there once they are in the store; a copy the bucket refuses fails the
-    job, so the run's PRs are not marked. With ``resume`` (the sweep, Amendment 022), a chain the store already holds
-    a seal for is not sealed again: its records must be the stored ones, and it counts as sealed for marking, with no
-    second seal and no second landing attestation."""
+    each run's records and seal are also copied there, before the store's seal is written. A chain the store or the bucket
+    refuses is refused like a chain that does not verify: it holds back only its own run's PRs, and the other runs are
+    still sealed and marked (Amendment 049; before, one refused copy stopped the job with no result, and no PR of the
+    sweep was marked). A landing attestation the store or the bucket refuses refuses its landing's run. With
+    ``resume`` (the sweep, Amendment 022), a chain the store already holds a seal for is not sealed again: its records
+    must be the stored ones, and it counts as sealed for marking, with no second seal and no second landing
+    attestation."""
     kid = seal_mod.keyid(ed25519.public_key(seed))
     if kid not in keys:
         raise EvidenceError("the seal key is not a pinned evidence key (evidence/key.json); nothing was sealed")
@@ -98,28 +101,46 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
         doc = seal_mod.make(run, head, len(records), {}, time, seed)
         message = f"Seal {run}: {len(records)} records"
         records_bytes, seal_bytes = (directory / chain_mod.RECORDS).read_bytes(), dump(doc)
-        store.add(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes, message)
-        if resume and store.holds(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}"):
-            out["sealed"].append(run)  # sealed by an earlier sweep that stopped part way; its records are the stored ones
-            out["prs"] += _published(records, run)
+        try:
+            store.add(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes, message)
+            if resume and store.holds(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}"):
+                out["sealed"].append(run)  # sealed by an earlier sweep that stopped part way: its records are stored
+                out["prs"] += _published(records, run)
+                continue
+            if worm is not None:  # before the store's seal: a chain the bucket refused stays unsealed, so the next
+                # sweep names its run again and copies it (Amendment 049)
+                worm.put(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes)
+                worm.put(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes)
+            store.add(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes, message)
+        except EvidenceError as exc:
+            out["refused"].append({"run": run, "reason": str(exc)})
             continue
-        store.add(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes, message)
-        if worm is not None:
-            worm.put(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes)
-            worm.put(f"{store_mod.RUNS}/{run}/{seal_mod.SEAL}", seal_bytes)
         out["sealed"].append(run)
         out["prs"] += _published(records, run)
         landed += pack_mod.landings(records)
     if landed and repository:  # each landing's attestation, once its run is in the store (§3m item 2)
-        everything = _stored_records(store)
-        for landing in landed:
+        try:
+            everything = _stored_records(store)
+        except EvidenceError as exc:
+            everything = None
+            out["refused"] += [{"run": _landing_run(landing), "reason": str(exc)} for landing in landed]
+        for landing in landed if everything is not None else ():
             name = pack_mod.name_for(landing)
-            data = pack_mod.sign(pack_mod.statement(landing, everything, repository), seed)
-            store.add(name, data, f"Landing provenance for {landing['subject']['mission']} ({landing['id']})")
-            if worm is not None:
-                worm.put(name, data)
+            try:
+                data = pack_mod.sign(pack_mod.statement(landing, everything, repository), seed)
+                store.add(name, data, f"Landing provenance for {landing['subject']['mission']} ({landing['id']})")
+                if worm is not None:
+                    worm.put(name, data)
+            except EvidenceError as exc:
+                out["refused"].append({"run": _landing_run(landing), "reason": str(exc)})
+                continue
             out["packs"].append(name)
     return out
+
+
+def _landing_run(landing: Mapping) -> str:
+    """The chain a landing record is in: its id is ``<chain>/<n>``."""
+    return str(landing["id"]).rsplit("/", 1)[0]
 
 
 def _published(records: List[dict], run: str) -> List[dict]:
@@ -128,8 +149,8 @@ def _published(records: List[dict], run: str) -> List[dict]:
 
 
 def backfill(request, bucket) -> Dict[str, int]:
-    """Copy every file the store already holds under ``runs/`` to the WORM bucket (§3m item 3): runs sealed before the
-    bucket was declared. ``request`` is the store's GitHub client (the evidence App's token can read the store). A copy
+    """Copy every file the store already holds under ``runs/`` and ``packs/`` to the WORM bucket (§3m item 3): runs
+    sealed before the bucket was declared, and a landing attestation whose copy the bucket refused (Amendment 049). ``request`` is the store's GitHub client (the evidence App's token can read the store). A copy
     already there is left as it is. Returns ``{"added": n, "present": n}``."""
     import base64
     tree = request("GET", f"/git/trees/{store_mod.Store(request).branch}?recursive=1")
@@ -138,7 +159,7 @@ def backfill(request, bucket) -> Dict[str, int]:
     counts = {"added": 0, "present": 0}
     for entry in tree.get("tree", []):
         path = entry.get("path", "")
-        if entry.get("type") != "blob" or not path.startswith(f"{store_mod.RUNS}/"):
+        if entry.get("type") != "blob" or not path.startswith((f"{store_mod.RUNS}/", f"{pack_mod.PACKS}/")):
             continue
         blob = request("GET", f"/git/blobs/{entry['sha']}")
         data = base64.b64decode(blob.get("content") or "")

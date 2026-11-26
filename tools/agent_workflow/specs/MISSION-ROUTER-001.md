@@ -177,6 +177,43 @@ approve once.
   without an AR seat. The approval request and the "not counted yet" comment now say that one approval is enough.
 
 Vector 143.
+**Amendment 026 (2026-11-26, HITL direction: "start with router F1 and F14"):** one failed GitHub call never ends a
+whole sweep.
+- **What was found:** the router audit (M-AUDIT-ROUTER-001, findings F1 and F14, evidence E-2). The client turned
+  only an HTTP error into `GitHubError`. A dropped connection (`RemoteDisconnected`), a timeout or another transport
+  failure escaped as another type, past every `except GitHubError`, and ended the process. The label listing and the
+  "Not a mission" check on PRs outside the flow sat outside any `except`. Of the 19 failed router runs, 7 were a
+  dropped connection, 3 a 5xx and 6 the installation's hourly rate limit; each stopped every mission until the next
+  sweep. A one-off 500 on `/users/<bot>` (2026-11-25) also made an A3 PR be refused and counted as a failure.
+- **The client** (`mission_router/github.py`): every failure is a `GitHubError`, status 0 when GitHub gave no HTTP
+  answer. A read (GET) is sent again at most twice, after 1 and 3 seconds, after a dropped connection, a timeout or a
+  500, 502, 503 or 504. A write is never sent again, since it may have taken effect. A 403 or 429 is not waited out:
+  the installation's limit resets within the hour, after the sweep. The dispatcher and the evidence jobs use the same
+  client and gain the same.
+- **The sweep:** the label listing and each "Not a mission" check are contained like a mission: logged, left for the
+  next sweep, and the rest goes on. Discovery (the mission issues, the open PRs, the mission branches) stays all or
+  nothing: a partial listing could look like a missing PR, so a sweep that cannot list them decides nothing, and
+  `python3 -m mission_router` prints `sweep stopped: ...` and exits 1.
+
+Vector 144.
+**Amendment 027 (2026-11-26, HITL direction: "start router F3 and F9"; HITL chose to enforce the scan here):**
+governance switches on the landing path check and the security-scan hold, which had never run in it.
+- **What was found:** the router audit (M-AUDIT-ROUTER-001, findings F3 and F9, evidence E-14). Amendment 021's hold
+  for the security scan and Amendment 023's landing path check were built and tested, and run in the test repository
+  and Core, but governance's `config.json` named neither, so neither had ever run here: a protection that does not run
+  protects nothing. (F9's other half, `landing_checks`, came with MISSION-DISPATCH-001 Amendments 052 and 053.)
+- **The landing path check:** `landing_path_check` is `python3 tools/governance_validation/policy_checks.py
+  check-paths`. It refuses each plan path under `change-specs/` outside the live areas of `POLICIES/SPEC-FORMAT-RETIREMENT-001.md`:
+  the archive is closed, and the required `archive` check would refuse the landing, so the plan is refused before HITL
+  approves it, not after A2 and A3 have spent their rounds. A path outside `change-specs/`, or in a live area, passes.
+- **The scan hold:** `security_scan` is `enforce`. Every A3 PASS is scanned (`mission-secscan`, its OpenAI key, `main`
+  only) and held until the `security-scan` check is green, or HITL settles it (`/mission accept-scan`,
+  `/mission send-back`, Amendment 021). With standard access a scan that cannot finish, such as one OpenAI refuses on
+  code with a flaw (the test repository's AST-SCAN.2), is red and held: the hold fails closed. Each scan costs about 2
+  dollars and 8 minutes (AST-SCAN.1). `security_scan_access` stays unset until HITL's Daybreak access is granted
+  (MISSION-DISPATCH-001 Amendment 041).
+
+Vector 145.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -895,3 +932,5 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 141 | `landing_path_check` named; a plan whose deliverable it refuses; one it allows; a command that cannot run, exits 2, or names no path of the plan; none named; an unusable value | Refused before approval, naming the path; started as before; refused; nothing runs; the router stops (Amendment 023) |
 | 142 | `mission_router.status` on a mission through each stage; on a hand-built PR merged by HITL, by a bot, open, or closed unmerged; a read that fails | `NOT DONE` until the A3 PASS is merged, then `DONE` (exit 0), writing nothing; `DONE` only for the HITL merge; `NOT DONE: cannot tell`, exit 2 (Amendment 024) |
 | 143 | HITL approves the plan before AR runs; AR passes it unchanged; AR challenges, A1 changes the plan, AR passes it; AR challenges and nobody answers; A1 defends; an approval of a commit outside the plan's history | The mission starts with no second approval; it starts, and the router lists the changed plan files once; it waits until HITL approves the challenged head itself; it starts, nothing listed; it does not start (Amendment 025) |
+| 144 | A read answered by a dropped connection, a timeout or a 5xx; the same three times; a write that fails; a 403, 404, 422 or 429; the label listing or a "Not a mission" check fails; the open-PR listing fails | Sent again and answered; a `GitHubError` after 3 tries; one try, a `GitHubError`; one try, a `GitHubError`; logged, and every mission is still swept; the sweep decides nothing and the command exits 1 (Amendment 026) |
+| 145 | Governance's config; a plan path under `change-specs/` outside the live areas, in a live area, elsewhere, `UPGRADES/`; a policy naming no live area | The path check and `security_scan: enforce` are named; refused, allowed, allowed, allowed; every `change-specs/` path refused (Amendment 027) |

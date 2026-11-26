@@ -49,3 +49,25 @@ The layout is the plan's. There is no `__init__.py`: `evidence_graph` is a names
 - **How it reads GitHub.** Only with `--github OWNER/REPO` and `GITHUB_TOKEN`, through `mission_router.github`, with GET calls only. An unreadable record is a finding, never a pass. Without `--github` the package reads no network, as before.
 - **One walk in CI.** `check --out` writes the same graph `build` would, so Policy CI walks and reads GitHub once per run.
 - **Real history.** All 11 router landings on `main` at `538efde6` pass G1-G4 (95 API reads).
+
+## A carried approval (2026-11-25, hand-built, after the first approve-once landing)
+
+- **Why.** MISSION-ROUTER-001 Amendment 025 lets HITL's approval of an earlier plan commit carry to the plan head once AR
+  passes the plan there. G2 accepted only a `/mission approve` naming the head itself. So the first landing that used a
+  carried approval, M-AUDIT-ROUTER-001 (`69ea6a64`, plan PR #1363), was reported as unproven, and Policy CI failed on
+  every pull request into `main` from then on.
+- **What.** When no HITL approval names the head, G2 accepts one that carried to it. Every fact comes from git or
+  GitHub's record, never from the router's word (the router posts no comment when the plan did not change):
+  - a HITL `/mission approve` on the plan PR names a commit in the head's history;
+  - AR's latest round at the head parses and is `NO_CHALLENGE`;
+  - A1 has not answered that round;
+  - the commit AR read is in the head's history, and no plan file (`missions/<ID>/` outside `challenges/`) changed
+    between it and the head;
+  - exactly one `Mission <ID>: AR round <N> (...)` merge follows that commit. It is the merge commit of a pull request
+    from `mission/<ID>/ar-r<N>`, opened by AR's login (`agents["ar"]`) and merged by the bot;
+  - both round files at the head are as that pull request wrote them.
+
+  If any of these fails, the finding says which one.
+- **Scope.** Only AR's latest round is checked for authorship, because it is the round the carry rests on.
+- **Real history.** All 18 router landings on `main` at `69ea6a64` pass G1-G4. The carry check also passes on the
+  record of #1370 (M-AUDIT-EVIDENCE-001).

@@ -973,6 +973,44 @@ class RouterLoopTests(unittest.TestCase):
     def bot_comments(self, n):
         return [c["body"] for c in self.gh.comments.get(n, []) if c["user"]["login"] == BOT]
 
+    def fail_on(self, method, match, status=0):
+        """Make every ``method`` call whose first argument contains ``match`` fail as GitHub's client reports it."""
+        real = getattr(self.gh, method)
+
+        def failing(*args, **kw):
+            if match in str(args[0] if args else ""):
+                raise GitHubError(status, "RemoteDisconnected: Remote end closed connection without response", match)
+            return real(*args, **kw)
+        setattr(self.gh, method, failing)
+
+    def test_v144_a_label_listing_that_fails_leaves_the_sweep_going(self):
+        """Amendment 026 (router audit F1): one failed call used to end the whole sweep, and every mission waited."""
+        self.fail_on("paginate", "/labels")
+        self.start_mission()
+        self.assertTrue(any(line.startswith("labels: GitHub error, will retry next sweep") for line in self.logs))
+
+    def test_v144_a_check_that_fails_on_a_non_mission_pr_leaves_the_sweep_going(self):
+        self.gh.push("feature/x", {"README.md": "x"}, base="main")
+        other = self.gh.open_pr("feature/x", "main", HITL)
+        real = self.gh.create_check_run
+
+        def failing(name, sha, *rest):
+            if sha == self.gh.branches["feature/x"]:
+                raise GitHubError(500, "Server Error", f"/check-runs {name}")
+            return real(name, sha, *rest)
+        self.gh.create_check_run = failing
+        self.start_mission()
+        self.assertTrue(any(line.startswith(f"PR #{other}: GitHub error, will retry next sweep") for line in self.logs))
+
+    def test_v144_a_sweep_that_cannot_list_the_missions_decides_nothing(self):
+        self.gh.push(f"mission/{MID}/a1", {f"missions/{MID}/mission.json": manifest_doc(), f"missions/{MID}/PLAN.md": "p"},
+                     base="main")
+        n = self.gh.open_pr(f"mission/{MID}/a1", "main", A1B)
+        self.fail_on("paginate", "/pulls?state=open")
+        with self.assertRaises(GitHubError):
+            self.sweep()
+        self.assertEqual(self.gh.prs[n]["base_ref"], "main", "nothing was decided on a partial listing")
+
     def start_mission(self, mid=MID, scope=("tools/demo/**",), **manifest_kw):
         doc = manifest_doc(scope=scope, **manifest_kw).replace(MID, mid)
         branch = f"mission/{mid}/a1"

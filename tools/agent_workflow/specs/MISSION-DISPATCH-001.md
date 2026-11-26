@@ -418,6 +418,145 @@ branch's own checks to pass.
 
 Vectors 241 to 245.
 
+**Amendment 049 (2026-11-25, HITL direction: ring 6 seal and check):** a sweep that stops part way never strands a PR,
+and the WORM token outlives a long job.
+- **What was found:** seal run 45628280774 sealed A2's run for M-AUDIT-DISPATCH-001 (#1396) and copied it to the WORM
+  bucket. About five minutes into the job, the bucket answered 401 to the copy of another run's landing attestation.
+  The job stopped with no result (Amendment 047: "nothing is marked, as before"), so #1396 never got `evidence-sealed`.
+  Every later sweep found that run's chains all sealed and did not read it, and the router held the PR for ten hours
+  until HITL had it closed and A2 run again. Evidence Verify failed the same way that day (run 45625266229, issue
+  #1395): it reads every copy in the bucket, and its token stopped working part way. The access token Google's STS
+  exchanges for GitHub's OIDC token lasts about as long as that OIDC token, about five minutes; the seal job and the
+  checker now take longer.
+- **The token:** the WORM client asks GitHub for a new OIDC token and exchanges it again when Google answers 401, once
+  per call; a second 401 is an error, as before. No credential is stored, as before.
+- **A refused copy refuses one run:** a chain the store or the bucket refuses is refused like a chain that does not
+  verify. It holds back only its own run's PRs. The seal step still fails, the result is written and handed over, and
+  the other runs' PRs are marked (Amendment 047's `to_mark`). A landing attestation the store or the bucket refuses
+  refuses its landing's run. The WORM copy of a chain is now made before the store's seal: a chain the bucket refused
+  stays unsealed in the store, so the next sweep names its run again and copies it.
+- **The sweep finds what was never marked:** besides runs with unsealed evidence, `evidence sweep` names a run whose
+  publish chain (`evidence-publish-<ID>-<role>-r<N>`, in the lookback, the newest for that stage and no older than the
+  PR) names an open stage PR whose head has no successful `evidence-sealed` from GitHub Actions. A mark still follows
+  the PR number in the run's own records, never the branch name. Its chains may all be sealed: `seal --resume` reads them back and
+  makes no second seal (Amendment 022), and the mark job marks the PR. One call lists the open PRs, and one call per
+  open stage PR with a publishing run reads its head's checks. For these reads the seal job gains `pull-requests: read`
+  and `checks: read` (`credentials_check/grants.json`).
+- **What it does not change:** a PR is marked only for a run whose every chain is sealed and stored, by the mark job.
+  The router's hold (§3m item 6) is unchanged. `seal` without `--resume` still refuses a second seal.
+- **Backfill copies `packs/` too**, so a landing attestation whose copy the bucket refused is copied by hand.
+
+Vectors 246, 247 and 248.
+
+**Amendment 050 (2026-11-26, HITL direction: "start with dispatcher F2 and F28"):** a failed GitHub read for one
+mission, or in one lane's own check, never strands the others, and never counts as an agent's failure.
+- **What was found:** the dispatcher audit (M-AUDIT-DISPATCH-001, findings F2 and F28, evidence E-2). Of the 49
+  failed Mission Agent runs, 26 failed in the plan job, so no agent, checks, publish or report job started: 9 a
+  dropped connection or timeout, 4 a 5xx, 4 the installation's rate limit, 1 a failed checkout, 4 a log since lost.
+  `plan` read each waiting mission's stage branch and tracking-issue comments with no `except`, so one mission's
+  failed read stopped every lane. In 4 more runs the rate limit failed every lane's "Is this lane still due?" step
+  and its report: each of those steps derived every unfinished mission, not only its own. A due step that failed
+  left the lane with no branch, and the report then recorded an agent failure, one of the three that block a stage,
+  for an agent that never started. MISSION-ROUTER-001 Amendment 026 already turns a dropped connection or a timeout
+  into a `GitHubError` and sends a read again after one, or after a 5xx.
+- **Each mission is planned on its own:** a `GitHubError` while planning one mission (its stage branch, its failure
+  record, its feedback, HITL's notes) or one challenge round leaves that one for the next run, with a note; the
+  others still start. Two reads stay all or nothing: the listing of this workflow's other runs, which keeps a lane
+  from running twice, and the router's discovery (Amendment 026). Neither can be partly trusted.
+- **A lane reads its own mission:** `due` and `report` derive only the lane's mission (`MissionRouter.survey(only)`),
+  and no stack, not every unfinished mission: one mission's reads in place of all of them, in every lane's checks,
+  agent and report jobs.
+- **Not started is not a failure:** when `due` cannot read GitHub, the lane does not run and `due --not-started`
+  records why. The checks job hands its record to the agent job (`not-started-checks-<lane>`), whose `due --after`
+  then does not start the agent either: an A3 without its checks would only be refused. The agent job hands its
+  record to the report job (`not-started-<lane>`), and `report --not-started` then records nothing: no agent ran,
+  and the next plan starts the lane again. A due step that finds the lane no longer due works as before.
+- **What it does not change:** the three-failure block, the failure record of an agent that ran, and every
+  fail-closed check. A mission whose failure record cannot be read is still held (§4).
+
+Vectors 249, 250 and 251.
+
+**Amendment 051 (2026-11-26, HITL direction: "start dispatcher F3 and F23"):** a job that did not end in an open PR
+says why, and its failure record is there exactly once.
+- **What was found:** the dispatcher audit (M-AUDIT-DISPATCH-001, findings F3 and F23, evidence E-2 and E-6). In 9
+  live runs the record said only `claude-code exited 1` or `cursor-cli exited 1`: the runtime's own reason stayed in
+  the agent log, which HITL then had to fetch. The failure record is what counts toward the three failures that block
+  a stage (§4); HITL has used `/mission retry` 8 times. The report job posted it once: a post that failed left no
+  record, so the stage could run again and again without ever counting; a post GitHub kept though its answer was
+  lost would, if sent again blindly, count twice. Two runs on 2026-10-22 had no tracking issue to report on; the
+  plan has held such a mission since that day (a mission whose failure record cannot be read is not started, §4).
+- **The reason:** when the runtime exits non-zero, or does not finish in time, its refusal record ends with how its
+  log ends: its last 8 non-empty lines, at most 800 characters, read only after the log is scrubbed of every secret
+  (the timeout case now also waits for the scrub). The report job quotes it through the quarantine, on one line, as
+  every refusal (§3j item 10); an empty log says so.
+- **Exactly once:** `report` posts the failure record through `post_once`. A post that ends with no HTTP answer, or
+  with a 500, 502, 503 or 504, may have been made: the issue is read, and the record is posted again, up to 3 tries
+  in all, only when it is not there. The run's URL makes each record's text unique; GitHub's `\r\n` line ends count
+  as the same text. Any other refusal, or a failure on the last try, fails the report job, as before.
+
+Vectors 252 and 253.
+
+**Amendment 052 (2026-11-26, HITL direction: "start dispatcher F7 and F8"; HITL chose the checks and the rule):**
+governance's landing checks are the checks its `main` requires plus the full suite, and a landing check that fails on
+the landing branch alone too does not refuse an A3 PASS.
+- **What was found:** the dispatcher audit (M-AUDIT-DISPATCH-001, findings F7 and F8, evidence E-5, E-8 and E-10).
+  Governance named no `landing_checks`, so its A3 PASSes had no proof from the landing branch's own checks, the gap
+  that left Core #300 unable to land. And 4 governance missions and 6 stacks were blocked because a plan check ran
+  tests that failed outside the mission's change (the full suite, release-deny terms, an import-closure rule).
+- **Governance's landing checks** (`config.json`): the five checks its required check "Governance Policy Validation"
+  runs in its own steps (naming, stub files, SPEC structure, CODEOWNERS, footer metadata), the EGACP boundary tests,
+  the evidence graph offline (git only: the checks account has no credential), and the full unit suite. The five
+  steps' bodies move unchanged into `tools/governance_validation/policy_ci_checks.sh`, which `policy-ci.yml` now
+  calls, so the required check and the landing checks run the very same commands. The footer-metadata step can never
+  fail (its `EXIT_CODE` is set in a piped loop's subshell); it moves as it is, and making it real is HITL's decision.
+- **The baseline:** a landing check that failed on the merged tree (an exit code or a timeout) is run again on the
+  landing branch's head alone, by a job of its own (`baseline`, `contents: read`) on a machine where no code under
+  review has run: code the checks account ran in the checks job could otherwise leave something behind to make the
+  baseline fail. `baseline.json` records each exit code; the publish job reads it beside `checks.json`. A landing check
+  is excused only when that record is for this job and the very head the commit under review was merged onto, and
+  names the same index and command with a non-zero exit code: a baseline that passed, timed out or did not match
+  excuses nothing. An excused check is shown to A3 and in the A3 PR as failing before this mission.
+- **Plan checks are never excused.** A plan check may test a file the mission adds, which fails on the landing
+  branch alone only because it is not there yet; exit codes cannot tell that apart, and the merged tree's output is
+  written by the code under review. Repository-wide health belongs in the landing checks; a plan's checks are its
+  own evidence and must pass (AR may challenge a plan that lists the full suite).
+- **Time:** a check may run 30 minutes (was 15), and the checks job 120 (was 60), for a full suite on a GitHub
+  runner. The baseline job runs beside the agent job, and only for the checks that failed.
+
+Vectors 254, 255, 256 and 257.
+
+**Amendment 053 (2026-11-26, HITL direction: "The system needs to work! ... the checks, guardrails, harnesses, security,
+all need to be REAL and operational"; HITL retired the SPEC format):** governance's policy checks fail on real problems,
+and the landing checks are those checks.
+- **What was found** while building Amendment 052: of the five checks "Governance Policy Validation" ran in its own
+  steps, four scanned paths that no longer exist (`governance/change-specs/`, `governance/POLICIES/`, `governance/CHARTERS/`,
+  `governance/TEMPLATES/`, `governance/work_orders/`, `governance/.github/CODEOWNERS`) and so found no file, and the
+  fifth (footer metadata) set its failure flag in a piped loop's subshell and so could never fail. The commit-reference
+  step only warned; the summary ticked every check whatever happened. The rules they stood for described the SPEC
+  format, which the repository no longer followed: 0 of 252 SPEC documents followed its template.
+- **The decision** (`POLICIES/SPEC-FORMAT-RETIREMENT-001.md`): the SPEC format is retired, superseded by mission plans.
+  `change-specs/` is a closed record, its documents left where they are: each Markdown document carries the ARCHIVED status block
+  of `POLICIES/ARCHIVAL_POLICY.md`, each other file is listed with its SHA-256. Four areas stay live, named in the
+  policy itself (`live: change-specs/<area>/`). The naming, structure, footer and commit-reference rules are removed, not
+  faked.
+- **The checks** (`tools/governance_validation/policy_checks.py`, which replaces Amendment 052's
+  `policy_ci_checks.sh`):
+  - `codeowners`: every rule line of `.github/CODEOWNERS` names at least one owner of a real form (`@user`,
+    `@org/team`, an e-mail address);
+  - `stubs`: `POLICIES/NO_STUBS_POLICY.md`'s own definition (an empty file, or a section whose whole content is a stub
+    marker), on its protected paths `POLICIES/`, `CHARTERS/` and `TEMPLATES/`, text in code fences excepted; the
+    policy's paths and its enforcement section are corrected to say what is checked;
+  - `archive`: every file under `change-specs/` outside the live areas is archived, so a new SPEC-format document, or a
+    change to an archived file that is not recorded, fails.
+  Each fails on a real problem, and a test proves it on a bad input. `policy-ci.yml` runs the three, and they replace
+  the five policy commands in governance's `landing_checks`.
+- **No mission may change them:** `policy_checks.py`, and the retirement policy and its hash list that the `archive`
+  check reads (its live areas, its hashes), are AUTHORITY paths in the SPEC-002 tables, so no agent's change to them
+  merges: a mission could otherwise switch a check off by editing its input. Amendment 052's `policy_ci_checks.sh` was
+  not: the import-closure test only looks for `.py` scripts. It is removed here.
+
+Vector 258.
+
 Vector 194.
 
 ## 1. Purpose
@@ -1709,7 +1848,8 @@ on" below).
        is irreversible, and is recorded in this spec when made.
    - **Backfill.** Runs sealed before the bucket was declared are copied once, by hand: run the seal workflow by
      hand (`workflow_dispatch`), and it only runs `python3 -m evidence backfill`. That copies every file the store
-     holds under `runs/` to the bucket, leaving any copy already there as it is, and seals and marks nothing.
+     holds under `runs/` and `packs/` to the bucket (`packs/` since Amendment 049: a landing attestation whose copy
+     the bucket refused), leaving any copy already there as it is, and seals and marks nothing.
    - **Switched on 2026-11-09** in governance: its `config.json` declares the bucket, in a Google Cloud project of
      its own, through a provider whose condition also pins the repository's and its owner's numeric ids. The
      retention policy is unlocked (governance).
@@ -2920,3 +3060,16 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 243 | A build that does not merge onto the landing branch; landing checks named but none recorded; none named; A3's task | A PASS is refused and a FAIL published with the record; refused; nothing changes; A3 is told the FAIL or BLOCKED rule only when landing checks are named (Amendment 048) |
 | 244 | The checks job | Runs for every A3, its checkout with the whole history, builds the landing tree and hands it to the checks account (Amendment 048) |
 | 245 | `landing_checks` or `landing_path_check` not a list of 1 to 10 (20) non-empty strings | The router stops (Amendments 048 and router 023) |
+| 246 | A sweep seals two runs and the WORM bucket refuses one run's copy | That run is refused and left unsealed in the store; the other run is sealed and its PR is marked (Amendment 049) |
+| 247 | A run whose chains are all sealed and that published an open stage PR with no `evidence-sealed` from GitHub Actions; the same with the check set; a sweep with no publishing run | The first is named and `seal --resume` hands its PR to the mark job; the second is not named; no PR or check is read (Amendment 049) |
+| 248 | The WORM bucket answers 401 part way through a job; it answers 401 again with the new token | One new token and the call is sent again; an error, as before (Amendment 049) |
+| 249 | Planning two missions when one mission's stage-branch read fails | The other mission's job is due; the first is noted and left for the next run (Amendment 050) |
+| 250 | A lane's due step: GitHub answers 403; GitHub reads; the checks job left a not-started record | Not due, and a not-started record says why; due, from a survey of the lane's mission only; not due, its own record names the checks job, and GitHub is not read (Amendment 050) |
+| 251 | The report job with a not-started record; the workflow | Nothing is read or recorded; the checks job hands its record to the agent job, and the agent job to the report job (Amendment 050) |
+| 252 | The runtime exits non-zero with a log that ends in an error and holds a secret; with an empty log; it does not finish in time | Its record ends `its log ends: ` and the last lines, scrubbed and at most 800 characters; `its log is empty`; `did not finish within` and how the log ends, read after the scrub (Amendment 051) |
+| 253 | Posting the failure record: a 502 before GitHub kept it; no answer though GitHub kept it; the same text with `\r\n`; a 403; a 503 three times | Posted again, once in all; not posted again; not posted again; one try, an error; three tries, an error (Amendment 051) |
+| 254 | A landing check failed on the merged tree; the baseline: failed on the same head with an exit code; another head, job, branch, index or command; passed alone; timed out alone; none; a plan check with a failing baseline | Excused: not a refusal, shown as failing before this mission; not excused in each other case; plan checks never excused (Amendment 052) |
+| 255 | The baseline job: landing checks that failed and passed; none failed; the build did not merge; an A2 job | Only the failed ones run on the landing branch's head, each index kept, `baseline.json` written; nothing to run in the other cases (Amendment 052) |
+| 256 | The workflow's baseline job | Needs the plan and checks jobs, holds `contents: read` only, checks out only the tooling and the landing branch's head; publish needs it and reads its record beside `checks.json`; the checks job may run 120 minutes (Amendment 052) |
+| 257 | Governance's config and its required check; the moved checks on a bad file name | The five policy commands, the boundary tests, the offline evidence graph and the full suite are its landing checks, and `policy-ci.yml` runs the same five commands; the naming check still fails (Amendment 052) |
+| 258 | Each policy check on this repository; on a CODEOWNERS rule with no owner or a malformed owner; a stub section, a placeholder, "coming soon" or an empty file in a protected path, and prose or a fenced example about stubs; a new SPEC-format document, a changed archived file, a new file that is not Markdown, a policy naming no live area | Each passes; each fails, prose and fenced examples pass (Amendment 053) |

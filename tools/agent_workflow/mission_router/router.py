@@ -334,11 +334,17 @@ class MissionRouter:
 
     # ------------------------------------------------------------------ sweep
     def sweep(self) -> Dict[str, MissionState]:
+        """One pass over every open mission. A GitHub failure in one part is logged and leaves that part for the next
+        sweep; the rest goes on (Amendment 026). Only discovery is all or nothing: a sweep that cannot list the
+        missions, their PRs and branches decides nothing, since a partial listing could look like a missing PR."""
         if not self.dry_run:
-            existing = {l["name"] for l in self.gh.paginate("/labels", limit=1000)}
-            for name, (color, description) in LABELS.items():
-                if name not in existing:
-                    self.gh.ensure_label(name, color, description)
+            try:
+                existing = {l["name"] for l in self.gh.paginate("/labels", limit=1000)}
+                for name, (color, description) in LABELS.items():
+                    if name not in existing:
+                        self.gh.ensure_label(name, color, description)
+            except GitHubError as exc:  # a label still missing is created by the next sweep
+                self.log(f"labels: GitHub error, will retry next sweep: {exc}")
         outside = self._discover()
         for raw in outside:
             if self.capture_prefix and str(raw["head"]["ref"]).startswith(self.capture_prefix):
@@ -347,10 +353,13 @@ class MissionRouter:
                 except GitHubError as exc:
                     self.log(f"capture PR #{raw['number']}: GitHub error, will retry next sweep: {exc}")
                 continue
-            self._publish_check(raw["head"]["sha"], "failure", "Not a mission",
-                                f"Only missions that passed A3 merge into `{raw['base']['ref']}`. This PR is not a mission stage "
-                                "PR, so the router will not pass it. HITL (the repository admin) can merge it outside "
-                                "the mission flow.")
+            try:
+                self._publish_check(raw["head"]["sha"], "failure", "Not a mission",
+                                    f"Only missions that passed A3 merge into `{raw['base']['ref']}`. This PR is not a "
+                                    "mission stage PR, so the router will not pass it. HITL (the repository admin) can "
+                                    "merge it outside the mission flow.")
+            except GitHubError as exc:
+                self.log(f"PR #{raw['number']}: GitHub error, will retry next sweep: {exc}")
 
         results = {}
         for mission_id in sorted(self._known):
@@ -363,16 +372,17 @@ class MissionRouter:
         self._sweep_stacks()
         return results
 
-    def survey(self) -> Dict[str, "_Context"]:
+    def survey(self, only: Optional[str] = None) -> Dict[str, "_Context"]:
         """Read-only: every unfinished mission's derived state and approved manifest. Writes nothing.
 
         The mission dispatcher uses this to decide which agent to start, so it acts on the
-        same derivation the router merges by, never on the tracking issue's text.
+        same derivation the router merges by, never on the tracking issue's text. With ``only``, just that mission
+        is derived: a lane's own check reads one mission, not all of them (MISSION-DISPATCH-001 Amendment 050).
         """
         self._discover()
         contexts = {}
         for mid in sorted(self._known):
-            if self._finished(mid):
+            if self._finished(mid) or (only is not None and mid != only):
                 continue
             try:
                 contexts[mid] = self.context(mid)

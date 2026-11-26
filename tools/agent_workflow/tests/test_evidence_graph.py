@@ -22,7 +22,7 @@ from evidence_graph import github_record, graph, history  # noqa: E402
 PACKAGE = AGENT_WORKFLOW / "evidence_graph"
 MID = "M-DEMO-001"
 MDIR = f"missions/{MID}/"
-BOT, HITL, A2, A3 = "test-bot[bot]", "hitl-user", "test-a2[bot]", "test-a3[bot]"
+BOT, HITL, A2, A3, AR = "test-bot[bot]", "hitl-user", "test-a2[bot]", "test-a3[bot]", "test-ar[bot]"
 # Author name and email per actor. HITL commits under a display name with the GitHub no-reply
 # address, as the web UI does, so the login comes from the email.
 IDENT = {
@@ -30,12 +30,13 @@ IDENT = {
     HITL: ("Hitl Person", "1234+hitl-user@users.noreply.github.com"),
     A2: (A2, f"{A2}@users.noreply.github.com"),
     A3: (A3, f"{A3}@users.noreply.github.com"),
+    AR: (AR, f"{AR}@users.noreply.github.com"),
     "seed": ("seed", "seed@example.invalid"),
     "dev": ("dev", "dev@example.invalid"),
     "intruder": ("intruder", "intruder@example.invalid"),
 }
 CONFIG = {"hitl_logins": [HITL], "bot_login": BOT, "default_branch": "main", "identity_registry": "REGISTRY.md",
-          "agents": {"a1": "test-a1[bot]", "a2": A2, "a3": A3}}
+          "agents": {"a1": "test-a1[bot]", "a2": A2, "a3": A3, "ar": AR}}
 MANIFEST = {"schema": "mission-v1", "mission_id": MID, "title": "Demo mission",
             "roles": {"A1": {"agent": "a1"}, "A2": {"agent": "a2"}, "A3": {"agent": "a3"}},
             "build_scope": ["tools/demo/**"], "max_rounds": 3}
@@ -111,12 +112,28 @@ class Fixture:
         return sha
 
     def mission(self, main, verdicts=("PASS",), approval="router", plan=PLAN, manifest_text=None, build_extra=None,
-                review_extra=None, wrong_reviewed=False, extra_merge_by=None, intruder=False):
-        """One mission from plan to landing on ``main``, the way the router records it."""
+                review_extra=None, wrong_reviewed=False, extra_merge_by=None, intruder=False, ar=None):
+        """One mission from plan to landing on ``main``, the way the router records it.
+
+        ``ar`` adds AR's round 1 after HITL approved the plan, as the plan head the approval carries to (router
+        Amendment 025): ``{"verdict": ..., "after": {path: text}}``, ``after`` being A1's commit on top of it."""
         out = {"builds": {}, "merges": {}, "reviews": {}}
         head = main
         manifest = manifest_text if manifest_text is not None else json.dumps(MANIFEST, indent=2) + "\n"
         out["plan"] = self.commit(HITL, f"{MID}: plan", head, {MDIR + "mission.json": manifest, MDIR + "PLAN.md": plan})
+        if ar is not None:
+            out["approved"] = out["plan"]
+            verdict = ar.get("verdict", "NO_CHALLENGE")
+            points = [] if verdict == "NO_CHALLENGE" else [{"id": "P1", "on": "PLAN.md", "claim": "c", "why": "w"}]
+            doc = {"schema": "mission-challenge-v1", "mission_id": MID, "round": 1, "challenged_sha": out["plan"],
+                   "verdict": verdict, "summary": "", "points": points}
+            out["ar_commit"] = self.commit(AR, f"Mission {MID}: AR round 1 (ar)", out["plan"],
+                                           {f"{MDIR}challenges/round-1.json": json.dumps(doc) + "\n",
+                                            f"{MDIR}challenges/round-1.md": "round 1\n"})
+            out["ar_merge"] = self.merge(BOT, f"Mission {MID}: AR round 1 ({verdict})", out["plan"], out["ar_commit"])
+            out["plan"] = out["ar_merge"]
+            if ar.get("after"):
+                out["plan"] = self.commit(HITL, f"{MID}: after AR", out["plan"], ar["after"])
         if approval == "router":
             head = self.merge(BOT, f"Mission {MID}: merge A1", head, out["plan"])
         elif approval == "hitl-merge":
@@ -454,11 +471,15 @@ class GitHubRecordTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def genuine(self, verdicts=("PASS",), approval="router", skip=(), **change):
+    def genuine(self, verdicts=("PASS",), approval="router", skip=(), ar=None, **change):
         """A mission plus the record the router would have left; ``skip`` leaves stages out, ``change`` alters them."""
         seed = self.fx.seed()
-        m = self.fx.mission(seed, verdicts=verdicts, approval=approval)
+        m = self.fx.mission(seed, verdicts=verdicts, approval=approval, ar=ar)
+        if ar is not None and "a1_comments" not in change:
+            change["a1_comments"] = [approve(m["approved"])]  # HITL approved the plan before AR's round
         mid = f"mission/{MID}/"
+        if "ar_merge" in m and "ar" not in skip:
+            self.gh.add(m["ar_merge"], mid + "ar-r1", m["ar_commit"], change.get("ar_opener", AR), BOT)
         if "a1" not in skip:
             merger = BOT if approval == "router" else HITL
             comments = change.get("a1_comments", [approve(m["plan"])] if approval == "router" else [])
@@ -553,6 +574,51 @@ class GitHubRecordTests(unittest.TestCase):
     def test_g2_a_hitl_merged_plan_merged_by_someone_else(self):
         self.genuine(approval="hitl-merge", a1_merger=BOT)
         self.assert_rule("G2", f"merged by {BOT}")
+
+    def test_g2_an_approval_carried_to_a_head_ar_passed_proves_the_mission(self):
+        """Amendment 025: HITL approved the plan, AR's NO_CHALLENGE round then moved the head. The router posts
+        no comment when the plan did not change, so G2 reads the carry from git and GitHub's record."""
+        self.genuine(ar={"verdict": "NO_CHALLENGE"})
+        doc, found = self.findings()
+        self.assertEqual(found, [])
+        self.assertTrue(nodes(doc)[f"mission:{MID}"]["proven"])
+
+    def test_g2_an_approval_does_not_carry_over_a_challenge(self):
+        self.genuine(ar={"verdict": "CHALLENGE"})
+        self.assert_rule("G2", "AR's latest round, 1, is CHALLENGE")
+
+    def test_g2_an_approval_does_not_carry_over_a_plan_change_ar_never_read(self):
+        self.genuine(ar={"after": {MDIR + "PLAN.md": PLAN + "\nA change AR never read.\n"}})
+        self.assert_rule("G2", f"the plan changed after AR read it in round 1: {MDIR}PLAN.md")
+
+    def test_g2_an_approval_does_not_carry_over_an_unanswered_response(self):
+        self.genuine(ar={"after": {MDIR + "challenges/round-1-response.md": "Position: DEFEND\nDrafted-with: HITL\n"}})
+        self.assert_rule("G2", "A1 answered AR round 1")
+
+    def test_g2_an_approval_does_not_carry_on_a_round_ar_did_not_open(self):
+        self.genuine(ar={"verdict": "NO_CHALLENGE"}, ar_opener="dev")
+        self.assert_rule("G2", "did not come in through AR's own pull request")
+
+    def test_g2_an_approval_does_not_carry_without_ar_s_pull_request(self):
+        self.genuine(ar={"verdict": "NO_CHALLENGE"}, skip=("ar",))
+        self.assert_rule("G2", "did not come in through AR's own pull request")
+
+    def test_g2_an_approval_of_a_commit_outside_the_plan_history_does_not_carry(self):
+        self.genuine(ar={"verdict": "NO_CHALLENGE"}, a1_comments=[approve("1" * 40)])
+        self.assert_rule("G2", "no HITL approval names a commit in its history")
+
+    def test_g2_a_carried_approval_still_needs_hitl(self):
+        for name, login, kind in (("bot", HITL, "Bot"), ("stranger", "stranger", "User")):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                m = self.fx.mission(self.fx.seed(), ar={"verdict": "NO_CHALLENGE"})
+                self.gh.add(m["ar_merge"], f"mission/{MID}/ar-r1", m["ar_commit"], AR, BOT)
+                self.gh.add(m["approval"], f"mission/{MID}/a1", m["plan"], HITL, BOT,
+                            comments=[approve(m["approved"], login=login, kind=kind)])
+                self.gh.add(m["merges"][1], f"mission/{MID}/a2-r1", m["builds"][1], A2, BOT, commits=[m["builds"][1]])
+                self.gh.add(m["landing"], f"mission/{MID}/a3-r1", m["reviews"][1], A3, BOT)
+                self.assert_rule("G2", "no HITL approval names a commit in its history")
 
     def test_g3_build_opened_by_an_impostor(self):
         self.genuine(a2_opener="dev")

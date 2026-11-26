@@ -138,7 +138,6 @@ class AttestationTests(unittest.TestCase):
                             for p in pack.store_problems(m.clone(), m.keys)))
 
     def test_a_truncated_store_listing_is_refused_never_partial(self):
-        from evidence import EvidenceError
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         listing = ListingStore()
@@ -152,9 +151,11 @@ class AttestationTests(unittest.TestCase):
                    authority_ref="MISSION-ROUTER-001")
         seed = ed25519.generate_seed()
         keys = {seal.keyid(ed25519.public_key(seed)): ed25519.public_key(seed).hex()}
-        with self.assertRaisesRegex(EvidenceError, "too large"):
-            sealer.seal_runs(Path(tmp.name), seed, keys, store.Store(listing.request), "2026-11-10T12:00:00Z",
-                             None, REPO)
+        result = sealer.seal_runs(Path(tmp.name), seed, keys, store.Store(listing.request), "2026-11-10T12:00:00Z",
+                                  None, REPO)
+        self.assertEqual(result["packs"], [], "never a partial attestation")
+        self.assertEqual([r["run"] for r in result["refused"]], ["gh-1-1-router"])
+        self.assertIn("too large", result["refused"][0]["reason"])
 
     def test_the_pae_is_dsse(self):
         self.assertEqual(pack.pae("t", b"ab"), b"DSSEv1 1 t 2 ab")

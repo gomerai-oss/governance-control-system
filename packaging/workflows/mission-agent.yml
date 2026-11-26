@@ -133,7 +133,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120  # Amendment 052: the plan's checks and a full suite as a landing check
     permissions:
       contents: read
       issues: read
@@ -171,7 +171,18 @@ jobs:
         if: matrix.job.role == 'A3'  # the plan's checks, and the landing branch's own (Amendment 048)
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
+        run: >-
+          python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
+          --not-started "$RUNNER_TEMP/not-started/not-started.txt"
+
+      - name: Hand a not-started record to the agent job (GitHub could not be read; Amendment 050)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: not-started-checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/not-started
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Check out the commit under review
         if: steps.due.outputs.due == 'true'
@@ -224,6 +235,96 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
+  # Amendment 052: a landing check that failed on the merged tree is run again on the landing branch's head alone. In
+  # a job of its own: no code under review has run on this machine, so it cannot make the baseline fail.
+  baseline:
+    name: baseline ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+    needs: [plan, checks]
+    if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      JOB: ${{ toJSON(matrix.job) }}
+    steps:
+      - name: Check out the default branch's tooling
+        if: matrix.job.role == 'A3'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        if: matrix.job.role == 'A3'
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Start this job's evidence chain (MISSION-DISPATCH-001 §3m, ring 6)
+        if: matrix.job.role == 'A3'
+        env:
+          LANE: ${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-baseline-$LANE" >> "$GITHUB_ENV"
+
+      - name: Fetch the checks results
+        if: matrix.job.role == 'A3'
+        id: fetch
+        continue-on-error: true  # none when the lane was not due: nothing to compare
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/checks
+
+      - name: Did a landing check fail on the merged tree?
+        id: due
+        if: steps.fetch.outcome == 'success'
+        run: python3 -m mission_dispatch baseline-due --checks "$RUNNER_TEMP/checks"
+
+      - name: Check out the landing branch's head alone (no code under review)
+        if: steps.due.outputs.due == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ steps.due.outputs.head }}
+          path: baseline
+          fetch-depth: 0  # the landing checks may read history (the evidence graph)
+          persist-credentials: false
+
+      - name: Run the failed landing checks there as an unprivileged account (no credential)
+        if: steps.due.outputs.due == 'true'
+        run: |
+          sudo useradd --create-home --shell /bin/bash mission-checks
+          sudo cp -a baseline /home/mission-checks/baseline
+          sudo chown -R mission-checks:mission-checks /home/mission-checks/baseline
+          python3 -m mission_dispatch baseline --root /home/mission-checks/baseline --checks "$RUNNER_TEMP/checks" --out "$RUNNER_TEMP/baseline" --run-as mission-checks
+          sudo pkill -KILL -u mission-checks || true
+
+      - name: Hand the baseline to the publish job
+        if: steps.due.outputs.due == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: baseline-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/baseline
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m)
+        if: always() && matrix.job.role == 'A3'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-baseline-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
+
   agent:
     name: agent ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
     needs: [plan, checks]
@@ -263,11 +364,30 @@ jobs:
           echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
           echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-agent-$LANE" >> "$GITHUB_ENV"
 
+      - name: Fetch the checks job's not-started record
+        continue-on-error: true  # none unless the checks job could not read GitHub (Amendment 050)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: not-started-checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/not-started-checks
+
       - name: Is this lane still due?
         id: due
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
+        run: >-
+          python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
+          --not-started "$RUNNER_TEMP/not-started/not-started.txt"
+          --after "$RUNNER_TEMP/not-started-checks/not-started.txt"
+
+      - name: Hand a not-started record to the report job (GitHub could not be read; Amendment 050)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: not-started-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/not-started
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Blast radius (observe or enforce)
         id: blast
@@ -446,7 +566,7 @@ jobs:
 
   publish:
     name: publish ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
-    needs: [plan, agent]
+    needs: [plan, agent, baseline]
     if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -497,6 +617,14 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/checks
+
+      - name: Fetch the baseline (a landing check failing on the landing branch alone too; Amendment 052)
+        if: steps.fetch.outcome == 'success' && matrix.job.role == 'A3'
+        continue-on-error: true  # none unless a landing check failed; without it every failure refuses a PASS
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: baseline-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/checks
 
       - name: Name this repository
@@ -591,6 +719,13 @@ jobs:
           name: capacity-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/capacity
 
+      - name: Fetch a not-started record
+        continue-on-error: true  # none unless the lane's own check could not read GitHub (Amendment 050)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: not-started-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/not-started
+
       - name: Fetch a refusal by the collect step
         continue-on-error: true  # none unless collect refused the change
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -618,7 +753,7 @@ jobs:
         run: >-
           python3 -m mission_dispatch report --repo "$GITHUB_REPOSITORY" --capacity "$RUNNER_TEMP/capacity/capacity.json"
           --refusal "$RUNNER_TEMP/refusal-collect/refusal.txt" --refusal "$RUNNER_TEMP/refusal-publish/refusal.txt"
-          --drafts "$RUNNER_TEMP/drafts/app-drafts.json"
+          --drafts "$RUNNER_TEMP/drafts/app-drafts.json" --not-started "$RUNNER_TEMP/not-started/not-started.txt"
 
       - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
         if: always()

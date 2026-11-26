@@ -575,6 +575,11 @@ class EnforcementSurfaceTests(unittest.TestCase):
             rel = f".github/workflows/{wf.name}"
             with self.subTest(workflow=rel):
                 self.assertEqual(tables.classify(normalize_path(rel)), "AUTHORITY")
+        # A shell script a workflow runs is authority too (MISSION-DISPATCH-001 Amendment 053): the import closure above
+        # follows Python only, which let a required check's `.sh` script stay a path an agent's change could merge.
+        for rel in sorted({m for text in texts for m in re.findall(r"tools/[A-Za-z0-9_./-]+\.(?:sh|bash)\b", text)}):
+            with self.subTest(script=rel):
+                self.assertEqual(tables.classify(normalize_path(rel)), "AUTHORITY")
 
     def test_every_workflow_action_is_pinned_to_a_commit(self):
         """Stress test F8: a tag can be moved to new code; a 40-hex commit cannot. Every `uses:` names a commit."""

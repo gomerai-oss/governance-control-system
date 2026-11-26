@@ -474,12 +474,20 @@ class SweepTests(Base):
     class Actions:
         """``/actions/artifacts`` (newest first, 100 a page) and ``/actions/runs/<id>``."""
 
-        def __init__(self, runs, artifacts):
+        def __init__(self, runs, artifacts, pulls=(), checks=None):
             self.runs, self.paths = {r["id"]: r for r in runs}, []
             self.artifacts = artifacts  # [(run id, name, created_at)], newest first
+            self.pulls = list(pulls)  # open PRs: [(head ref, head sha)]
+            self.checks = checks or {}  # {sha: [check run]}
 
         def __call__(self, method, path, body=None):
             self.paths.append(path)
+            if path.startswith("/pulls?state=open"):
+                return [{"head": {"ref": p[0], "sha": p[1]}, "created_at": p[2] if len(p) > 2 else "2026-11-10T03:00:00Z"}
+                        for p in self.pulls]
+            if path.startswith("/commits/"):
+                assert "check_name=evidence-sealed" in path, path
+                return {"check_runs": self.checks.get(path.split("/")[2], [])}
             if path.startswith("/actions/artifacts?"):
                 page = int(path.rsplit("page=", 1)[1])
                 rows = self.artifacts[(page - 1) * 100:page * 100]
@@ -543,10 +551,80 @@ class SweepTests(Base):
         pages = [p for p in actions.paths if p.startswith("/actions/artifacts?")]
         self.assertEqual(len(pages), 3, "page 3 is wholly before the lookback, so page 4 is never asked for")
 
+    def test_v247_a_sealed_run_whose_open_pr_was_never_marked_is_named_again(self):
+        """2026-11-25: #1396's run was sealed by a sweep that then stopped before its mark job; every later sweep
+        found its chains all sealed and skipped it, and the router held the PR for good."""
+        from evidence import sweep
+        pub = "evidence-publish-M-DEMO-001-A2-r2"
+        mark = {"app": {"slug": "github-actions"}, "conclusion": "success"}
+        actions = self.Actions(
+            [self.run_(41), self.run_(42), self.run_(43)],
+            [(41, "evidence-agent-M-DEMO-001-A2-r2", self.T), (41, pub, self.T),
+             (42, "evidence-publish-M-DEMO-002-A3-r1", self.T), (43, "evidence-publish-M-DEMO-003-AR-r1", self.T)],
+            pulls=[("mission/M-DEMO-001/a2-r2", "1" * 40), ("mission/M-DEMO-002/a3-r1", "2" * 40),
+                   ("mission/M-DEMO-003/ar-r1", "3" * 40), ("feature/other", "4" * 40)],
+            checks={"2" * 40: [mark], "3" * 40: [{**mark, "app": {"slug": "someone-else"}}]})
+        store_ = self.Trees({"gh-41-1-agent-M-DEMO-001-A2-r2": True, f"gh-41-1-{pub[9:]}": True,
+                             "gh-42-1-publish-M-DEMO-002-A3-r1": True, "gh-43-1-publish-M-DEMO-003-AR-r1": True})
+        self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW),
+                         [{"id": 41, "attempt": 1}, {"id": 43, "attempt": 1}],
+                         "unmarked, and marked only by another app; a marked PR's run is not named")
+        self.assertNotIn(f"/commits/{'4' * 40}/check-runs?check_name=evidence-sealed&per_page=100", actions.paths,
+                         "a PR no publishing run names is not read")
+
+    def test_v247_an_earlier_attempt_at_the_stage_is_not_the_pr_s_run(self):
+        from evidence import sweep
+        actions = self.Actions([self.run_(61)], [(61, "evidence-publish-M-DEMO-001-A2-r2", self.T)],
+                               pulls=[("mission/M-DEMO-001/a2-r2", "5" * 40, "2026-11-10T04:30:00Z")])
+        self.assertEqual(sweep.unsealed_runs(actions, self.Trees({"gh-61-1-publish-M-DEMO-001-A2-r2": True}),
+                                             self.NOW), [], "the PR was opened after that run published")
+
+    def test_v247_resume_marks_the_pr_of_a_run_already_sealed(self):
+        p = self.job("publish", [("dispatch.publish", 7)])
+        self.seal()
+        again = sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request),
+                                 "2026-11-10T05:00:00Z", resume=True)
+        self.assertEqual([m["pr"] for m in sealer.to_mark(again)], [7])
+        self.assertEqual(again["refused"], [])
+
+    def test_v247_with_no_publishing_run_no_pr_is_read(self):
+        from evidence import sweep
+        actions = self.Actions([self.run_(51)], [(51, "evidence-router", self.T)])
+        sweep.unsealed_runs(actions, self.Trees({"gh-51-1-router": True}), self.NOW)
+        self.assertFalse(any(p.startswith(("/pulls", "/commits/")) for p in actions.paths), actions.paths)
+
     def test_a_truncated_store_listing_sweeps_nothing(self):
         from evidence import sweep
         with self.assertRaisesRegex(EvidenceError, "too large"):
             sweep.unsealed_runs(self.Actions([], {}), self.Trees({}, truncated=True), self.NOW)
+
+    def test_v246_a_copy_refused_for_one_run_holds_back_only_that_run(self):
+        """2026-11-25, seal run 45628280774: the WORM bucket refused one run's copy, the job stopped with no result,
+        and the PR another run had published was never marked; later sweeps found it sealed and skipped it."""
+        class Worm:
+            def __init__(self):
+                self.objects = {}
+
+            def put(self, name, data):
+                if "/gh-2-1-" in name:
+                    raise EvidenceError(f"the WORM bucket refused {name}: HTTP 401")
+                self.objects[name] = data
+                return "added"
+
+        p = self.job("publish", [("dispatch.publish", 7)])
+        rec = producer.Recorder(self.chains / "evidence-router", "gh-2-1-router")
+        rec.record(actor="mission-dispatch", account_id=None, action="dispatch.prepare", result="done", pr=None,
+                   commit="a" * 40, authority_kind="plan", authority_ref="M-DEMO-001 A2 round 1")
+        worm_ = Worm()
+        result = sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request),
+                                  "2026-11-10T05:00:00Z", worm_, resume=True)
+        self.assertEqual(result["sealed"], [p])
+        self.assertEqual([r["run"] for r in result["refused"]], ["gh-2-1-router"])
+        self.assertIn("HTTP 401", result["refused"][0]["reason"])
+        self.assertEqual([m["pr"] for m in sealer.to_mark(result)], [7], "the other run's PR is still marked")
+        self.assertIn(f"runs/{p}/seal.json", worm_.objects)
+        self.assertNotIn("runs/gh-2-1-router/seal.json", self.fake.files,
+                         "the refused chain is left unsealed in the store, so the next sweep names it again")
 
     def test_v123_resume_seals_the_rest_and_never_seals_twice(self):
         a = self.job("agent", [("dispatch.prepare", None)])
@@ -567,8 +645,11 @@ class SweepTests(Base):
     def test_without_resume_a_second_seal_is_still_refused(self):
         self.job("publish")
         self.seal()
-        with self.assertRaisesRegex(EvidenceError, "never replaced"):
-            sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request), "2026-11-10T05:00:00Z")
+        result = sealer.seal_runs(self.chains, self.seed, self.keys, store.Store(self.fake.request),
+                                  "2026-11-10T05:00:00Z")
+        self.assertEqual(result["sealed"], [])  # refused, never replaced, and its PRs not marked (Amendment 049)
+        self.assertTrue(result["refused"] and all("never replaced" in r["reason"] for r in result["refused"]), result)
+        self.assertEqual(sealer.to_mark(result), [])
 
     def test_the_sweep_covers_the_sealed_workflows(self):
         from evidence import sweep
