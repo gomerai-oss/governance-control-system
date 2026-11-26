@@ -690,16 +690,16 @@ class PermissionsTable(unittest.TestCase):  # vectors 77, 78, 110
         (finding,) = self.findings("mission-agent.yml", block, "    permissions: ${{ fromJSON(vars.P) }}\n")
         self.assertIn("job plan asks for computed permissions", finding)
 
-    def test_an_app_token_widened_or_unscoped(self):  # AST-2.3 (c)
+    def test_an_app_token_widened_or_unscoped(self):  # AST-2.3 (c); the first App token is the publisher job's (Amendment 054)
         found = self.findings("mission-agent.yml", "          permission-pull-requests: write\n",
                               "          permission-pull-requests: write\n          permission-administration: write\n")
-        self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 asks for administration: write, "
+        self.assertEqual(found, ["mission-agent.yml: job publisher, App token 1 asks for administration: write, "
                                  "which its row does not list"])
         found = self.findings("mission-agent.yml", "          repositories: ${{ steps.repo.outputs.name }}\n", "")
-        self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 must name repositories: "
+        self.assertEqual(found, ["mission-agent.yml: job publisher, App token 1 must name repositories: "
                                  "${{ steps.repo.outputs.name }} (this repository only), and names none"])
         found = self.findings("mission-agent.yml", "${{ steps.repo.outputs.name }}", "a, b")
-        self.assertEqual(found, ["mission-agent.yml: job publish, App token 1 must name repositories: "
+        self.assertEqual(found, ["mission-agent.yml: job publisher, App token 1 must name repositories: "
                                  "${{ steps.repo.outputs.name }} (this repository only), not 'a, b'"])
 
     def test_the_router_s_sweep(self):  # vector 110

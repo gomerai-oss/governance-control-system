@@ -160,7 +160,8 @@ class Vector231KeyRoute(unittest.TestCase):
             slot = app["key_slot"]
             seats = sorted(s for s, row in SEATS.items() if set(app["resources"]) & set(row["resources"]))
             condition = " || ".join(f"matrix.job.role == '{s}'" for s in seats)
-            gated = f"{slot}: ${{{{ {condition} && secrets.{slot} || '' }}}}"
+            # MISSION-DISPATCH-001 Amendment 054: in the agent job, only while the app gateway is on
+            gated = f"{slot}: ${{{{ {condition} && needs.plan.outputs.app_gateway != 'off' && secrets.{slot} || '' }}}}"
             with self.subTest(app=name):
                 uses = [(job, step, line.split("  #")[0].strip()) for job, step, line in self.uses() if slot in line]
                 self.assertEqual(sorted((job, step.split(" (")[0]) for job, step, _ in uses), [

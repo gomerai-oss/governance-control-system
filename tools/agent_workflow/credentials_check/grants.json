@@ -6,6 +6,7 @@
       "top level": {},
       "jobs": {
         "plan": {"actions": "read", "contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
+        "publisher": {"contents": "read"},
         "checks": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
         "baseline": {"contents": "read"},
         "agent": {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "read"},
@@ -17,6 +18,7 @@
         "perform": {"actions": "read", "contents": "read", "issues": "write", "pull-requests": "read", "checks": "read"}
       },
       "app_tokens": {
+        "publisher": [{"contents": "write", "pull-requests": "write"}],
         "publish": [{"contents": "write", "pull-requests": "write"}],
         "land": [{"contents": "write", "pull-requests": "write"}]
       }

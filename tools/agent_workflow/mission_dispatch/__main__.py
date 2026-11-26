@@ -159,6 +159,9 @@ def other_runs(gh: GitHub, own_run_id: str) -> list:
 
 
 def cmd_plan(args) -> int:
+    # Amendment 054: the agent job hands an app's key (APP_KEY_<n>) to its run and collect steps only while the
+    # app gateway is on; with it off the key never enters the job that holds agent-written content.
+    _output("app_gateway", _app_mode(load_config()))
     gh = GitHub(_env("GITHUB_TOKEN"), args.repo)
     runs = other_runs(gh, os.environ.get("GITHUB_RUN_ID", ""))
     busy, unknown = busy_lanes(runs)
@@ -304,6 +307,11 @@ def cmd_due(args) -> int:
     the lane does not run, and ``--not-started`` records why, so the report job records no failure: the agent never
     started, and the next plan starts it again."""
     job = _job()
+    blocked = _not_started(getattr(args, "blocked_by", "") or "")
+    if blocked:  # Amendment 054: the seat cannot publish, so no work starts; the report records why, as a failure
+        _log(f"{job.key}: not running: {blocked}")
+        _output("due", "false")
+        return 0
     earlier = _not_started(getattr(args, "after", "") or "")
     if earlier:  # the checks job could not read GitHub: an A3 without its checks would only be refused
         _log(f"{job.key}: not running: the checks job did not start ({earlier}); the next run plans it again")
@@ -1092,6 +1100,8 @@ def main(argv=None) -> int:
     for name in ("due", "report"):  # Amendment 050: a lane not started because GitHub could not be read
         sub.choices[name].add_argument("--not-started", default="", help="where due records why the lane did not start")
     sub.choices["due"].add_argument("--after", default="", help="the checks job's not-started record, if any")
+    sub.choices["due"].add_argument("--blocked-by", default="",
+                                    help="the publisher job's record that the seat cannot publish (Amendment 054)")
     sub.choices["checks"].add_argument("--timeout", type=float, default=900.0)
     sub.choices["checks"].add_argument("--run-as", help="unprivileged account to run the checks as")
     sub.choices["checks"].add_argument("--landing-root", default="", help="the landing tree (Amendment 048)")

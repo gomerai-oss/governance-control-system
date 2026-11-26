@@ -557,6 +557,34 @@ and the landing checks are those checks.
 
 Vector 258.
 
+**Amendment 054 (2026-11-26, HITL direction: "start dispatcher F18 and F19"):** an app's key stays out of the agent
+job while the app gateway is off, and a seat that cannot publish starts no work.
+- **What was found:** the dispatcher audit (M-AUDIT-DISPATCH-001, findings F18 and F19, evidence E-2, E-4, E-8 and
+  E-10).
+  - F19: §5 said the job that runs the agent never holds an App key, but the workflow handed `APP_KEY_1` (the Slack
+    app's token, Amendment 043) to the A2 seat's run and collect steps in every run, while `app_gateway`, the only
+    thing that uses it there, is off in both repositories. A live key sat beside agent-written content for nothing.
+  - F18: the publish job mints the seat's App token only after the agent has run. Five live runs (three AR rounds on
+    M-APP-HARNESS-001, two A3 rounds on M-ZERO-002) did all their work and then could not publish: "permissions
+    requested are not granted to this installation", a setting of the App's installation outside the repository.
+- **The key:** the plan job outputs the `app_gateway` mode, and the agent job's run and collect steps get
+  `APP_KEY_1` only when it is not `off`. With the gateway off the key never enters the agent job. §5 now states the
+  boundary as it is: no GitHub App key or write token in the agent job; an external app's key only while the gateway
+  is on, only in those two steps, held by the egress proxy and never by the agent's account. The credentials
+  register's row says the same.
+- **The publisher job:** before any work starts, a `publisher` job per lane, in the seat's own environment
+  (`mission-agent-<agent>`, `contents: read`), mints the App token publish will need with the same permissions
+  (this repository, contents and pull requests write) and leaves it unused; the action revokes it at the end of the
+  job. Only the default branch's tooling is checked out, for the substrate check every job runs (§3h item 6): a job
+  that holds a seat's App key must run on a GitHub-hosted or declared machine. No code under review is there. A seat whose App cannot mint records why (`cannot-publish-<lane>`): the
+  lane's checks and agent jobs read it (`due --blocked-by`) and do not start, and the report job quotes it as the
+  refusal ("Refused in `publish`: ..."). It is a failure, not a lane left unstarted (Amendment 050): only HITL can fix
+  the App's installation, and after three in a row the stage is held for HITL's `/mission retry`. Each lane's
+  record is its own: a matrix job's result fails when any lane fails, so one seat's App never stops another's lane.
+- **What it costs:** one short job per lane (about a billed minute), and one token minted and revoked unused.
+
+Vectors 259, 260 and 261.
+
 Vector 194.
 
 ## 1. Purpose
@@ -2615,8 +2643,11 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
   and a summary. `publish` reads it as data and applies it with `git apply`, which runs no hooks. It re-runs every
   §3c check on a fresh clone. An agent that tampers with its own artifact gains nothing that the checks do not
   already allow.
-- **Credentials are split by job.** The job that runs the agent never holds an App key or a write token. The job that
-  holds an App key never runs agent code and holds the key of only the one agent the approved plan names.
+- **Credentials are split by job.** The job that runs the agent never holds a GitHub App key or a write token. The job
+  that holds a GitHub App key never runs agent code and holds the key of only the one agent the approved plan names.
+  An external app's key (`APP_KEY_<n>`, Amendment 043) enters the agent job only while `config.json`'s `app_gateway`
+  is on, and then only in the A2 seat's run step, handed to the egress proxy alone (never the agent's account), and its
+  collect step, which refuses a change holding it (Amendment 054).
 - **Keys are checked against the registry (Amendment 013).** A job proves the App key it holds is the registered
   App's before it pushes (§3i), so a key in the wrong environment pushes nothing.
 - **HITL cannot be impersonated.** No job ever holds a HITL user credential. The router accepts `/mission approve`,
@@ -3073,3 +3104,6 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 256 | The workflow's baseline job | Needs the plan and checks jobs, holds `contents: read` only, checks out only the tooling and the landing branch's head; publish needs it and reads its record beside `checks.json`; the checks job may run 120 minutes (Amendment 052) |
 | 257 | Governance's config and its required check; the moved checks on a bad file name | The five policy commands, the boundary tests, the offline evidence graph and the full suite are its landing checks, and `policy-ci.yml` runs the same five commands; the naming check still fails (Amendment 052) |
 | 258 | Each policy check on this repository; on a CODEOWNERS rule with no owner or a malformed owner; a stub section, a placeholder, "coming soon" or an empty file in a protected path, and prose or a fenced example about stubs; a new SPEC-format document, a changed archived file, a new file that is not Markdown, a policy naming no live area | Each passes; each fails, prose and fenced examples pass (Amendment 053) |
+| 259 | The app gateway off; on | The plan job outputs `off` and the agent job's run and collect steps get no `APP_KEY_1`; they get it (Amendment 054) |
+| 260 | A lane's due step with the publisher's record; without it | Not due, no not-started record, GitHub not read; as before (Amendment 054) |
+| 261 | The workflow's publisher job; the report with the publisher's record | Per lane, in the seat's environment, `contents: read`, checks out only the tooling and runs the substrate check, mints the token with publish's permissions; the checks and agent jobs read its record per lane; the report quotes it as a refusal in publish (Amendment 054) |
