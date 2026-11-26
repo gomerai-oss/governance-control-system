@@ -91,6 +91,7 @@ jobs:
       land_matrix: ${{ steps.plan.outputs.land_matrix }}
       scan_count: ${{ steps.plan.outputs.scan_count }}
       scan_matrix: ${{ steps.plan.outputs.scan_matrix }}
+      app_gateway: ${{ steps.plan.outputs.app_gateway }}  # Amendment 054: an app's key reaches the agent job only when on
     steps:
       - name: Check out the default branch's tooling
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -128,10 +129,73 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-  checks:
-    name: checks ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+  # Amendment 054: before any work starts, each lane's seat mints the App token publish will need, with the same
+  # permissions, and lets it go unused (the action revokes it at the end of the job). A seat whose App cannot (its
+  # installation or permissions) records why, and the lane's checks and agent do not run: five live runs did all
+  # their work and then could not publish. Only the default branch's tooling runs here (the substrate check), and the
+  # job's own token can only read.
+  publisher:
+    name: publisher ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
     needs: plan
     if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: mission-agent-${{ matrix.job.agent }}
+    permissions:
+      contents: read  # check out this repository's tooling, for the substrate check
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Check out the default branch's tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: Name this repository
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint the agent's App token as publish will (this repository, contents + pull requests only)
+        id: token
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Record that this seat cannot publish
+        if: failure()
+        env:
+          AGENT: ${{ matrix.job.agent }}
+        run: |
+          install -d "$RUNNER_TEMP/cannot-publish"
+          echo "publish: the $AGENT seat's App could not mint a token with contents and pull-requests write on this repository, so no work was started; its installation or permissions need HITL (this run's publisher job shows GitHub's answer)" > "$RUNNER_TEMP/cannot-publish/refusal.txt"
+
+      - name: Hand the record to the lane's jobs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cannot-publish-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/cannot-publish
+          if-no-files-found: ignore
+          retention-days: 1
+
+  checks:
+    name: checks ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
+    needs: [plan, publisher]
+    if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120  # Amendment 052: the plan's checks and a full suite as a landing check
     permissions:
@@ -166,6 +230,13 @@ jobs:
           echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
           echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-checks-$LANE" >> "$GITHUB_ENV"
 
+      - name: Fetch the publisher job's record (Amendment 054)
+        continue-on-error: true  # none unless this seat's App could not mint its token
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cannot-publish-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/cannot-publish
+
       - name: Is this lane still due?
         id: due
         if: matrix.job.role == 'A3'  # the plan's checks, and the landing branch's own (Amendment 048)
@@ -174,6 +245,7 @@ jobs:
         run: >-
           python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
           --not-started "$RUNNER_TEMP/not-started/not-started.txt"
+          --blocked-by "$RUNNER_TEMP/cannot-publish/refusal.txt"
 
       - name: Hand a not-started record to the agent job (GitHub could not be read; Amendment 050)
         if: always()
@@ -327,7 +399,7 @@ jobs:
 
   agent:
     name: agent ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
-    needs: [plan, checks]
+    needs: [plan, publisher, checks]
     if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -371,6 +443,13 @@ jobs:
           name: not-started-checks-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/not-started-checks
 
+      - name: Fetch the publisher job's record (Amendment 054)
+        continue-on-error: true  # none unless this seat's App could not mint its token
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cannot-publish-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/cannot-publish
+
       - name: Is this lane still due?
         id: due
         env:
@@ -379,6 +458,7 @@ jobs:
           python3 -m mission_dispatch due --repo "$GITHUB_REPOSITORY"
           --not-started "$RUNNER_TEMP/not-started/not-started.txt"
           --after "$RUNNER_TEMP/not-started-checks/not-started.txt"
+          --blocked-by "$RUNNER_TEMP/cannot-publish/refusal.txt"
 
       - name: Hand a not-started record to the report job (GitHub could not be read; Amendment 050)
         if: always()
@@ -488,7 +568,7 @@ jobs:
           CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
           # App keys by slot, only for the seat whose resources name the slot's app (A2; Amendment 043). The run
           # gives a key to the egress proxy only, and only while "app_gateway" grants an app tool.
-          APP_KEY_1: ${{ matrix.job.role == 'A2' && secrets.APP_KEY_1 || '' }}
+          APP_KEY_1: ${{ matrix.job.role == 'A2' && needs.plan.outputs.app_gateway != 'off' && secrets.APP_KEY_1 || '' }}
           JOB_ROOT: ${{ steps.blast.outputs.root }}
           RUN_AS: ${{ steps.blast.outputs.run_as }}
           PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
@@ -503,7 +583,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ matrix.job.runtime == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ matrix.job.runtime == 'claude-code' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           CURSOR_API_KEY: ${{ matrix.job.runtime == 'cursor-cli' && secrets.CURSOR_API_KEY || '' }}
-          APP_KEY_1: ${{ matrix.job.role == 'A2' && secrets.APP_KEY_1 || '' }}  # only to refuse a change holding it
+          APP_KEY_1: ${{ matrix.job.role == 'A2' && needs.plan.outputs.app_gateway != 'off' && secrets.APP_KEY_1 || '' }}  # only to refuse a change holding it
           JOB_ROOT: ${{ steps.blast.outputs.root }}
           PYTHONPATH: ${{ steps.blast.outputs.pythonpath }}
         run: >-
@@ -676,7 +756,7 @@ jobs:
 
   report:
     name: report ${{ matrix.job.mission_id }} ${{ matrix.job.role }} r${{ matrix.job.round }}
-    needs: [plan, checks, agent, publish]
+    needs: [plan, publisher, checks, agent, publish]
     if: ${{ !cancelled() && needs.plan.outputs.count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -719,6 +799,13 @@ jobs:
           name: capacity-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
           path: ${{ runner.temp }}/capacity
 
+      - name: Fetch the publisher job's record (Amendment 054)
+        continue-on-error: true  # none unless this seat's App could not mint its token
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cannot-publish-${{ matrix.job.mission_id }}-${{ matrix.job.role }}-r${{ matrix.job.round }}
+          path: ${{ runner.temp }}/cannot-publish
+
       - name: Fetch a not-started record
         continue-on-error: true  # none unless the lane's own check could not read GitHub (Amendment 050)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -754,6 +841,7 @@ jobs:
           python3 -m mission_dispatch report --repo "$GITHUB_REPOSITORY" --capacity "$RUNNER_TEMP/capacity/capacity.json"
           --refusal "$RUNNER_TEMP/refusal-collect/refusal.txt" --refusal "$RUNNER_TEMP/refusal-publish/refusal.txt"
           --drafts "$RUNNER_TEMP/drafts/app-drafts.json" --not-started "$RUNNER_TEMP/not-started/not-started.txt"
+          --refusal "$RUNNER_TEMP/cannot-publish/refusal.txt"
 
       - name: Keep this job's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
         if: always()

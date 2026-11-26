@@ -2421,6 +2421,87 @@ class LandingBaselineWiringTests(unittest.TestCase):
         self.assertEqual(jobs["checks"]["timeout-minutes"], 120)
 
 
+class SeatAndKeyTests(unittest.TestCase):
+    """Amendment 054, vectors 259 to 261 (dispatcher audit F18 and F19): an app's key stays out of the agent job while
+    the app gateway is off, and a seat whose App cannot publish starts no work."""
+
+    JOB = Job(MID, "A2", 1, "a2", A2B, "claude-code", "a" * 40, ("tools/demo/**",), "t")
+    ROOT = Path(__file__).resolve().parents[3]
+
+    def jobs(self):
+        import yaml
+        path = self.ROOT / ".github" / "workflows" / "mission-agent.yml"
+        path = path if path.is_file() else self.ROOT / "packaging" / "workflows" / "mission-agent.yml"
+        return yaml.safe_load(path.read_text())["jobs"]
+
+    def test_v259_the_plan_job_says_whether_the_app_gateway_is_on(self):
+        from mission_dispatch import __main__ as cli
+        outputs = {}
+        with mock.patch.object(cli, "GitHub"), mock.patch.object(cli, "other_runs", return_value=[]), \
+                mock.patch.object(cli, "busy_lanes", return_value=(set(), True)), \
+                mock.patch.object(cli, "_output", side_effect=lambda k, v: outputs.__setitem__(k, v)), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), mock.patch("sys.stderr"):
+            for mode in ("off", "enforce"):
+                with self.subTest(mode), mock.patch.object(cli, "load_config", return_value={"app_gateway": mode}):
+                    cli.cmd_plan(SimpleNamespace(repo="o/r"))
+                    self.assertEqual(outputs["app_gateway"], mode)
+
+    def test_v259_the_agent_job_gets_an_app_key_only_while_the_gateway_is_on(self):
+        jobs = self.jobs()
+        self.assertEqual(jobs["plan"]["outputs"]["app_gateway"], "${{ steps.plan.outputs.app_gateway }}")
+        keyed = [step for step in jobs["agent"]["steps"] if "APP_KEY_1" in (step.get("env") or {})]
+        self.assertEqual(len(keyed), 2, "the run and collect steps")
+        for step in keyed:
+            with self.subTest(step["name"]):
+                self.assertIn("needs.plan.outputs.app_gateway != 'off'", step["env"]["APP_KEY_1"])
+        for name in ("plan", "publisher", "checks", "baseline", "publish", "report"):
+            self.assertNotIn("APP_KEY_1", json.dumps(jobs[name]), name)
+
+    def test_v260_a_seat_that_cannot_publish_starts_no_work(self):
+        from mission_dispatch import __main__ as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            record = Path(tmp) / "refusal.txt"
+            record.write_text("publish: the a2 seat's App could not mint a token\n")
+            started = Path(tmp) / "not-started.txt"
+            outputs = {}
+            with mock.patch.object(cli, "_job", return_value=self.JOB), mock.patch.object(cli, "live_survey") as live, \
+                    mock.patch.object(cli, "_output", side_effect=lambda k, v: outputs.__setitem__(k, v)), \
+                    mock.patch("sys.stderr"):
+                code = cli.cmd_due(SimpleNamespace(repo="o/r", not_started=str(started), after="",
+                                                   blocked_by=str(record)))
+            self.assertEqual((code, outputs), (0, {"due": "false"}))
+            live.assert_not_called()
+            self.assertFalse(started.exists(), "a failure the report records, not a lane left unstarted")
+
+    def test_v261_the_publisher_job_mints_as_publish_does_and_runs_no_code(self):
+        jobs = self.jobs()
+        pub, publish = jobs["publisher"], jobs["publish"]
+        self.assertEqual((pub["needs"], pub["permissions"], pub["environment"]),
+                         ("plan", {"contents": "read"}, "mission-agent-${{ matrix.job.agent }}"))
+        mint = [st for st in pub["steps"] if "create-github-app-token@" in str(st.get("uses"))]
+        real = [st for st in publish["steps"] if "create-github-app-token@" in str(st.get("uses"))]
+        self.assertEqual(len(mint), 1)
+        self.assertEqual((mint[0]["uses"], mint[0]["with"]), (real[0]["uses"], real[0]["with"]))
+        refs = [st["with"]["ref"] for st in pub["steps"] if "checkout@" in str(st.get("uses"))]
+        self.assertEqual(refs, ["${{ github.sha }}"], "only the default branch's tooling, never code under review")
+        self.assertIn("python3 -B -m mission_router.substrate", [st.get("run") for st in pub["steps"]])
+        for name in ("checks", "agent"):
+            with self.subTest(name):
+                self.assertIn("publisher", jobs[name]["needs"])
+                self.assertIn("cannot-publish-${{", json.dumps(jobs[name]))
+                runs = " ".join(str(st.get("run", "")) for st in jobs[name]["steps"])
+                self.assertIn('--blocked-by "$RUNNER_TEMP/cannot-publish/refusal.txt"', runs)
+                self.assertIn("!cancelled()", str(jobs[name]["if"]), "one lane's failed mint does not skip the others")
+        self.assertIn('--refusal "$RUNNER_TEMP/cannot-publish/refusal.txt"',
+                      " ".join(str(st.get("run", "")) for st in jobs["report"]["steps"]))
+
+    def test_v261_the_report_quotes_it_as_a_refusal_in_publish(self):
+        text = failure_comment(self.JOB, "no mission/M-DEMO-001/a2-r1 branch was pushed", "",
+                               ["publish: the a2 seat's App could not mint a token with contents and pull-requests "
+                                "write on this repository, so no work was started"])
+        self.assertIn("Refused in `publish`: the a2 seat's App could not mint a token", text)
+
+
 class PostOnceTests(unittest.TestCase):
     """Amendment 051, vector 253 (dispatcher audit F23): a failure record is there exactly once, so the three-failure
     stop counts every failure, and none twice, when posting it fails part way."""
