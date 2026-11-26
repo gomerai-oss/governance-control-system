@@ -71,8 +71,11 @@ class Vector209Switch(unittest.TestCase):
             with self.assertRaises(ScanError):
                 secscan.mode({"security_scan": value})
 
-    def test_shipped_config_leaves_it_off(self):
-        self.assertEqual(secscan.mode(cli.load_config()), secscan.OFF)
+    def test_absent_means_off(self):
+        """A repository's config.json chooses (governance enforces it since MISSION-ROUTER-001 Amendment 027); a
+        config that does not name it leaves the scan off."""
+        self.assertEqual(secscan.mode({}), secscan.OFF)
+        self.assertIn(secscan.mode(cli.load_config()), secscan.MODES)
 
     def test_plan_scans_nothing_while_off(self):
         with mock.patch.object(cli, "load_config", return_value={}):
@@ -668,7 +671,8 @@ class Vector216ReportStep(unittest.TestCase):
 
     def test_scan_while_off_writes_a_red_result(self):
         root, out = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
-        code, _ = self.run_cli(["scan", "--root", str(root), "--tools", str(root), "--out", str(out)])
+        with mock.patch.object(cli, "load_config", return_value={}):
+            code, _ = self.run_cli(["scan", "--root", str(root), "--tools", str(root), "--out", str(out)])
         self.assertEqual(code, 1)
         result = json.loads((out / secscan.RESULT_FILE).read_text())
         self.assertEqual(result["conclusion"], "failure")
