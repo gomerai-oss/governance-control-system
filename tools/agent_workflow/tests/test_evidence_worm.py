@@ -40,11 +40,14 @@ class Resp(io.BytesIO):
 class FakeCloud:
     """GitHub's OIDC endpoint, Google's STS and one bucket."""
 
-    def __init__(self, retention_seconds=int(6 * 365.25 * 86400), sts_ok=True):
+    def __init__(self, retention_seconds=int(6 * 365.25 * 86400), sts_ok=True, expire_after=None):
         self.objects = {}
         self.retention = retention_seconds
         self.sts_ok = sts_ok
         self.calls = []
+        self.issued, self.expired = [], set()
+        self.expire_after = expire_after  # bucket calls after which every token issued so far has expired
+        self.bucket_calls = 0
 
     def fail(self, req, status):
         raise urllib.error.HTTPError(req.full_url, status, "x", {}, io.BytesIO(b'{"error": "x"}'))
@@ -61,8 +64,16 @@ class FakeCloud:
             assert body["subjectToken"] == "placeholder-oidc-jwt" and body["audience"] == f"//iam.googleapis.com/{PROVIDER}"
             if not self.sts_ok:
                 self.fail(req, 403)
-            return Resp(json.dumps({"access_token": "placeholder-access-token"}).encode())
-        assert req.get_header("Authorization") == "Bearer placeholder-access-token"
+            token = "placeholder-access-token" + (f"-{len(self.issued) + 1}" if self.issued else "")
+            self.issued.append(token)
+            return Resp(json.dumps({"access_token": token}).encode())
+        self.bucket_calls += 1
+        if self.expire_after is not None and self.bucket_calls > self.expire_after and not self.expired:
+            self.expired = set(self.issued)
+        bearer = (req.get_header("Authorization") or "").removeprefix("Bearer ")
+        assert bearer in self.issued, "only a token Google issued"
+        if bearer in self.expired:
+            self.fail(req, 401)
         if url.startswith(worm.UPLOAD):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             assert q["ifGenerationMatch"] == ["0"], "a copy is only ever created"
@@ -144,6 +155,34 @@ class TokenTests(unittest.TestCase):
             worm.access_token(PROVIDER, ENV, FakeCloud(sts_ok=False))
 
 
+class ExpiryTests(unittest.TestCase):
+    """GitHub's OIDC token lasts about five minutes, and so does the access token exchanged for it; a seal job or a
+    check that reads the whole store runs longer (2026-11-25: seal run 45628280774, Evidence Verify 45625266229)."""
+
+    def test_a_token_that_expires_during_the_job_is_replaced_once(self):
+        cloud = FakeCloud(expire_after=2)
+        bucket = worm.from_config({"evidence_worm": CONFIG}, ENV, cloud)
+        for n in range(4):
+            self.assertEqual(bucket.put(f"runs/r{n}/seal.json", b"x"), "added")
+        self.assertEqual(len(cloud.issued), 2, "one new token, not one per call")
+        self.assertEqual(bucket.get("runs/r0/seal.json"), b"x")
+        self.assertIsNotNone(bucket.meta("runs/r3/seal.json"))
+
+    def test_a_second_refusal_is_still_an_error(self):
+        cloud = FakeCloud(expire_after=0)
+        bucket = worm.Bucket(worm.config({"evidence_worm": CONFIG})["bucket"], worm.access_token(PROVIDER, ENV, cloud),
+                             cloud, refresh=lambda: cloud.issued[0])  # a refresh that hands back the expired token
+        with self.assertRaisesRegex(EvidenceError, "HTTP 401"):
+            bucket.put("runs/r/seal.json", b"x")
+
+    def test_without_refresh_a_401_is_an_error_as_before(self):
+        cloud = FakeCloud(expire_after=0)
+        bucket = worm.Bucket(worm.config({"evidence_worm": CONFIG})["bucket"], worm.access_token(PROVIDER, ENV, cloud),
+                             cloud)
+        with self.assertRaisesRegex(EvidenceError, "HTTP 401"):
+            bucket.put("runs/r/seal.json", b"x")
+
+
 class CopyTests(unittest.TestCase):
     def test_each_sealed_run_is_copied_and_the_copies_check(self):
         s = Setup(self)
@@ -217,6 +256,13 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(set(s.cloud.objects), set(s.fake_store.files), "README.md is not a run")
         self.assertEqual(sealer.backfill(self.store_request(s.fake_store), s.bucket), {"added": 0, "present": 2})
         self.assertEqual(worm.check_copies(s.clone(), s.bucket, 6), [])
+
+    def test_a_landing_attestation_the_bucket_refused_is_copied(self):  # Amendment 049
+        s = Setup(self)
+        s.seal()
+        s.fake_store.files["packs/gh-9-1-router-1.provenance.json"] = b"attestation"  # stored, its copy refused
+        self.assertEqual(sealer.backfill(self.store_request(s.fake_store), s.bucket), {"added": 1, "present": 2})
+        self.assertEqual(s.cloud.objects["packs/gh-9-1-router-1.provenance.json"], b"attestation")
 
     def test_a_truncated_listing_is_refused(self):
         s = Setup(self)

@@ -41,6 +41,8 @@ jobs:
     permissions:
       contents: read  # check out this repository's tooling
       actions: read
+      pull-requests: read  # the sweep: open stage PRs a sealed run published and no seal job marked (Amendment 049)
+      checks: read  # the sweep: whether those PRs' heads have evidence-sealed (Amendment 049)
       id-token: write  # the WORM copy (§3m item 3): GitHub's OIDC token, exchanged for a short-lived cloud token
     outputs:
       store: ${{ steps.store.outputs.full }}

@@ -59,15 +59,18 @@ class Identities:
     hitl: Tuple[str, ...]
     a2: str
     a3: str
+    ar: str = ""  # AR's App login: G2 reads it to check a carried approval (MISSION-ROUTER-001 Amendment 025)
 
 
 def load_identities(path: Optional[str] = None) -> Identities:
-    """``bot_login``, ``hitl_logins``, ``agents["a2"]`` and ``agents["a3"]`` via ``load_config``."""
+    """``bot_login``, ``hitl_logins``, ``agents["a2"]``, ``agents["a3"]`` and ``agents["ar"]`` via ``load_config``."""
     config = load_config(Path(path)) if path else load_config()
     agents = config["agents"]
     if not all(isinstance(agents.get(name), str) for name in ("a2", "a3")):
         raise ValueError("config.json: agents must name a2 and a3")
-    return Identities(config["bot_login"], tuple(config["hitl_logins"]), agents["a2"], agents["a3"])
+    ar = agents.get("ar")
+    return Identities(config["bot_login"], tuple(config["hitl_logins"]), agents["a2"], agents["a3"],
+                      ar if isinstance(ar, str) else "")
 
 
 def authored_by(commit: Commit, login: str) -> bool:
@@ -157,6 +160,18 @@ class Repo:
     def range(self, base: str, top: str) -> List[Commit]:
         """``git log base..top``: the commits reachable from ``top`` and not from ``base``."""
         return self._log(f"{base}..{top}")
+
+    def contains(self, top: str, sha: str) -> bool:
+        """Whether ``sha`` is ``top`` or one of its ancestors (``git log top..sha`` lists nothing)."""
+        try:
+            return not self._log("-1", f"{top}..{sha}")
+        except GitError:
+            return False  # not a commit of this repository
+
+    def changed(self, base: str, top: str) -> Tuple[str, ...]:
+        """Every path whose content differs between the two commits' trees."""
+        raw = self._run("diff-tree", "-r", "--no-commit-id", "--no-renames", "--name-only", "-z", base, top)
+        return tuple(sorted({text(p) for p in raw.split(b"\0") if p}))
 
     def commit(self, sha: str) -> Commit:
         if sha not in self._commits:

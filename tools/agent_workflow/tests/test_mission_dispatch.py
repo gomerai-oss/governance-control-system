@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 import os
 import stat
 import subprocess
@@ -1042,6 +1043,74 @@ class FlowTests(unittest.TestCase):
         self.assertIn("BLOCKED, naming the failing check", task)
         self.assertNotIn("The landing branch's own checks", task_text(job, "main"))
 
+    # Amendment 052 (dispatcher audit F7 and F8): a landing check that fails on the landing branch alone too was
+    # failing before this mission; it is shown and does not refuse an A3 PASS. Only the landing checks get this.
+    def baseline_record(self, job, results, head="b" * 40, key=None, branch="main"):
+        (self.root / "checks" / dispatch.BASELINE_JSON).write_text(json.dumps(
+            {"job": key or job.key, "branch": branch, "head": head, "results": results}))
+
+    def test_v254_a_landing_check_failing_on_the_landing_branch_too_does_not_refuse_a_pass(self):
+        commands = ("true", "echo red; exit 5")
+        job = self.landing_record(commands)
+        self.baseline_record(job, [{"index": 2, "command": "echo red; exit 5", "exit_code": 5, "passed": False}])
+        self.assertEqual(dispatch.landing_failures(job, self.root / "checks", commands), [])
+        old = dispatch.landing_preexisting(job, self.root / "checks", commands)
+        self.assertEqual(len(old), 1)
+        self.assertIn("landing check 2 (`echo red; exit 5`) exited 5; it exits non-zero on main at " + "b" * 40, old[0])
+        result = self.publish_landing(job, "PASS", commands)
+        self.assertEqual((result["status"], result["verdict"]), ("published", "PASS"))
+        self.assertIn("- Failing before this mission: landing check 2", self.pulls[0][3])
+
+    def test_v254_nothing_is_excused_by_a_baseline_that_does_not_match(self):
+        commands = ("echo red; exit 5",)
+        job = self.landing_record(commands)
+        failing = [{"index": 1, "command": "echo red; exit 5", "exit_code": 5, "passed": False}]
+        for name, kw, results in (("another head", {"head": "c" * 40}, failing),
+                                  ("another job", {"key": "M-OTHER-001 A3 r1"}, failing),
+                                  ("another branch", {"branch": "release/x"}, failing),
+                                  ("passes alone: this mission broke it", {}, [{**failing[0], "exit_code": 0, "passed": True}]),
+                                  ("timed out alone", {}, [{**failing[0], "exit_code": None}]),
+                                  ("another command", {}, [{**failing[0], "command": "exit 5"}]),
+                                  ("another index", {}, [{**failing[0], "index": 2}])):
+            with self.subTest(name):
+                self.baseline_record(job, results, **kw)
+                self.assertEqual(dispatch.landing_failures(job, self.root / "checks", commands),
+                                 ["landing check 1 (`echo red; exit 5`) exited 5"])
+                self.assertEqual(dispatch.landing_preexisting(job, self.root / "checks", commands), [])
+        (self.root / "checks" / dispatch.BASELINE_JSON).unlink()  # no baseline record at all
+        self.assertEqual(len(dispatch.landing_failures(job, self.root / "checks", commands)), 1)
+
+    def test_v254_plan_checks_are_never_excused(self):
+        job = self.a3_with_checks()
+        before = dispatch.check_failures(job, self.root / "checks")
+        self.baseline_record(job, [{"index": 1, "command": c, "exit_code": 1, "passed": False} for c in job.checks])
+        self.assertEqual(dispatch.check_failures(job, self.root / "checks"), before)
+
+    def test_v255_the_baseline_runs_only_the_failed_landing_checks_on_the_landing_branch(self):
+        commands = ("true", "test -f only-on-review", "exit 7")
+        job = self.landing_record(commands)
+        head, failed = dispatch.baseline_due(job, self.root / "checks", commands)
+        self.assertEqual((head, failed), ("b" * 40, [(2, "test -f only-on-review"), (3, "exit 7")]))
+        alone = self.root / "alone"
+        alone.mkdir()
+        record = dispatch.run_baseline(job, alone, self.root / "checks", self.root / "baseline", self.env, commands,
+                                       timeout=30)
+        self.assertEqual([(r["index"], r["command"], r["exit_code"]) for r in record["results"]],
+                         [(2, "test -f only-on-review", 1), (3, "exit 7", 7)])
+        stored = json.loads((self.root / "baseline" / dispatch.BASELINE_JSON).read_text())
+        self.assertEqual((stored["job"], stored["head"], stored["branch"]), (job.key, "b" * 40, "main"))
+        self.assertIn("# Baseline:", (self.root / "baseline" / dispatch.BASELINE_MD).read_text())
+
+    def test_v255_nothing_to_run_when_every_landing_check_passed_or_none_ran(self):
+        job = self.landing_record(("true",))
+        self.assertEqual(dispatch.baseline_due(job, self.root / "checks", ("true",)), ("", []))
+        shutil.rmtree(self.root / "checks")
+        run_checks(job, self.root / "review", self.root / "checks", self.env, timeout=30,
+                   landing={"commands": ("exit 1",), "branch": "main", "head": "b" * 40, "merged": False,
+                            "error": "CONFLICT", "root": self.root / "review"})
+        self.assertEqual(dispatch.baseline_due(job, self.root / "checks", ("exit 1",)), ("", []))
+        self.assertEqual(dispatch.baseline_due(self.job("A2"), self.root / "checks", ("exit 1",)), ("", []))
+
     def test_a3_re_review_reads_a2s_notes_not_the_blocked_verdicts(self):
         clone = self.root / "rework"
         ident = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
@@ -1121,10 +1190,44 @@ class FlowTests(unittest.TestCase):
         job = self.job()
         work = self.root / "work"
         prepare(job, work, self.remote.url, "", self.env, self.root, "main")
-        with self.assertRaisesRegex(DispatchError, "exited 1"):
+        with self.assertRaisesRegex(DispatchError, "exited 1; its log ends: usage limit reached"):
             run_agent(job, work, self.env, self.root, timeout=60, binaries=fake_runtime(
                 self.root, "print('usage limit reached')\nsys.exit(1)"))
         self.assertFalse((work / "capacity.json").exists())
+
+    def test_v252_a_runtime_failure_says_how_its_log_ends_scrubbed(self):
+        """Amendment 051 (dispatcher audit F3): 9 live runs said only "claude-code exited 1"."""
+        job = self.job()
+        work = self.root / "work"
+        prepare(job, work, self.remote.url, "", self.env, self.root, "main")
+        key = self.env.get("ANTHROPIC_API_KEY") or "sk-ant-" + "x" * 40
+        body = ("print('starting')\n" + "\n".join(f"print('line {i}')" for i in range(20))
+                + f"\nprint('\\n\\nError: authentication failed for {key}')\nsys.exit(2)")
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": key}):
+            env = {**self.env, "ANTHROPIC_API_KEY": key}
+            with self.assertRaises(DispatchError) as caught:
+                run_agent(job, work, env, self.root, timeout=60, binaries=fake_runtime(self.root, body))
+        reason = str(caught.exception)
+        self.assertIn("exited 2; its log ends: ", reason)
+        self.assertIn("Error: authentication failed", reason)
+        self.assertNotIn(key, reason, "the log is scrubbed before its end is quoted")
+        self.assertNotIn("starting", reason, "only the last lines")
+        self.assertLessEqual(len(reason), 900)
+
+    def test_v252_an_empty_log_says_so(self):
+        job = self.job()
+        work = self.root / "work"
+        prepare(job, work, self.remote.url, "", self.env, self.root, "main")
+        with self.assertRaisesRegex(DispatchError, "exited 1; its log is empty"):
+            run_agent(job, work, self.env, self.root, timeout=60, binaries=fake_runtime(self.root, "sys.exit(1)"))
+
+    def test_v252_a_runtime_that_runs_out_of_time_says_how_its_log_ends(self):
+        job = self.job()
+        work = self.root / "work"
+        prepare(job, work, self.remote.url, "", self.env, self.root, "main")
+        with self.assertRaisesRegex(DispatchError, "did not finish within 1 seconds; its log ends: waiting on the model"):
+            run_agent(job, work, self.env, self.root, timeout=1, binaries=fake_runtime(
+                self.root, "import time\nprint('waiting on the model', flush=True)\ntime.sleep(30)"))
 
     def test_the_runtime_is_started_with_the_plans_model(self):
         import dataclasses
@@ -2215,6 +2318,163 @@ class QuarantineTests(unittest.TestCase):
         config = json.loads((Path(__file__).resolve().parents[1] / "mission_router" / "config.json").read_text())
         self.assertIn(quarantine.mode(config), quarantine.MODES)
 
+
+
+class NotStartedTests(unittest.TestCase):
+    """Amendment 050, vectors 249 to 251 (dispatcher audit F2 and F28): a GitHub read that fails for one mission, or
+    for one lane's own check, never strands the others, and never counts as an agent's failure."""
+
+    JOB = Job(MID, "A2", 1, "a2", A2B, "claude-code", "a" * 40, ("tools/demo/**",), "t")
+
+    def test_v249_a_read_that_fails_for_one_mission_leaves_the_others_starting(self):
+        from mission_router.github import GitHubError
+        other = "M-DEMO-002"
+        contexts = {mid: SimpleNamespace(state=MissionState(mid, AWAIT_A2, 1, "a" * 40), manifest=manifest(),
+                                         integration_actual="a" * 40, landing="main") for mid in (MID, other)}
+
+        def branch_head(branch):
+            if branch.startswith(f"mission/{MID}/"):
+                raise GitHubError(0, "RemoteDisconnected: Remote end closed connection without response", branch)
+            return None
+        jobs, notes = plan(Survey(contexts, IDS, branch_head, "main", lambda *_: False))
+        self.assertEqual([j.mission_id for j in jobs], [other])
+        self.assertTrue(any(n.startswith(f"{MID}: GitHub could not be read") for n in notes), notes)
+
+    def run_due(self, tmp, after="", survey=None, error=None):
+        from mission_dispatch import __main__ as cli
+        record = Path(tmp) / "not-started" / "not-started.txt"
+        outputs = {}
+        live = mock.Mock(side_effect=error) if error else mock.Mock(return_value=(survey, None))
+        with mock.patch.object(cli, "_job", return_value=self.JOB), mock.patch.object(cli, "GitHub"), \
+                mock.patch.object(cli, "live_survey", live), \
+                mock.patch.object(cli, "_output", side_effect=lambda k, v: outputs.__setitem__(k, v)), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), mock.patch("sys.stderr"):
+            code = cli.cmd_due(SimpleNamespace(repo="o/r", not_started=str(record), after=after))
+        return code, outputs, record, live
+
+    def test_v250_a_lane_whose_check_cannot_read_github_does_not_start_and_says_why(self):
+        from mission_router.github import GitHubError
+        with tempfile.TemporaryDirectory() as tmp:
+            code, outputs, record, _ = self.run_due(tmp, error=GitHubError(403, "API rate limit exceeded", "/issues"))
+            self.assertEqual((code, outputs), (0, {"due": "false"}))
+            self.assertIn("rate limit", record.read_text())
+
+    def test_v250_the_check_reads_its_own_mission_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, outputs, record, live = self.run_due(tmp, survey=survey_for(AWAIT_A2, head="a" * 40))
+            self.assertEqual((code, outputs, record.exists()), (0, {"due": "true"}, False))
+            self.assertEqual(live.call_args.kwargs, {"only": MID})
+
+    def test_v250_when_the_checks_job_did_not_start_the_agent_does_not_either(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            earlier = Path(tmp) / "checks.txt"
+            earlier.write_text("GitHub could not be read: GitHub 403 on /issues: API rate limit exceeded\n")
+            code, outputs, record, live = self.run_due(tmp, after=str(earlier))
+            self.assertEqual((code, outputs), (0, {"due": "false"}))
+            self.assertIn("the checks job did not start", record.read_text())
+            live.assert_not_called()
+
+    def test_v251_a_lane_not_started_is_not_reported_as_a_failure(self):
+        from mission_dispatch import __main__ as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            record = Path(tmp) / "not-started.txt"
+            record.write_text("GitHub could not be read: GitHub 403 on /issues: API rate limit exceeded\n")
+            with mock.patch.object(cli, "_job", return_value=self.JOB), mock.patch.object(cli, "GitHub") as gh, \
+                    mock.patch.object(cli, "live_survey") as live, mock.patch("sys.stderr"):
+                self.assertEqual(cli.cmd_report(SimpleNamespace(repo="o/r", drafts="", refusal=[],
+                                                                not_started=str(record))), 0)
+            live.assert_not_called()
+            gh.assert_not_called()
+
+    def test_v251_the_workflow_hands_the_record_on(self):
+        root = Path(__file__).resolve().parents[3]
+        path = root / ".github" / "workflows" / "mission-agent.yml"
+        text = (path if path.is_file() else root / "packaging" / "workflows" / "mission-agent.yml").read_text()
+        self.assertIn("name: not-started-checks-${{ matrix.job.mission_id }}", text)
+        self.assertEqual(text.count("--not-started \"$RUNNER_TEMP/not-started/not-started.txt\""), 3)
+        self.assertIn('--after "$RUNNER_TEMP/not-started-checks/not-started.txt"', text)
+        self.assertEqual(text.count("name: not-started-${{ matrix.job.mission_id }}"), 2, "uploaded by agent, read by report")
+
+
+class LandingBaselineWiringTests(unittest.TestCase):
+    """Amendment 052, vector 256: the baseline runs in a job of its own, on the landing branch's head alone. Vector 257,
+    governance's own landing checks, is in ``test_governance_landing_checks.py``, which only this repository ships."""
+
+    ROOT = Path(__file__).resolve().parents[3]
+
+    def workflow(self, name):
+        path = self.ROOT / ".github" / "workflows" / name
+        return (path if path.is_file() else self.ROOT / "packaging" / "workflows" / name).read_text()
+
+    def test_v256_the_baseline_job_never_holds_the_code_under_review(self):
+        import yaml
+        jobs = yaml.safe_load(self.workflow("mission-agent.yml"))["jobs"]
+        base = jobs["baseline"]
+        self.assertEqual((base["needs"], base["permissions"]), (["plan", "checks"], {"contents": "read"}))
+        refs = [step["with"]["ref"] for step in base["steps"] if "actions/checkout@" in str(step.get("uses"))]
+        self.assertEqual(refs, ["${{ github.sha }}", "${{ steps.due.outputs.head }}"], "tooling, then the landing head")
+        self.assertNotIn("base_sha", json.dumps(base), "no step names the commit under review")
+        self.assertIn("baseline", jobs["publish"]["needs"])
+        fetch = [st for st in jobs["publish"]["steps"] if "baseline-${{" in json.dumps(st.get("with", {}))]
+        self.assertEqual(len(fetch), 1)
+        self.assertEqual(fetch[0]["with"]["path"], "${{ runner.temp }}/checks", "beside checks.json, where publish reads")
+        self.assertEqual(jobs["checks"]["timeout-minutes"], 120)
+
+
+class PostOnceTests(unittest.TestCase):
+    """Amendment 051, vector 253 (dispatcher audit F23): a failure record is there exactly once, so the three-failure
+    stop counts every failure, and none twice, when posting it fails part way."""
+
+    TEXT = "**Mission Agent: A2 round 1 did not finish.** run log https://x/runs/1\n\n<!-- mission-dispatch:failed:A2:1 -->"
+
+    def gh(self, errors, landed=()):
+        from mission_router.github import GitHubError
+        gh = mock.Mock()
+        posts = []
+
+        def comment(number, body):
+            posts.append(body)
+            if errors:
+                status, kept = errors.pop(0)
+                if kept:
+                    gh.stored.append(body)
+                raise GitHubError(status, "x", "/issues/7/comments")
+            gh.stored.append(body)
+        gh.stored = list(landed)
+        gh.comment.side_effect = comment
+        gh.paginate.side_effect = lambda path, limit=2000: iter({"body": b} for b in gh.stored)
+        return gh, posts
+
+    def post(self, gh):
+        from mission_dispatch import __main__ as cli
+        with mock.patch("sys.stderr"):
+            cli.post_once(gh, 7, self.TEXT)
+
+    def test_v253_a_post_that_failed_before_github_kept_it_is_sent_again(self):
+        gh, posts = self.gh([(502, False)])
+        self.post(gh)
+        self.assertEqual((len(posts), gh.stored), (2, [self.TEXT]))
+
+    def test_v253_a_post_github_kept_though_the_answer_was_lost_is_not_sent_twice(self):
+        gh, posts = self.gh([(0, True)])
+        self.post(gh)
+        self.assertEqual((len(posts), gh.stored), (1, [self.TEXT]))
+
+    def test_v253_github_returning_crlf_is_still_the_same_record(self):
+        gh, posts = self.gh([(0, False)], landed=[self.TEXT.replace("\n", "\r\n")])
+        self.post(gh)
+        self.assertEqual(len(posts), 1)
+
+    def test_v253_a_refusal_is_not_retried_and_a_lasting_failure_is_raised(self):
+        from mission_router.github import GitHubError
+        gh, posts = self.gh([(403, False)])
+        with self.assertRaises(GitHubError):
+            self.post(gh)
+        self.assertEqual(len(posts), 1)
+        gh, posts = self.gh([(503, False)] * 3)
+        with self.assertRaises(GitHubError):
+            self.post(gh)
+        self.assertEqual((len(posts), gh.stored), (3, []))
 
 
 class HitlNoteTests(unittest.TestCase):

@@ -2,17 +2,27 @@
 
 Every path segment that comes from GitHub data or agent input is quoted, and
 callers only pass values that already passed the model's validators.
+
+Every failure is a ``GitHubError`` (MISSION-ROUTER-001 Amendment 026): an HTTP error with its status, and a dropped
+connection, a timeout or another transport failure with status 0. So a caller's ``except GitHubError`` contains it,
+and one failed call never ends a whole sweep. A read (GET) is sent again, at most twice, after a dropped connection, a
+timeout or a 500, 502, 503 or 504. A write is never sent again: it may have taken effect. A rate-limit 403 or 429 is
+not waited out: the limit resets within the hour, after the sweep.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 API = "https://api.github.com"
+RETRY_STATUSES = frozenset({500, 502, 503, 504})
+RETRY_DELAYS = (1.0, 3.0)  # seconds before the second and third tries of a read
 
 
 class GitHubError(RuntimeError):
@@ -28,7 +38,8 @@ def q(segment: str) -> str:
 
 
 class GitHub:
-    def __init__(self, token: str, repo: str, api: str = API, timeout: int = 30) -> None:
+    def __init__(self, token: str, repo: str, api: str = API, timeout: int = 30,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         if not token:
             raise ValueError("GITHUB_TOKEN is required")
         owner, _, name = repo.partition("/")
@@ -38,6 +49,7 @@ class GitHub:
         self.repo = repo
         self._api = api
         self._timeout = timeout
+        self._sleep = sleep
 
     def request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None, raw: bool = False) -> Any:
         url = path if path.startswith("https://") else f"{self._api}/repos/{self.repo}{path}"
@@ -50,19 +62,36 @@ class GitHub:
         req.add_header("X-GitHub-Api-Version", "2022-11-28")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                payload = resp.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
+        delays = RETRY_DELAYS if method == "GET" else ()
+        for attempt in range(len(delays) + 1):
             try:
-                detail = json.loads(detail).get("message", detail)
-            except ValueError:
-                pass
-            raise GitHubError(exc.code, str(detail)[:500], path) from None
+                payload = self._send(req, path)
+                break
+            except GitHubError as exc:
+                if attempt == len(delays) or not (exc.status == 0 or exc.status in RETRY_STATUSES):
+                    raise
+                self._sleep(delays[attempt])
         if raw:
             return payload.decode("utf-8")
         return json.loads(payload) if payload else None
+
+    def _send(self, req: urllib.request.Request, path: str) -> bytes:
+        """One try. Every failure is a ``GitHubError``; status 0 when GitHub gave no HTTP answer."""
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except (OSError, http.client.HTTPException):
+                detail = ""
+            try:
+                detail = json.loads(detail).get("message", detail)
+            except (ValueError, AttributeError):
+                pass
+            raise GitHubError(exc.code, str(detail)[:500], path) from None
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:  # URLError is an OSError
+            raise GitHubError(0, f"{type(exc).__name__}: {str(exc)[:300]}", path) from None
 
     def get(self, path: str, raw: bool = False) -> Any:
         return self.request("GET", path, raw=raw)

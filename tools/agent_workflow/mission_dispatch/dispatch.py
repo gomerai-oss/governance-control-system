@@ -124,7 +124,8 @@ OPEN_POINTS_MAX_CHARS = 64 * 1024
 DELETIONS_MAX_BYTES = 64 * 1024
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 CHECKS_JSON, CHECKS_MD = "checks.json", "CHECKS.md"
-CHECK_TIMEOUT = 900.0
+BASELINE_JSON, BASELINE_MD = "baseline.json", "BASELINE.md"  # Amendment 052
+CHECK_TIMEOUT = 1800.0  # Amendment 052: a full suite as a landing check, on a GitHub runner
 # Git started by a check (a test's own throwaway repositories) runs no background gc or maintenance either:
 # a detached gc outliving the check made a test's cleanup fail (M-PRIE-GENERALIZE-001, 2026-10-23).
 CHECK_GIT_ENV = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
@@ -137,6 +138,7 @@ FINDINGS_MAX_CHARS = 32 * 1024  # A3's findings as A2's next round is told about
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 CHECKS_JSON_MAX_BYTES = 4 * 1024 * 1024
 REFUSAL_MAX_CHARS = 2000
+LOG_TAIL_LINES, LOG_TAIL_CHARS = 8, 800  # how much of a failed runtime's log its failure record quotes (Amendment 051)
 # An A2 commit message with this section may hand on an empty build: A3 then confirms the blockers.
 _BLOCKERS_RE = re.compile(r"(?mi)^[\s#>*_`-]*Blockers\s*:")
 # A model login shorter than this is not a real key; checking for it would only cause false refusals.
@@ -357,81 +359,95 @@ def _runtime_of(survey: Survey, mission_id: str, role: str) -> Optional[str]:
 
 
 def plan(survey: Survey, busy: Optional[set] = None) -> Tuple[List[Job], List[str]]:
-    """Jobs due now, and a note for every waiting mission that will not be started."""
+    """Jobs due now, and a note for every waiting mission that will not be started. A mission whose own reads fail
+    is left for the next run and the others still start (Amendment 050)."""
     jobs, notes = [], []
     busy = busy or set()
     # Jobs start in approval order. No timer is consulted: a runtime being out of compute does not hold jobs
     # (Amendment 009 removed the Amendment 007 capacity queue).
     for mid, ctx in sorted(survey.contexts.items(), key=lambda item: (survey.order(item[0]), item[0])):
-        wanted = _wanted(ctx)
-        manifest: Optional[Manifest] = ctx.manifest
-        if wanted is None or manifest is None:
-            continue
-        role, base = wanted
-        state: MissionState = ctx.state
-        assignment = manifest.roles[role]
-        branch = stage_branch(mid, role, state.round)
-        if not assignment.runtime:
-            notes.append(f"{mid}: {role} round {state.round} has no runtime in the plan; the agent must be started by hand")
-            continue
-        login = survey.identities.get(assignment.agent)
-        if not login:
-            notes.append(f"{mid}: {role} agent {assignment.agent} has no ACTIVE identity; not started")
-            continue
-        if not base or ctx.integration_actual != state.integration_head:
-            notes.append(f"{mid}: {integration_branch(mid)} is not where the router expects it; not started")
-            continue
-        if survey.branch_head(branch) is not None:
-            continue  # handed in already; the router takes it from here
-        if (mid, role, state.round) in busy:
-            notes.append(f"{mid}: {role} round {state.round} is already running in another workflow run")
-            continue
-        if survey.blocked(mid, role, state.round):
-            notes.append(f"{mid}: {role} round {state.round} is held: it failed earlier (HITL comments /mission retry "
-                         "on the tracking issue to start it again) or its tracking issue could not be read")
-            continue
-        jobs.append(Job(mid, role, state.round, assignment.agent, login, assignment.runtime, base,
-                        tuple(manifest.build_scope), manifest.title, tuple(manifest.checks),
-                        getattr(ctx, "landing", survey.default_branch),
-                        survey.feedback(mid, role, state.round)[:FEEDBACK_MAX_CHARS],
-                        (state.build_sha or base) if role == "A3" else "", assignment.model or "",
-                        survey.notes(mid)[:NOTES_MAX_CHARS]))
+        try:
+            job, note = _plan_one(mid, ctx, survey, busy)
+        except GitHubError as exc:
+            job, note = None, f"{mid}: GitHub could not be read ({exc}); not started this time, the next run plans it again"
+        if job is not None:
+            jobs.append(job)
+        if note:
+            notes.append(note)
     challenge_jobs, challenge_notes = plan_challenges(survey, busy)
     return jobs + challenge_jobs, notes + challenge_notes
 
 
+def _plan_one(mid: str, ctx: object, survey: Survey, busy: set) -> Tuple[Optional[Job], Optional[str]]:
+    """The job one mission waits on, or None and why (None when it needs no note)."""
+    wanted = _wanted(ctx)
+    manifest: Optional[Manifest] = ctx.manifest
+    if wanted is None or manifest is None:
+        return None, None
+    role, base = wanted
+    state: MissionState = ctx.state
+    assignment = manifest.roles[role]
+    branch = stage_branch(mid, role, state.round)
+    if not assignment.runtime:
+        return None, f"{mid}: {role} round {state.round} has no runtime in the plan; the agent must be started by hand"
+    login = survey.identities.get(assignment.agent)
+    if not login:
+        return None, f"{mid}: {role} agent {assignment.agent} has no ACTIVE identity; not started"
+    if not base or ctx.integration_actual != state.integration_head:
+        return None, f"{mid}: {integration_branch(mid)} is not where the router expects it; not started"
+    if survey.branch_head(branch) is not None:
+        return None, None  # handed in already; the router takes it from here
+    if (mid, role, state.round) in busy:
+        return None, f"{mid}: {role} round {state.round} is already running in another workflow run"
+    if survey.blocked(mid, role, state.round):
+        return None, (f"{mid}: {role} round {state.round} is held: it failed earlier (HITL comments /mission retry "
+                      "on the tracking issue to start it again) or its tracking issue could not be read")
+    return Job(mid, role, state.round, assignment.agent, login, assignment.runtime, base,
+               tuple(manifest.build_scope), manifest.title, tuple(manifest.checks),
+               getattr(ctx, "landing", survey.default_branch),
+               survey.feedback(mid, role, state.round)[:FEEDBACK_MAX_CHARS],
+               (state.build_sha or base) if role == "A3" else "", assignment.model or "",
+               survey.notes(mid)[:NOTES_MAX_CHARS]), None
+
+
 def plan_challenges(survey: Survey, busy: set) -> Tuple[List[Job], List[str]]:
     """AR's jobs (§3n item 3): one for every open plan PR whose plan assigns AR and whose challenge round is due.
-    AR reads the plan at the plan PR's exact head, and its PR goes into the plan branch, never into integration."""
+    AR reads the plan at the plan PR's exact head, and its PR goes into the plan branch, never into integration. A
+    plan whose own reads fail is left for the next run (Amendment 050)."""
     jobs, notes = [], []
     for mid, due in sorted(survey.challenges.items(), key=lambda item: (item[1].plan_pr, item[0])):
-        loop, manifest = due.loop, due.manifest
-        if loop.due_round is None:
-            if loop.response_error:
-                notes.append(f"{mid}: AR is not started: {loop.response_error}")
-            continue
-        n = loop.due_round
-        assignment = manifest.roles[CHALLENGE_ROLE]
-        if not assignment.runtime:
-            notes.append(f"{mid}: AR round {n} has no runtime in the plan; the agent must be started by hand")
-            continue
-        login = survey.identities.get(assignment.agent)
-        if not login:
-            notes.append(f"{mid}: AR agent {assignment.agent} has no ACTIVE identity; not started")
-            continue
-        if survey.branch_head(stage_branch(mid, CHALLENGE_ROLE, n)) is not None:
-            continue  # handed in already; the router takes it from here
-        if (mid, CHALLENGE_ROLE, n) in busy:
-            notes.append(f"{mid}: AR round {n} is already running in another workflow run")
-            continue
-        if survey.blocked(mid, CHALLENGE_ROLE, n):
-            notes.append(f"{mid}: AR round {n} is held: it failed earlier (HITL comments /mission retry on the plan "
-                         "PR to start it again) or the plan PR could not be read")
-            continue
-        jobs.append(Job(mid, CHALLENGE_ROLE, n, assignment.agent, login, assignment.runtime, due.plan_head,
-                        tuple(manifest.build_scope), manifest.title, (), challenge_mod.plan_branch(mid),
-                        survey.feedback(mid, CHALLENGE_ROLE, n)[:FEEDBACK_MAX_CHARS], "", assignment.model or ""))
+        try:
+            job, note = _plan_challenge(mid, due, survey, busy)
+        except GitHubError as exc:
+            job, note = None, f"{mid}: GitHub could not be read ({exc}); AR not started this time"
+        if job is not None:
+            jobs.append(job)
+        if note:
+            notes.append(note)
     return jobs, notes
+
+
+def _plan_challenge(mid: str, due: object, survey: Survey, busy: set) -> Tuple[Optional[Job], Optional[str]]:
+    loop, manifest = due.loop, due.manifest
+    if loop.due_round is None:
+        return None, (f"{mid}: AR is not started: {loop.response_error}" if loop.response_error else None)
+    n = loop.due_round
+    assignment = manifest.roles[CHALLENGE_ROLE]
+    if not assignment.runtime:
+        return None, f"{mid}: AR round {n} has no runtime in the plan; the agent must be started by hand"
+    login = survey.identities.get(assignment.agent)
+    if not login:
+        return None, f"{mid}: AR agent {assignment.agent} has no ACTIVE identity; not started"
+    if survey.branch_head(stage_branch(mid, CHALLENGE_ROLE, n)) is not None:
+        return None, None  # handed in already; the router takes it from here
+    if (mid, CHALLENGE_ROLE, n) in busy:
+        return None, f"{mid}: AR round {n} is already running in another workflow run"
+    if survey.blocked(mid, CHALLENGE_ROLE, n):
+        return None, (f"{mid}: AR round {n} is held: it failed earlier (HITL comments /mission retry on the plan "
+                      "PR to start it again) or the plan PR could not be read")
+    return Job(mid, CHALLENGE_ROLE, n, assignment.agent, login, assignment.runtime, due.plan_head,
+               tuple(manifest.build_scope), manifest.title, (), challenge_mod.plan_branch(mid),
+               survey.feedback(mid, CHALLENGE_ROLE, n)[:FEEDBACK_MAX_CHARS], "", assignment.model or ""), None
 
 
 def still_wanted(job: Job, survey: Survey) -> Optional[str]:
@@ -946,7 +962,8 @@ def _checks_record(job: Job, checks_dir: Optional[Path]) -> Tuple[dict, str]:
 def landing_failures(job: Job, checks_dir: Optional[Path], commands: Sequence[str]) -> List[str]:
     """Amendment 048: why an A3 PASS may not be published by the landing branch's own checks (``config.json``
     ``landing_checks``); empty when none are named, or each ran once on the commit under review merged onto the
-    landing branch and exited 0."""
+    landing branch and exited 0, or exited non-zero on the landing branch alone too (Amendment 052: it was failing
+    before this mission, ``landing_preexisting``)."""
     if not commands:
         return []
     record, problem = _checks_record(job, checks_dir)
@@ -958,22 +975,105 @@ def landing_failures(job: Job, checks_dir: Optional[Path], commands: Sequence[st
     if landing.get("merged") is not True:
         return [f"{job.base_sha} does not merge onto {job.landing_branch}, so no landing check ran: "
                 f"{quarantine.inline(str(landing.get('error') or 'no reason recorded'), 300)}"]
-    return _command_failures(tuple(commands), landing.get("results"), "landing check")
+    already = _baseline_failed(job, checks_dir, landing)
+    return [p for i, p in _indexed_failures(tuple(commands), landing.get("results"), "landing check")
+            if (i, commands[i - 1]) not in already]
+
+
+def landing_preexisting(job: Job, checks_dir: Optional[Path], commands: Sequence[str]) -> List[str]:
+    """Amendment 052: the landing checks that failed on the merged tree and on the landing branch alone too, so do
+    not refuse an A3 PASS; each is shown to A3 and in the A3 PR."""
+    if not commands:
+        return []
+    record, problem = _checks_record(job, checks_dir)
+    landing = record.get("landing") if not problem else None
+    if not isinstance(landing, dict) or landing.get("merged") is not True or landing.get("branch") != job.landing_branch:
+        return []
+    already = _baseline_failed(job, checks_dir, landing)
+    return [f"{p}; it exits non-zero on {job.landing_branch} at {landing.get('head')} alone too, so it was failing "
+            "before this mission" for i, p in _indexed_failures(tuple(commands), landing.get("results"), "landing check")
+            if (i, commands[i - 1]) in already]
+
+
+def _baseline_failed(job: Job, checks_dir: Optional[Path], landing: Mapping) -> set:
+    """``{(index, command)}``: the landing checks that exited non-zero (an exit code, not a timeout) when the
+    baseline job ran them on the landing branch's head alone (Amendment 052). The record counts only when it is for
+    this job and the very head the commit under review was merged onto; otherwise nothing is excused."""
+    path = checks_dir / BASELINE_JSON if checks_dir else None
+    if path is None or path.is_symlink() or not path.is_file() or path.stat().st_size > CHECKS_JSON_MAX_BYTES:
+        return set()
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return set()
+    head = landing.get("head")
+    if (not isinstance(record, dict) or record.get("job") != job.key or record.get("branch") != job.landing_branch
+            or not isinstance(head, str) or not SHA_RE.fullmatch(head) or record.get("head") != head):
+        return set()
+    results = record.get("results") if isinstance(record.get("results"), list) else []
+    return {(r.get("index"), r.get("command")) for r in results
+            if isinstance(r, dict) and type(r.get("exit_code")) is int and r.get("exit_code") != 0}
 
 
 def _command_failures(commands: Sequence[str], results: object, what: str) -> List[str]:
+    return [problem for _, problem in _indexed_failures(commands, results, what)]
+
+
+def _indexed_failures(commands: Sequence[str], results: object, what: str) -> List[Tuple[int, str]]:
     results = [r for r in results if isinstance(r, dict)] if isinstance(results, list) else []
     problems = []
     for index, command in enumerate(commands, 1):
         ran = [r for r in results if r.get("index") == index and r.get("command") == command]
         code = ran[0].get("exit_code") if len(ran) == 1 else None
         if len(ran) != 1:
-            problems.append(f"{what} {index} (`{command}`) did not run")
+            problems.append((index, f"{what} {index} (`{command}`) did not run"))
         elif type(code) is not int:
-            problems.append(f"{what} {index} (`{command}`) did not finish")
+            problems.append((index, f"{what} {index} (`{command}`) did not finish"))
         elif code != 0:
-            problems.append(f"{what} {index} (`{command}`) exited {code}")
+            problems.append((index, f"{what} {index} (`{command}`) exited {code}"))
     return problems
+
+
+def baseline_due(job: Job, checks_dir: Optional[Path], commands: Sequence[str]) -> Tuple[str, List[Tuple[int, str]]]:
+    """Amendment 052: the landing branch's head and the landing checks that ran on the merged tree and failed (an
+    exit code or a timeout), for the baseline job to run again on that head alone; ``("", [])`` when there is
+    nothing to run. A check that did not run is not run again: there is nothing to compare."""
+    if job.role != "A3" or not commands:
+        return "", []
+    record, problem = _checks_record(job, checks_dir)
+    landing = record.get("landing") if not problem else None
+    if not isinstance(landing, dict) or landing.get("merged") is not True or landing.get("branch") != job.landing_branch:
+        return "", []
+    head = landing.get("head")
+    if not isinstance(head, str) or not SHA_RE.fullmatch(head):
+        return "", []
+    results = [r for r in landing.get("results") or [] if isinstance(r, dict)]
+    failed = [(index, command) for index, command in enumerate(commands, 1)
+              if any(r.get("index") == index and r.get("command") == command and r.get("passed") is False
+                     and "exit_code" in r for r in results)]
+    return (head, failed) if failed else ("", [])
+
+
+def run_baseline(job: Job, tree: Path, checks_dir: Path, out_dir: Path, environ: Mapping[str, str],
+                 commands: Sequence[str], timeout: float = CHECK_TIMEOUT, run_as: Optional[str] = None) -> dict:
+    """Amendment 052: run each landing check that failed on the merged tree again in ``tree``, a checkout of the
+    landing branch's head alone, in a job of its own where no code under review has run. Writes ``baseline.json``
+    (each exit code, recorded by the dispatcher) and returns it."""
+    head, failed = baseline_due(job, checks_dir, commands)
+    record = {"job": job.key, "branch": job.landing_branch, "head": head, "results": []}
+    lines = [f"# Baseline: the failed landing checks on `{job.landing_branch}` at `{head or 'unknown'}` alone", "",
+             "A landing check that fails here too was failing before this mission: it is shown, and does not refuse "
+             "an A3 PASS (MISSION-DISPATCH-001 Amendment 052).", ""]
+    for index, command in failed:
+        results, shown = _run_commands((command,), tree, environ, timeout, run_as,
+                                       f"baseline of landing check {index} on `{head}`")
+        result = {**results[0], "index": index}
+        record["results"].append({k: result[k] for k in ("index", "command", "exit_code", "passed")})
+        lines += _report_lines([result], shown, "baseline of landing check ")
+    _results_dir(out_dir)
+    _write_result(out_dir / BASELINE_JSON, json.dumps(record, indent=2) + "\n")
+    _write_result(out_dir / BASELINE_MD, "\n".join(lines))
+    return record
 
 
 def checks_summary(job: Job, checks_dir: Optional[Path], landing_checks: Sequence[str] = ()) -> str:
@@ -989,8 +1089,13 @@ def checks_summary(job: Job, checks_dir: Optional[Path], landing_checks: Sequenc
         failed = landing_failures(job, checks_dir, landing_checks)
         out += (f"### Landing checks on `{job.base_sha}` merged onto `{job.landing_branch}`, recorded by the "
                 "dispatcher\n\n")
-        out += (f"All {len(landing_checks)} exited 0.\n\n" if not failed
-                else "".join(f"- {quarantine.inline(problem)}\n" for problem in failed) + "\n")
+        old = landing_preexisting(job, checks_dir, landing_checks)
+        if not failed and not old:
+            out += f"All {len(landing_checks)} exited 0.\n\n"
+        else:
+            out += "".join(f"- {quarantine.inline(problem)}\n" for problem in failed)
+            out += "".join(f"- Failing before this mission: {quarantine.inline(problem)}\n" for problem in old)
+            out += "\n"
     return out
 
 
@@ -1384,12 +1489,13 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
             egress.stop()
         raise DispatchError(str(exc)) from None
     problems: List[str] = []
+    timed_out = False
     try:
         with open(log_path, "w", encoding="utf-8") as out:
             done = subprocess.run(argv, cwd=str(checkout.tree), env=env, stdout=out, stderr=subprocess.STDOUT,
                                   stdin=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise DispatchError(f"{job.runtime} did not finish within {int(timeout)} seconds") from None
+        timed_out = True  # reported below, once the log is scrubbed
     except OSError as exc:
         raise DispatchError(f"{job.runtime} could not start: {exc}") from None
     finally:
@@ -1401,11 +1507,28 @@ def run_agent(job: Job, root: Path, environ: Mapping[str, str], home: Path, time
             binding.remove_cursor_mcp(checkout.tree)
         blast.keep_tail(log_path)
         scrub(log_path, known_secrets(root, environ))
+    if timed_out:  # the log is scrubbed by now: only then may its end be quoted
+        raise DispatchError(f"{job.runtime} did not finish within {int(timeout)} seconds; {_log_ends(log_path)}")
     if problems:
         raise DispatchError("; ".join(problems))
     if done.returncode != 0:
-        raise DispatchError(f"{job.runtime} exited {done.returncode}")
+        raise DispatchError(f"{job.runtime} exited {done.returncode}; {_log_ends(log_path)}")
     return log_path
+
+
+def _log_ends(log_path: Path) -> str:
+    """How the runtime's log ends, for its failure record (Amendment 051, dispatcher audit F3): its last non-empty
+    lines, after the log is scrubbed of every secret. The record is agent output: the report job quotes it through
+    the quarantine, on one line."""
+    try:
+        text = "" if log_path.is_symlink() or not log_path.is_file() else log_path.read_text("utf-8", "replace")
+    except OSError:
+        text = ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()][-LOG_TAIL_LINES:]
+    if not lines:
+        return "its log is empty"
+    tail = " | ".join(lines)
+    return "its log ends: " + (tail if len(tail) <= LOG_TAIL_CHARS else "…" + tail[-(LOG_TAIL_CHARS - 1):])
 
 
 def _staged(checkout: Checkout, base: str, git: Mapping[str, str]) -> Tuple[List[Change], List[Tuple[str, str]]]:

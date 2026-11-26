@@ -14,7 +14,7 @@ import sys
 from router_spec002.policy import load_tables, normalize_path
 
 from .gate import classify_or_raise
-from .github import GitHub
+from .github import GitHub, GitHubError
 from .router import MissionRouter, load_config
 
 
@@ -25,7 +25,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     gh = GitHub(os.environ.get("GITHUB_TOKEN", ""), args.repo)
     router = MissionRouter(gh, load_config(), classify_or_raise(load_tables(), normalize_path), dry_run=args.dry_run)
-    states = router.sweep()
+    try:
+        states = router.sweep()
+    except GitHubError as exc:  # discovery failed even after retries: nothing was decided (Amendment 026)
+        print(f"sweep stopped: the missions could not be listed: {exc}")
+        return 1
     print(f"swept {len(states)} mission(s)")
     return 0
 

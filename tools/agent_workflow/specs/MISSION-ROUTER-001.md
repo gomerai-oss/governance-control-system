@@ -177,6 +177,25 @@ approve once.
   without an AR seat. The approval request and the "not counted yet" comment now say that one approval is enough.
 
 Vector 143.
+**Amendment 026 (2026-11-26, HITL direction: "start with router F1 and F14"):** one failed GitHub call never ends a
+whole sweep.
+- **What was found:** the router audit (M-AUDIT-ROUTER-001, findings F1 and F14, evidence E-2). The client turned
+  only an HTTP error into `GitHubError`. A dropped connection (`RemoteDisconnected`), a timeout or another transport
+  failure escaped as another type, past every `except GitHubError`, and ended the process. The label listing and the
+  "Not a mission" check on PRs outside the flow sat outside any `except`. Of the 19 failed router runs, 7 were a
+  dropped connection, 3 a 5xx and 6 the installation's hourly rate limit; each stopped every mission until the next
+  sweep. A one-off 500 on `/users/<bot>` (2026-11-25) also made an A3 PR be refused and counted as a failure.
+- **The client** (`mission_router/github.py`): every failure is a `GitHubError`, status 0 when GitHub gave no HTTP
+  answer. A read (GET) is sent again at most twice, after 1 and 3 seconds, after a dropped connection, a timeout or a
+  500, 502, 503 or 504. A write is never sent again, since it may have taken effect. A 403 or 429 is not waited out:
+  the installation's limit resets within the hour, after the sweep. The dispatcher and the evidence jobs use the same
+  client and gain the same.
+- **The sweep:** the label listing and each "Not a mission" check are contained like a mission: logged, left for the
+  next sweep, and the rest goes on. Discovery (the mission issues, the open PRs, the mission branches) stays all or
+  nothing: a partial listing could look like a missing PR, so a sweep that cannot list them decides nothing, and
+  `python3 -m mission_router` prints `sweep stopped: ...` and exits 1.
+
+Vector 144.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -895,3 +914,4 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 141 | `landing_path_check` named; a plan whose deliverable it refuses; one it allows; a command that cannot run, exits 2, or names no path of the plan; none named; an unusable value | Refused before approval, naming the path; started as before; refused; nothing runs; the router stops (Amendment 023) |
 | 142 | `mission_router.status` on a mission through each stage; on a hand-built PR merged by HITL, by a bot, open, or closed unmerged; a read that fails | `NOT DONE` until the A3 PASS is merged, then `DONE` (exit 0), writing nothing; `DONE` only for the HITL merge; `NOT DONE: cannot tell`, exit 2 (Amendment 024) |
 | 143 | HITL approves the plan before AR runs; AR passes it unchanged; AR challenges, A1 changes the plan, AR passes it; AR challenges and nobody answers; A1 defends; an approval of a commit outside the plan's history | The mission starts with no second approval; it starts, and the router lists the changed plan files once; it waits until HITL approves the challenged head itself; it starts, nothing listed; it does not start (Amendment 025) |
+| 144 | A read answered by a dropped connection, a timeout or a 5xx; the same three times; a write that fails; a 403, 404, 422 or 429; the label listing or a "Not a mission" check fails; the open-PR listing fails | Sent again and answered; a `GitHubError` after 3 tries; one try, a `GitHubError`; one try, a `GitHubError`; logged, and every mission is still swept; the sweep decides nothing and the command exits 1 (Amendment 026) |

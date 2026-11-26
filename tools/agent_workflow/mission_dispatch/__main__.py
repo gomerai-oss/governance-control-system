@@ -36,7 +36,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 from mission_router.github import GitHub, GitHubError
 from mission_router.gate import classify_or_raise
@@ -63,6 +63,8 @@ from .dispatch import (
     not_due,
     run_checks,
     landing_tree,
+    baseline_due,
+    run_baseline,
     Job,
     Survey,
     failure_feedback,
@@ -88,15 +90,17 @@ WORKFLOW = "mission-agent.yml"
 UNFINISHED = ("queued", "in_progress", "waiting", "pending", "requested")
 
 
-def live_survey(gh: GitHub, log: Callable[[str], None]) -> Tuple[Survey, MissionRouter]:
-    """The router's own read-only derivation of every unfinished mission (and the router that made it)."""
+def live_survey(gh: GitHub, log: Callable[[str], None], only: Optional[str] = None) -> Tuple[Survey, MissionRouter]:
+    """The router's own read-only derivation of every unfinished mission (and the router that made it). With
+    ``only``, of that one mission and no stack: what a lane's own check needs, at a fraction of the reads
+    (Amendment 050)."""
     config = load_config()
     router = MissionRouter(gh, config, classify_or_raise(load_tables(), normalize_path), dry_run=True, log=log)
-    contexts = router.survey()
+    contexts = router.survey(only)
     hitl = {login.casefold() for login in config["hitl_logins"]}
     blocked = failure_gate(router, config["bot_login"], hitl, log)
     try:
-        stacks = router.stacks()
+        stacks = router.stacks() if only is None else {}
     except GitHubError as exc:  # no landing this time; missions still run
         log(f"stacks could not be read, so no stack lands this time: {exc}")
         stacks = {}
@@ -296,9 +300,26 @@ def cmd_scan_report(args) -> int:
 
 
 def cmd_due(args) -> int:
+    """Whether the lane is still due, from a survey of its own mission (Amendment 050). When GitHub cannot be read,
+    the lane does not run, and ``--not-started`` records why, so the report job records no failure: the agent never
+    started, and the next plan starts it again."""
     job = _job()
-    survey, _ = live_survey(GitHub(_env("GITHUB_TOKEN"), args.repo), _log)
-    reason = not_due(job, survey)
+    earlier = _not_started(getattr(args, "after", "") or "")
+    if earlier:  # the checks job could not read GitHub: an A3 without its checks would only be refused
+        _log(f"{job.key}: not running: the checks job did not start ({earlier}); the next run plans it again")
+        if getattr(args, "not_started", ""):
+            write_refusal(args.not_started, f"the checks job did not start: {earlier}")
+        _output("due", "false")
+        return 0
+    try:
+        survey, _ = live_survey(GitHub(_env("GITHUB_TOKEN"), args.repo), _log, only=job.mission_id)
+        reason = not_due(job, survey)
+    except GitHubError as exc:
+        _log(f"{job.key}: not running: GitHub could not be read ({exc}); the next run plans it again")
+        if getattr(args, "not_started", ""):
+            write_refusal(args.not_started, f"GitHub could not be read: {exc}")
+        _output("due", "false")
+        return 0
     if reason:
         _log(f"{job.key}: not running: {reason}")
     _output("due", "false" if reason else "true")
@@ -356,6 +377,30 @@ def cmd_landing_tree(args) -> int:
     Path(args.info).write_text(json.dumps(info) + "\n", encoding="utf-8")
     _log(f"{job.key}: landing tree onto {job.landing_branch} at {info['head'] or 'unknown'}: "
          + ("merged" if info["merged"] else f"not merged ({info['error']})"))
+    return 0
+
+
+def cmd_baseline_due(args) -> int:
+    """Amendment 052: outputs ``due`` and ``head``: whether a landing check failed on the merged tree, and the landing
+    branch's head the baseline job checks out to run it again alone."""
+    job = _job()
+    head, failed = baseline_due(job, Path(args.checks), _landing_checks(load_config()))
+    _output("due", "true" if failed else "false")
+    _output("head", head)
+    _log(f"{job.key}: " + (f"{len(failed)} failed landing check(s) to run again on {job.landing_branch} at {head}"
+                           if failed else "no failed landing check to run again"))
+    return 0
+
+
+def cmd_baseline(args) -> int:
+    """Amendment 052: run the failed landing checks again on the landing branch's head alone (``--root``), as the
+    unprivileged checks account, in a job where no code under review has run."""
+    job = _job()
+    record = run_baseline(job, Path(args.root), Path(args.checks), Path(args.out), os.environ,
+                          _landing_checks(load_config()), run_as=args.run_as)
+    failing = sum(1 for r in record["results"] if not r["passed"])
+    _log(f"{job.key}: {failing} of {len(record['results'])} failed landing check(s) fail on "
+         f"{job.landing_branch} alone too")
     return 0
 
 
@@ -654,8 +699,12 @@ def post_drafts(gh, router, job, path: str) -> None:
 
 def cmd_report(args) -> int:
     job = _job()
+    not_started = _not_started(getattr(args, "not_started", "") or "")
+    if not_started:  # the lane's own check could not read GitHub: no agent ran, so no failure is recorded
+        _log(f"{job.key}: not started ({not_started}); nothing recorded, the next run plans it again")
+        return 0
     gh = GitHub(_env("GITHUB_TOKEN"), args.repo)
-    survey, router = live_survey(gh, _log)
+    survey, router = live_survey(gh, _log, only=job.mission_id)
     post_drafts(gh, router, job, getattr(args, "drafts", "") or "")
     reason = outcome(job, survey, gh.pulls_from)
     if reason is None:
@@ -667,9 +716,41 @@ def cmd_report(args) -> int:
     run_url = os.environ.get("RUN_URL", "")
     text = failure_comment(job, reason, run_url, read_refusals(args.refusal or []))
     _NOTE.update(comment=evidence_producer.text_digest(text))
-    gh.comment(int(issue["number"]), text)
+    post_once(gh, int(issue["number"]), text)
     _log(f"{job.key}: reported on #{issue['number']}: " + reason)
     return 0
+
+
+def post_once(gh: GitHub, number: int, text: str, tries: int = 3) -> None:
+    """Post a failure record so that it is there exactly once (Amendment 051, dispatcher audit F23). The record is
+    what counts toward the three failures that block a stage: one that is lost lets the lane run again and again,
+    one posted twice counts twice. A post that ends with no HTTP answer, or a 5xx, may have been made: the issue is
+    read, and the record posted again only when it is not there. The run's URL makes each record's text unique."""
+    for attempt in range(tries):
+        try:
+            gh.comment(number, text)
+            return
+        except GitHubError as exc:
+            if exc.status not in (0, 500, 502, 503, 504) or attempt == tries - 1:
+                raise
+            _log(f"posting on #{number} failed ({exc}); looking whether it was posted")
+        posted = _same_text(text)
+        if any(_same_text(c.get("body") or "") == posted for c in gh.paginate(f"/issues/{number}/comments", limit=1000)):
+            return
+
+
+def _same_text(text: str) -> str:
+    return text.replace("\r\n", "\n").strip()
+
+
+def _not_started(path: str) -> str:
+    """The reason a ``due`` step recorded for not starting the lane (Amendment 050), or "" when there is none."""
+    if not path:
+        return ""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file():
+        return ""
+    return quarantine.inline(p.read_text(encoding="utf-8", errors="replace").strip(), 300)
 
 
 def _perform_record(recorder, comment: dict, mission: str, round_n: int, result: str, reason: str, text: str,
@@ -1008,10 +1089,20 @@ def main(argv=None) -> int:
         (sub.choices.get(name) or sub.add_parser(name)).add_argument("--root", required=True)
     sub.choices["run"].add_argument("--timeout", type=float, default=3600.0)
     sub.choices["checks"].add_argument("--out", required=True)
+    for name in ("due", "report"):  # Amendment 050: a lane not started because GitHub could not be read
+        sub.choices[name].add_argument("--not-started", default="", help="where due records why the lane did not start")
+    sub.choices["due"].add_argument("--after", default="", help="the checks job's not-started record, if any")
     sub.choices["checks"].add_argument("--timeout", type=float, default=900.0)
     sub.choices["checks"].add_argument("--run-as", help="unprivileged account to run the checks as")
     sub.choices["checks"].add_argument("--landing-root", default="", help="the landing tree (Amendment 048)")
     sub.choices["checks"].add_argument("--landing-info", default="", help="landing-tree's record (Amendment 048)")
+    due_base = sub.add_parser("baseline-due", help="the failed landing checks to run again alone (Amendment 052)")
+    due_base.add_argument("--checks", required=True, help="the checks job's results")
+    base = sub.add_parser("baseline", help="run the failed landing checks on the landing branch alone (Amendment 052)")
+    base.add_argument("--root", required=True, help="a checkout of the landing branch's head")
+    base.add_argument("--checks", required=True, help="the checks job's results")
+    base.add_argument("--out", required=True)
+    base.add_argument("--run-as", help="unprivileged account to run the checks as")
     tree = sub.add_parser("landing-tree", help="the commit under review merged onto its landing branch (Amendment 048)")
     tree.add_argument("--review", required=True)
     tree.add_argument("--out", required=True)
@@ -1061,7 +1152,7 @@ def main(argv=None) -> int:
     performing.add_argument("--out", required=True, help="the stage's work folder")
     performing.add_argument("--plan", default="", help="where check wrote the plan")
     args = parser.parse_args(argv)
-    steps = {"blast-mode": cmd_blast_mode, "tree-install": cmd_tree_install, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "landing-tree": cmd_landing_tree, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
+    steps = {"blast-mode": cmd_blast_mode, "tree-install": cmd_tree_install, "registry-check": cmd_registry_check, "provenance-fetch": cmd_provenance_fetch, "plan": cmd_plan, "due": cmd_due, "checks": cmd_checks, "landing-tree": cmd_landing_tree, "baseline-due": cmd_baseline_due, "baseline": cmd_baseline, "prepare": cmd_prepare, "run": cmd_run, "collect": cmd_collect,
              "publish": cmd_publish, "report": cmd_report, "land": cmd_land, "perform": cmd_perform,
              "scan-prepare": cmd_scan_prepare, "scan": cmd_scan, "scan-report": cmd_scan_report}
     recorder = evidence_producer.Recorder.from_env(os.environ)

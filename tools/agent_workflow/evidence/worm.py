@@ -96,10 +96,24 @@ def access_token(provider: str, environ: Mapping[str, str] = os.environ, urlopen
 
 
 class Bucket:
-    """A GCS bucket through its JSON API with a short-lived bearer token."""
+    """A GCS bucket through its JSON API with a short-lived bearer token.
 
-    def __init__(self, bucket: str, token: str, urlopen: Callable = urllib.request.urlopen):
-        self.bucket, self.token, self.urlopen = bucket, token, urlopen
+    The token outlives neither GitHub's OIDC token it was exchanged for (about five minutes) nor a long job: the seal
+    job and the checker read or write the whole store, which takes longer. With ``refresh``, a call Google answers
+    with 401 gets a new token once and is sent again; a second 401 is an error, as before."""
+
+    def __init__(self, bucket: str, token: str, urlopen: Callable = urllib.request.urlopen,
+                 refresh: Optional[Callable[[], str]] = None):
+        self.bucket, self.token, self.urlopen, self.refresh = bucket, token, urlopen, refresh
+
+    def _send(self, url: str, data: Optional[bytes] = None, method: str = "GET", ctype: str = "") -> bytes:
+        try:
+            return _call(self.urlopen, self._req(url, data, method, ctype))
+        except _Status as exc:
+            if exc.status != 401 or self.refresh is None:
+                raise
+        self.token = self.refresh()  # the token expired during the job: one new token, one retry
+        return _call(self.urlopen, self._req(url, data, method, ctype))
 
     def _req(self, url: str, data: Optional[bytes] = None, method: str = "GET", ctype: str = "") -> urllib.request.Request:
         headers = {"Authorization": f"Bearer {self.token}"}
@@ -112,7 +126,7 @@ class Bucket:
         url = (f"{UPLOAD}/b/{self.bucket}/o?uploadType=media&ifGenerationMatch=0"
                f"&name={urllib.parse.quote(name, safe='')}")
         try:
-            _call(self.urlopen, self._req(url, data, "POST", "application/octet-stream"))
+            self._send(url, data, "POST", "application/octet-stream")
         except _Status as exc:
             if exc.status == 412:
                 return "present"
@@ -121,7 +135,7 @@ class Bucket:
 
     def meta(self, name: str) -> Optional[dict]:
         try:
-            return json.loads(_call(self.urlopen, self._req(f"{API}/b/{self.bucket}/o/{urllib.parse.quote(name, safe='')}")))
+            return json.loads(self._send(f"{API}/b/{self.bucket}/o/{urllib.parse.quote(name, safe='')}"))
         except _Status as exc:
             if exc.status == 404:
                 return None
@@ -130,7 +144,7 @@ class Bucket:
     def get(self, name: str) -> bytes:
         url = f"{API}/b/{self.bucket}/o/{urllib.parse.quote(name, safe='')}?alt=media"
         try:
-            return _call(self.urlopen, self._req(url))
+            return self._send(url)
         except _Status as exc:
             raise EvidenceError(f"the WORM bucket refused to read {name}: {exc}") from None
 
@@ -173,4 +187,6 @@ def from_config(cfg: Mapping, environ: Mapping[str, str] = os.environ,
     worm = config(cfg)
     if worm is None:
         return None
-    return Bucket(worm["bucket"], access_token(worm["workload_identity_provider"], environ, urlopen), urlopen)
+    provider = worm["workload_identity_provider"]
+    return Bucket(worm["bucket"], access_token(provider, environ, urlopen), urlopen,
+                  refresh=lambda: access_token(provider, environ, urlopen))
