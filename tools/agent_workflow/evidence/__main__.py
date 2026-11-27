@@ -15,6 +15,9 @@
   output (the mark job runs only when it is not 0; Amendment 047);
 - ``check --store DIR --git DIR --out FILE`` and ``report --repo OWNER/NAME --result FILE --sha SHA --store-repo
   OWNER/NAME``: the checker (item 7);
+- ``withdraw --store DIR --records "ID ..." --reason TEXT [--confirm]``: HITL's withdrawal of stored records (§3m item
+  4; Amendment 055), in Evidence Verify's ``withdraw`` job; ``refused-landings`` names every landing whose stored
+  attestation is false. Without ``--confirm`` it lists them and writes nothing;
 - ``store-name``: ``config.json``'s ``evidence_store``, for the seal workflow;
 - ``keygen --repo OWNER/NAME --env ENV``: a new evidence key, its seed set as the environment secret by ``gh``, its
   public half printed to pin in ``key.json``.
@@ -73,6 +76,11 @@ def main(argv=None) -> int:
     r.add_argument("--result", required=True)
     r.add_argument("--sha", required=True)
     r.add_argument("--store-repo", required=True)
+    x = sub.add_parser("withdraw", help="HITL's withdrawal of stored records (section 3m item 4; Amendment 055)")
+    x.add_argument("--store", required=True, help="a clone of the store")
+    x.add_argument("--records", required=True, help="record ids, space separated, or refused-landings")
+    x.add_argument("--reason", required=True)
+    x.add_argument("--confirm", action="store_true", help="write the withdrawals (without it, list them only)")
     sub.add_parser("store-name", help="print full=<owner/name> and name=<name> of config.json's evidence_store")
     k = sub.add_parser("keygen", help="make an evidence key; the seed goes to the environment secret only")
     k.add_argument("--repo", required=True)
@@ -143,6 +151,14 @@ def _other(args) -> int:
                                   os.environ.get("RUN_URL", ""))
             print(done)
             return 0 if result["ok"] else 1
+        if args.command == "withdraw":
+            from evidence import producer, withdraw
+            from mission_router.router import load_config
+            result = withdraw.run(Path(args.store), args.records.split(), args.reason, os.environ, load_config(),
+                                  producer.Recorder.from_env(os.environ), args.confirm)
+            for line in withdraw.lines(result, args.confirm):
+                print(line)
+            return 0
         if args.command == "count":
             result = json.loads(Path(args.result).read_text(encoding="utf-8"))
             print(f"prs={len(sealer.to_mark(result))}")
@@ -161,13 +177,17 @@ def _other(args) -> int:
             from evidence import worm as worm_mod
             from mission_router.router import load_config
             bucket = worm_mod.from_config(load_config())  # the WORM copy, when declared (item 3)
+            repository = os.environ.get("GITHUB_REPOSITORY", "")
+            merged = sealer.github_merged(GitHub(os.environ["GITHUB_TOKEN"], repository).request) if repository else None
             result = sealer.seal_runs(Path(args.chains), seed, seal_mod.load_keys(), store, chain_mod.now(), bucket,
-                                      os.environ.get("GITHUB_REPOSITORY", ""), resume=args.resume)
+                                      repository, resume=args.resume, merged=merged)
             sealer.write_json(args.out, result)
             for run in result["sealed"]:
                 print(f"sealed: {run}")
             for name in result["packs"]:
                 print(f"landing provenance: {name}")
+            for n in result["not_landed"]:
+                print(f"not a landing, not attested: {n['landing']}: {n['reason']}")
             for r in result["refused"]:
                 print(f"REFUSED: {r['run']}: {r['reason']}")
             return 1 if result["refused"] else 0

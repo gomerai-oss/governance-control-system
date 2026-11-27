@@ -39,6 +39,11 @@ class Store:
     def holds(self, path: str) -> bool:
         return self._existing(path) is not None
 
+    def read(self, path: str) -> Optional[bytes]:
+        """A stored file's bytes, or None when the store does not hold it."""
+        existing = self._existing(path)
+        return None if existing is None else base64.b64decode(existing.get("content") or "")
+
     def add(self, path: str, data: bytes, message: str) -> str:
         """``"added"``, or ``"same"`` when the store already holds these bytes. Raises when it holds others."""
         from mission_router.github import GitHubError

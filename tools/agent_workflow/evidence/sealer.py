@@ -15,7 +15,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Mapping
+from typing import Callable, Dict, List, Mapping, Optional
 
 from epap import ed25519
 from epap.signing import dump
@@ -76,21 +76,46 @@ def _stored_records(store: "store_mod.Store") -> List[dict]:
     return out
 
 
+def github_merged(request: Callable) -> Callable[[int, str], bool]:
+    """Whether GitHub shows a PR merged at a commit: ``request`` reads this repository (``pull-requests: read``). A
+    PR GitHub does not have (404) is not merged. Any other refusal raises ``EvidenceError``: the landing's run is then
+    refused and the next sweep asks again (Amendment 055)."""
+    from mission_router.github import GitHubError
+
+    def merged(pr: int, commit: str) -> bool:
+        try:
+            raw = request("GET", f"/pulls/{int(pr)}")
+        except GitHubError as exc:
+            if exc.status == 404:
+                return False
+            raise EvidenceError(f"GitHub would not show PR #{pr} to confirm its landing ({exc.status})") from None
+        return bool(raw.get("merged")) and (raw.get("head") or {}).get("sha") == commit
+    return merged
+
+
 def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_mod.Store", time: str,
-              worm=None, repository: str = "", resume: bool = False) -> dict:
-    """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}]}``. With ``worm`` (a declared WORM bucket),
-    each run's records and seal are also copied there, before the store's seal is written. A chain the store or the bucket
-    refuses is refused like a chain that does not verify: it holds back only its own run's PRs, and the other runs are
-    still sealed and marked (Amendment 049; before, one refused copy stopped the job with no result, and no PR of the
-    sweep was marked). A landing attestation the store or the bucket refuses refuses its landing's run. With
-    ``resume`` (the sweep, Amendment 022), a chain the store already holds a seal for is not sealed again: its records
-    must be the stored ones, and it counts as sealed for marking, with no second seal and no second landing
-    attestation."""
+              worm=None, repository: str = "", resume: bool = False,
+              merged: Optional[Callable[[int, str], bool]] = None) -> dict:
+    """``{"sealed": [run], "refused": [{run, reason}], "prs": [{pr, run}], "packs": [name], "not_landed":
+    [{landing, reason}]}``. With ``worm`` (a declared WORM bucket), each run's records and seal are also copied there,
+    before the store's seal is written. A chain the store or the bucket refuses is refused like a chain that does not
+    verify: it holds back only its own run's PRs, and the other runs are still sealed and marked (Amendment 049;
+    before, one refused copy stopped the job with no result, and no PR of the sweep was marked). With ``resume`` (the
+    sweep, Amendment 022), a chain the store already holds a seal for is not sealed again: its records must be the
+    stored ones, and it counts as sealed for marking, with no second seal and no second landing attestation.
+
+    A landing is attested only when it was one (Amendment 055): a landing attempt GitHub refused (``pack.landings``)
+    is not, nor one whose PR GitHub does not show merged at its commit (``merged``, required with ``repository``).
+    Each is listed in ``not_landed``. The attestation is written before its run's seal: an attestation the store or
+    the bucket refuses, or a PR GitHub would not show, refuses the run, which stays unsealed, so the next sweep
+    names it again and attests it then. Before, the run was sealed first, and a refused attestation was never made."""
     kid = seal_mod.keyid(ed25519.public_key(seed))
     if kid not in keys:
         raise EvidenceError("the seal key is not a pinned evidence key (evidence/key.json); nothing was sealed")
-    out: dict = {"sealed": [], "refused": [], "prs": [], "packs": []}
-    landed: List[dict] = []
+    if repository and merged is None:
+        raise EvidenceError("a landing attestation needs GitHub's word that the PR merged; nothing was sealed")
+    out: dict = {"sealed": [], "refused": [], "prs": [], "packs": [], "not_landed": []}
+    pending = []  # first every chain's records are stored, so an attestation cites all of this sweep's too
     for run, directory in find_runs(chains).items():
         try:
             records, _ = verify.verify_run(directory, run, {})
@@ -107,6 +132,30 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
                 out["sealed"].append(run)  # sealed by an earlier sweep that stopped part way: its records are stored
                 out["prs"] += _published(records, run)
                 continue
+        except EvidenceError as exc:
+            out["refused"].append({"run": run, "reason": str(exc)})
+            continue
+        pending.append((run, records, records_bytes, seal_bytes, message))
+    everything: Optional[List[dict]] = None
+    for run, records, records_bytes, seal_bytes, message in pending:
+        not_landed: List[dict] = []
+        packs: List[str] = []
+        try:
+            if repository:  # each landing's attestation, before its run's seal (§3m item 2; Amendment 055)
+                not_landed = [{"landing": r["id"], "reason": "GitHub refused the merge"}
+                              for r in pack_mod.refused_landings(records)]
+                landed = []
+                for landing in pack_mod.landings(records):
+                    if merged(landing["subject"]["pr"], landing["subject"]["commit"]):
+                        landed.append(landing)
+                    else:
+                        not_landed.append({"landing": landing["id"], "reason":
+                                           f"GitHub does not show PR #{landing['subject']['pr']} merged at "
+                                           f"{landing['subject']['commit'][:12]}"})
+                if landed and everything is None:
+                    everything = _stored_records(store)
+                for landing in landed:
+                    packs.append(_attest(store, worm, landing, everything, repository, seed))
             if worm is not None:  # before the store's seal: a chain the bucket refused stays unsealed, so the next
                 # sweep names its run again and copies it (Amendment 049)
                 worm.put(f"{store_mod.RUNS}/{run}/{chain_mod.RECORDS}", records_bytes)
@@ -117,30 +166,24 @@ def seal_runs(chains: Path, seed: bytes, keys: Mapping[str, str], store: "store_
             continue
         out["sealed"].append(run)
         out["prs"] += _published(records, run)
-        landed += pack_mod.landings(records)
-    if landed and repository:  # each landing's attestation, once its run is in the store (§3m item 2)
-        try:
-            everything = _stored_records(store)
-        except EvidenceError as exc:
-            everything = None
-            out["refused"] += [{"run": _landing_run(landing), "reason": str(exc)} for landing in landed]
-        for landing in landed if everything is not None else ():
-            name = pack_mod.name_for(landing)
-            try:
-                data = pack_mod.sign(pack_mod.statement(landing, everything, repository), seed)
-                store.add(name, data, f"Landing provenance for {landing['subject']['mission']} ({landing['id']})")
-                if worm is not None:
-                    worm.put(name, data)
-            except EvidenceError as exc:
-                out["refused"].append({"run": _landing_run(landing), "reason": str(exc)})
-                continue
-            out["packs"].append(name)
+        out["packs"] += packs
+        out["not_landed"] += not_landed
     return out
 
 
-def _landing_run(landing: Mapping) -> str:
-    """The chain a landing record is in: its id is ``<chain>/<n>``."""
-    return str(landing["id"]).rsplit("/", 1)[0]
+def _attest(store: "store_mod.Store", worm, landing: Mapping, everything: List[dict], repository: str,
+            seed: bytes) -> str:
+    """Add one landing's attestation to the store and the bucket. One an earlier sweep stored, before its run's seal
+    was refused, is kept as stored: a new one would cite more of the mission's records, and a stored file is never
+    replaced."""
+    name = pack_mod.name_for(landing)
+    data = store.read(name)
+    if data is None:
+        data = pack_mod.sign(pack_mod.statement(landing, everything, repository), seed)
+        store.add(name, data, f"Landing provenance for {landing['subject']['mission']} ({landing['id']})")
+    if worm is not None:
+        worm.put(name, data)
+    return name
 
 
 def _published(records: List[dict], run: str) -> List[dict]:
