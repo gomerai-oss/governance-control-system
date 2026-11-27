@@ -11,7 +11,9 @@ name: Evidence Verify
 # Withdrawal (§3m item 4; Amendment 055): started by hand with records to withdraw (their ids, or refused-landings)
 # and a reason, the withdraw job checks HITL started it, reads each record from the store and writes one
 # evidence.withdraw record naming it by id and digest in its own chain, which Evidence Seal seals and stores. Without
-# confirm ticked it only lists them. It changes nothing in the store itself.
+# confirm ticked it only lists them. It changes nothing in the store itself. It also runs when only a reason or
+# confirm was given, to say that no record was named; and a confirmed withdrawal waits until an earlier one is
+# stored (Amendment 056).
 #
 # Security model: the verify job reads the store with the evidence reader App, a different identity from the evidence
 # App that writes it. It holds that App's key in the evidence-verify environment (deployable from the default branch
@@ -155,12 +157,13 @@ jobs:
 
   withdraw:
     name: withdraw
-    if: github.event_name == 'workflow_dispatch' && inputs.withdraw != ''
+    if: github.event_name == 'workflow_dispatch' && (inputs.withdraw != '' || inputs.reason != '' || inputs.confirm)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: evidence-verify
     permissions:
       contents: read  # check out this repository's tooling
+      actions: read  # an earlier withdrawal not yet stored holds this one (Amendment 056)
     steps:
       - name: Check out the default branch's tooling
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -215,11 +218,12 @@ jobs:
           WITHDRAW: ${{ inputs.withdraw }}
           REASON: ${{ inputs.reason }}
           CONFIRM: ${{ inputs.confirm }}
+          GITHUB_TOKEN: ${{ github.token }}  # actions read: lists this repository's withdrawal chains not yet stored
         run: |
           set -euo pipefail
           args=(--store "$RUNNER_TEMP/store" --records "$WITHDRAW" --reason "$REASON")
           if [ "$CONFIRM" = "true" ]; then args+=(--confirm); fi
-          python3 -B -m evidence withdraw "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B -m evidence withdraw "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Keep this job's evidence chain (Evidence Seal seals it)
         if: always() && steps.store.outputs.full != ''

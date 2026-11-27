@@ -350,8 +350,9 @@ DISPATCH = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": HITL, "GIT
             "GITHUB_ACTOR_ID": str(HITL_ID), "GITHUB_RUN_ID": "77"}
 
 
-class WithdrawalTests(unittest.TestCase):
-    """Amendment 055 (audit M-AUDIT-EVIDENCE-001 F5): HITL withdraws a stored record (§3m item 4)."""
+class StoreWithAttestations(unittest.TestCase):
+    """A store holding a refused landing and the retry that landed, each attested as the seal job did before
+    Amendment 055."""
 
     def setUp(self):
         from evidence import withdraw
@@ -373,8 +374,12 @@ class WithdrawalTests(unittest.TestCase):
         self.clone = self.copy()
 
     def copy(self):
+        """A clone of the store: its files, as one commit (the checker reads the store's history)."""
         path = self.root / f"clone-{len(list(self.root.glob('clone-*')))}"
         self.listing.copy_to(path)
+        for args in (["init", "-q"], ["add", "-A"],
+                     ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "stored"]):
+            subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
         return path
 
     def recorder(self):
@@ -384,9 +389,14 @@ class WithdrawalTests(unittest.TestCase):
         path = self.root / "w" / "runs" / "gh-77-1-withdraw" / "records.jsonl"
         return len(chain.read(path)) if path.is_file() else 0
 
-    def go(self, names=("refused-landings",), env=None, confirm=True, recorder=None, clone=None, reason="false landing"):
+    def go(self, names=("refused-landings",), env=None, confirm=True, recorder=None, clone=None, reason="false landing",
+           pending=lambda: []):
         return self.withdraw.run(clone or self.clone, list(names), reason, env or DISPATCH, HITL_CONFIG,
-                                 recorder or self.recorder(), confirm)
+                                 recorder or self.recorder(), confirm, pending)
+
+
+class WithdrawalTests(StoreWithAttestations):
+    """Amendment 055 (audit M-AUDIT-EVIDENCE-001 F5): HITL withdraws a stored record (§3m item 4)."""
 
     def test_vector_264_refused_landings_names_only_the_false_attestation(self):
         result = self.go(confirm=False)
@@ -473,10 +483,14 @@ class WithdrawalTests(unittest.TestCase):
         for name in ("withdraw:", "reason:", "confirm:"):
             self.assertIn(name, on)
         job = text[text.index("\n  withdraw:\n"):text.index("\n  report:\n")]
-        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.withdraw != ''", job)
+        self.assertIn("if: github.event_name == 'workflow_dispatch' && (inputs.withdraw != '' || inputs.reason != '' "
+                      "|| inputs.confirm)", job, "a reason or confirm with no record named is said, not skipped")
+        self.assertIn("actions: read", job)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", job)
+        self.assertIn('python3 -B -m evidence withdraw "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"', job)
         self.assertIn("environment: evidence-verify", job)
         self.assertIn("permission-contents: read", job)
-        self.assertNotIn("write", job.split("steps:")[0], "contents read only")
+        self.assertNotIn("write", job.split("steps:")[0], "read only")
         self.assertIn("python3 -B -m mission_router.substrate", job)
         self.assertIn('EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-withdraw', job)
         self.assertIn("name: evidence-withdraw", job)
@@ -487,6 +501,125 @@ class WithdrawalTests(unittest.TestCase):
                                      "inputs reach the job only in its condition and through the environment")
         from evidence import sweep
         self.assertIn("evidence-verify.yml", sweep.WORKFLOWS.values(), "Evidence Seal seals the job's chain")
+
+
+class GuardTests(StoreWithAttestations):
+    """Amendment 056: a confirmed withdrawal waits for an earlier one to be stored."""
+
+    def artifacts(self, *entries):
+        def request(method, path, body=None):
+            assert (method, path) == ("GET", "/actions/artifacts?name=evidence-withdraw&per_page=100"), path
+            return {"artifacts": [{**{"name": "evidence-withdraw", "expired": False, "created_at": "2026-11-27T01:00:00Z",
+                                      "workflow_run": {"id": run}}, **extra} for run, extra in entries]}
+        return request
+
+    def test_vector_270_an_earlier_withdrawal_not_yet_stored_holds_a_confirmed_one(self):
+        import datetime
+        now = datetime.datetime(2026, 11, 27, 1, 10, tzinfo=datetime.timezone.utc)
+        self.go()  # run 77's withdrawal, sealed into the store
+        sealer.seal_runs(self.root / "w", self.seed, self.keys, store.Store(self.listing.request),
+                         "2026-11-27T01:05:00Z")
+        clone = self.copy()
+        request = self.artifacts((77, {}), (78, {}), (79, {"expired": True}),
+                                 (80, {"created_at": "2026-11-20T00:00:00Z"}), (81, {}))
+        self.assertEqual(self.withdraw.unstored(request, clone, "81", now), ["78"],
+                         "77 is stored; 79 expired; 80 is past the sweep's lookback; 81 is this run")
+        with self.assertRaisesRegex(worm.EvidenceError, "run 78 is not in the store yet"):
+            self.go(names=["gh-2-1-router/0"], clone=clone, pending=lambda: ["78"],
+                    recorder=producer.Recorder(self.root / "w2", "gh-81-1-withdraw"))
+        self.assertFalse((self.root / "w2" / "runs" / "gh-81-1-withdraw" / "records.jsonl").exists())
+        listed = self.go(names=["gh-2-1-router/0"], clone=clone, confirm=False, pending=lambda: ["78"])
+        self.assertEqual(len(listed["withdrawn"]), 1, "a dry run still lists")
+
+    def test_vector_270_a_confirmed_withdrawal_that_cannot_ask_writes_nothing(self):
+        with self.assertRaisesRegex(worm.EvidenceError, "cannot check for an earlier withdrawal"):
+            self.go(pending=None)
+        self.assertEqual(self.written(), 0)
+
+    def test_vector_270_no_record_named_is_said(self):
+        with self.assertRaisesRegex(worm.EvidenceError, "name the records to withdraw, or refused-landings"):
+            self.go(names=[""])
+
+
+class CheckerTests(StoreWithAttestations):
+    """Amendment 056 (audit M-AUDIT-EVIDENCE-001 F20, F11 and F17): the checker refuses a false attestation that is
+    not withdrawn."""
+
+    def test_vector_267_a_stored_attestation_of_a_refused_landing_is_refused_until_withdrawn(self):
+        result = checker.check(self.clone, self.keys, None)
+        self.assertFalse(result["ok"])
+        self.assertEqual([f for f in result["failures"] if f.startswith("packs/")],
+                         ["packs/gh-1-1-router-1.provenance.json: attests gh-1-1-router/1, a landing GitHub refused "
+                          "(gh-1-1-router/2 records the refusal); withdraw it (section 3m item 4)"])
+        self.go()
+        sealer.seal_runs(self.root / "w", self.seed, self.keys, store.Store(self.listing.request),
+                         "2026-11-10T13:00:00Z")
+        clone = self.copy()
+        self.assertEqual(pack.store_problems(clone, self.keys), [], "withdrawn: kept, marked, no longer refused")
+        result = checker.check(clone, self.keys, None)
+        self.assertTrue(result["ok"], result["failures"])
+        self.assertEqual(result["withdrawn"], {"gh-1-1-router/1": "gh-77-1-withdraw/0"})
+
+    def test_vector_267_only_a_withdrawal_of_that_record_excuses_it(self):
+        self.go(names=["gh-2-1-router/0"])  # another record withdrawn
+        sealer.seal_runs(self.root / "w", self.seed, self.keys, store.Store(self.listing.request),
+                         "2026-11-10T13:00:00Z")
+        self.assertEqual(len(pack.store_problems(self.copy(), self.keys)), 1)
+
+    def git_repo(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        run = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],  # noqa: E731
+                                        cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+        run("init", "-q", "-b", "main")
+        run("commit", "-q", "--allow-empty", "-m", "base")
+        run("checkout", "-q", "-b", "mission/M-DEMO-001/a3-r1")
+        run("commit", "-q", "--allow-empty", "-m", "the A3 PASS")
+        head = run("rev-parse", "HEAD")
+        run("checkout", "-q", "main")
+        return repo, run, head
+
+    def landed_store(self, commit):
+        listing = ListingStore()
+        chains = self.root / "c2"
+        router_chain(chains, "gh-5-1-router", [(commit, False)])
+        sealer.seal_runs(chains, self.seed, self.keys, store.Store(listing.request), "2026-11-10T12:00:00Z", None,
+                         REPO, merged=lambda pr, c: True)
+        path = self.root / "c2-clone"
+        listing.copy_to(path)
+        for args in (["init", "-q"], ["add", "-A"],
+                     ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "stored"]):
+            subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+        return path
+
+    def test_vector_268_an_attestation_of_a_commit_no_landing_branch_holds_is_refused(self):
+        repo, run, head = self.git_repo()
+        clone = self.landed_store(head)
+        self.assertEqual(pack.store_problems(clone, self.keys), [], "without a clone, not checked")
+        (problem,) = pack.store_problems(clone, self.keys, repo, ["main"])
+        self.assertIn(f"attests {head[:12]}, which no landing branch (main) holds: GitHub never merged it", problem)
+        run("merge", "-q", "--no-ff", "-m", "merge", "mission/M-DEMO-001/a3-r1")
+        self.assertEqual(pack.store_problems(clone, self.keys, repo, ["main"]), [], "merged: its head is in main")
+        (problem,) = pack.store_problems(clone, self.keys, repo, ["release"])
+        self.assertIn("cannot check its landing: no landing branch (release) is in the clone", problem)
+        self.assertEqual(checker.check(clone, self.keys, repo, landing_branches=["main"])["failures"], [])
+
+    def test_vector_269_evidence_verify_of_a_whole_store_checks_the_attestations(self):
+        import io
+        from contextlib import redirect_stdout
+        from evidence import __main__ as cli
+        keys = self.root / "key.json"
+        kid, public = next(iter(self.keys.items()))
+        keys.write_text(json.dumps({"schema": seal.KEYS_SCHEMA, "keys": [{"keyid": kid, "public": public}]}))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.main(["verify", "--store", str(self.clone), "--keys", str(keys)])
+        self.assertEqual(code, 1)
+        self.assertIn("REFUSED: packs/gh-1-1-router-1.provenance.json: attests gh-1-1-router/1, a landing GitHub "
+                      "refused", out.getvalue())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["verify", "--store", str(self.clone), "--keys", str(keys),
+                                       "--run", "gh-2-1-router"]), 0, "one run: its chain only, as before")
 
 
 if __name__ == "__main__":

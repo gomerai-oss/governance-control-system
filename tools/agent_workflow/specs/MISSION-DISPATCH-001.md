@@ -632,11 +632,51 @@ one, and HITL can withdraw a record.
     landing record withdraws its attestation, which stays in the store.
 - **What it does not do:**
   - **The checker** still passes a store holding a false attestation that is not withdrawn (the audit's F11, F17 and
-    F20): the next change makes it refuse one.
+    F20): the next change makes it refuse one (Amendment 056).
   - **#1390's real landing** stays without an attestation.
 - **What it costs:** one read of a PR per landing; nothing on a sweep with no landing.
 
 Vectors 262 to 266.
+
+**Amendment 056 (2026-11-27, HITL direction: "start evidence F20"):** the checker refuses a false landing
+attestation that is not withdrawn, closes its issue after a pass, and says a cause once.
+- **What was found:** the evidence audit (M-AUDIT-EVIDENCE-001, findings F20, F11, F17 and F10, evidence E-3 and
+  E-5), and the first live withdrawals.
+  - F20, F11 and F17: the checker (`pack.store_problems`, called by `evidence check`) checked an attestation's
+    signature, citations and subject only. It never looked for GitHub's refusal of the landing, so Core's checker
+    passed while its store held 55 false attestations. `evidence verify` of a whole store did not check
+    attestations at all.
+  - F10: the checker commented on its open issue every run, even for the same cause (49 comments on #1282 over 11
+    days), and never closed it after a pass: Core #304 and governance #1395 stayed open after verification passed.
+  - The first live withdrawal (2026-11-27): an empty `withdraw` box skipped the job without a word, and a second
+    confirmed run, started before the first was stored, wrote all 135 withdrawals again. Both sets are kept: they are
+    true records of two runs, and the verifier accepts a record withdrawn twice.
+- **The checker refuses a false attestation:** besides its signature, form, citations and subject, an attestation
+  that is not withdrawn must attest a landing
+  - **not one GitHub refused:** its landing record is not followed in its chain by a `failed` one for the same PR and
+    commit; the failure names both records;
+  - **merged:** with the repository's clone (`--git`, as the checker runs), its commit is in the history of the
+    default branch or a `landing_branches` entry. The router merges with a merge commit, so a landed PR's head stays
+    there. A clone holding none of those branches is a failure to check, never a pass.
+
+  A withdrawal of the landing record, naming its stored digest, excuses it: the attestation is kept and the record
+  marked. On 2026-11-27, with the 135 and 55 false attestations withdrawn, both stores pass. Without those withdrawals
+  the check names exactly those, and no real landing.
+- **`evidence verify` of a whole store** (no `--run`) checks every attestation the same way (§3m item 5). One run's
+  verification checks its chain only, as before.
+- **The issue (F10):** a pass closes the open `evidence:failed` issue with a comment naming the commit that verified.
+  A failure comments on the open issue only when its failures differ from those last reported there (a hidden mark
+  holds their digest). The check run still fails every run.
+- **Withdrawal:**
+  - **No record named is said:** the `withdraw` job also runs when only a reason or confirm was given, and refuses,
+    naming what is missing, in its log and summary.
+  - **One at a time:** a confirmed withdrawal is refused while an earlier one's chain (artifact `evidence-withdraw`,
+    within the seal sweep's lookback) is not in the store yet. It could not see those withdrawals and would write
+    them again. A dry run still lists. The job gains `actions: read` to list those artifacts.
+- **What it costs:** one `git merge-base` per attestation in each check, and one artifact listing per confirmed
+  withdrawal.
+
+Vectors 267 to 271.
 
 Vector 194.
 
@@ -3166,3 +3206,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 264 | HITL withdraws `refused-landings`, without and with confirm; a record by id; again | Only the false attestation's landing named, nothing written; one withdrawal per record, by HITL's account, sealed, the verifier marks the record and nothing is deleted; the digest from the store; already withdrawn, nothing written (Amendment 055) |
 | 265 | A withdrawal on a push, by a login that is not HITL's, by another account of that name, re-run by another, with no account id or none pinned; one unknown record; a withdrawal of a withdrawal; no reason; no chain; the CLI on a schedule | Each refused and nothing written; exit 1 (Amendment 055) |
 | 266 | Evidence Verify's withdraw job | Only by hand with records named, in `evidence-verify` with the reader App and `contents: read`, the substrate check, inputs only through the environment, its own chain sealed by Evidence Seal (Amendment 055) |
+| 267 | The checker on a stored attestation of a landing GitHub refused; after HITL withdraws that landing; after a withdrawal of another record | Refused, naming the landing and the refusal; passes, the record marked withdrawn; still refused (Amendment 056) |
+| 268 | The checker on an attestation of a commit no landing branch holds; after it merges; with none of the landing branches in the clone | Refused; passes; refused as not checkable (Amendment 056) |
+| 269 | `evidence verify` of a whole store holding a false attestation; of one run | Refused, naming it; that run's chain only, as before (Amendment 056) |
+| 270 | A confirmed withdrawal while an earlier one is not stored; one that cannot list the artifacts; a dry run then; a reason or confirm with no record named | Refused, nothing written; refused; it lists; the job runs and says no record was named (Amendment 056) |
+| 271 | A pass with the HITL issue open; the same failures twice; a different failure; an issue opened with these failures | Closed, naming the commit; one comment, the check still fails; commented; not commented again (Amendment 056) |

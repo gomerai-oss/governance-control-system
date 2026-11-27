@@ -187,6 +187,25 @@ class FakeGH:
         return {"number": 77}
 
 
+class IssueGH(FakeGH):
+    """One open HITL issue, its comments, and the PATCH that closes it."""
+
+    def __init__(self, open_issue):
+        super().__init__(open_issue)
+        self.issue_comments, self.patched = [], []
+
+    def paginate(self, path, limit=50):
+        if path.endswith("/comments"):
+            return list(self.issue_comments)
+        return [self.open_issue]
+
+    def request(self, method, path, body=None):
+        if method == "PATCH":
+            self.patched.append((path, body))
+            return {}
+        return super().request(method, path, body)
+
+
 class ReportTests(unittest.TestCase):
     OK = {"ok": True, "runs": 2, "records": 5, "commits": 2, "unsealed": [], "withdrawn": {}, "failures": []}
     BAD = {**OK, "ok": False, "failures": ["run r: the chain is broken at record r/2: r/1 was changed or removed",
@@ -215,6 +234,33 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(checker.report(self.BAD, gh, "b" * 40, "example-org/evidence-store"), "commented on #12")
         self.assertEqual(gh.created, [])
         self.assertEqual(gh.comments[0][0], 12)
+
+    def test_vector_271_a_pass_closes_the_open_issue(self):
+        gh = IssueGH({"number": 12, "title": checker.ISSUE_TITLE, "body": "x"})
+        self.assertEqual(checker.report(self.OK, gh, "c" * 40, "example-org/evidence-store", "https://run"),
+                         "verified; closed #12")
+        self.assertEqual(gh.comments, [(12, "The store verified cleanly at commit `cccccccccccc` (run: https://run). "
+                                            "Closing.")])
+        self.assertEqual(gh.patched, [("/issues/12", {"state": "closed", "state_reason": "completed"})])
+
+    def test_vector_271_the_same_failures_are_reported_once(self):
+        gh = IssueGH({"number": 12, "title": checker.ISSUE_TITLE, "body": "x"})
+        self.assertEqual(checker.report(self.BAD, gh, "b" * 40, "example-org/evidence-store"), "commented on #12")
+        gh.issue_comments = [{"body": gh.comments[-1][1]}]
+        self.assertEqual(checker.report(self.BAD, gh, "c" * 40, "example-org/evidence-store"),
+                         "#12 already reports these failures")
+        self.assertEqual(len(gh.comments), 1)
+        self.assertEqual(gh.checks[-1][3], "failure", "the check still fails every run")
+        other = {**self.BAD, "failures": ["run s: not sealed"]}
+        self.assertEqual(checker.report(other, gh, "d" * 40, "example-org/evidence-store"), "commented on #12",
+                         "a new cause is reported")
+
+    def test_vector_271_an_issue_opened_with_these_failures_is_not_commented_again(self):
+        gh = FakeGH()
+        checker.report(self.BAD, gh, "a" * 40, "example-org/evidence-store")
+        gh2 = IssueGH({"number": 77, "title": checker.ISSUE_TITLE, "body": gh.created[0]["body"]})
+        self.assertEqual(checker.report(self.BAD, gh2, "b" * 40, "example-org/evidence-store"),
+                         "#77 already reports these failures")
 
     def test_the_cli_check_never_fails_and_the_report_fails_on_a_refusal(self):
         from unittest import mock

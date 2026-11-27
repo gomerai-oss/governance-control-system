@@ -1,7 +1,7 @@
 """``python3 -m evidence``:
 
 - ``verify --store DIR [--run RUN] [--keys key.json] [--sealed] [--files DIR] [--git DIR] [--store-history]``
-  (§3m item 5);
+  (§3m item 5); without ``--run``, every landing attestation too (Amendment 056);
 - ``seal --chains DIR --store-repo OWNER/NAME --out FILE``: the seal job (item 2), with ``EVIDENCE_SEAL_KEY`` and
   ``STORE_TOKEN``;
 - ``sweep --repo OWNER/NAME --store-repo OWNER/NAME``: the ended runs the seal job was never started for, one
@@ -97,9 +97,13 @@ def main(argv=None) -> int:
     report = verify.verify_store(Path(args.store), keys, args.run, args.sealed,
                                  Path(args.files) if args.files else None, Path(args.git) if args.git else None)
     problems = []
+    if not args.run:  # the whole store: every landing attestation too (§3m items 2 and 5; Amendment 056)
+        from evidence import pack as pack_mod
+        problems += pack_mod.store_problems(Path(args.store), keys, Path(args.git) if args.git else None,
+                                            _targets(None))
     if args.store_history:  # checked whether or not the chains verify: only it sees a run deleted whole (AST-6.2)
         from evidence import store as store_mod
-        problems = store_mod.history_problems(Path(args.store))
+        problems += store_mod.history_problems(Path(args.store))
     if not report.ok or problems:
         for line in ([report.failure] if not report.ok else []) + problems:
             print(f"REFUSED: {line}")
@@ -114,6 +118,17 @@ def main(argv=None) -> int:
     for target, by in sorted(report.withdrawn.items()):
         print(f"withdrawn: {target} (by {by})")
     return 0
+
+
+def _targets(config) -> list:
+    """The branches a landing merges into: the default branch and ``landing_branches`` (MISSION-ROUTER-001)."""
+    if config is None:
+        from mission_router.router import load_config
+        try:
+            config = load_config()
+        except (OSError, ValueError, KeyError):
+            return ["main"]
+    return [config.get("default_branch") or "main", *(config.get("landing_branches") or [])]
 
 
 def _other(args) -> int:
@@ -139,7 +154,7 @@ def _other(args) -> int:
                 worm_error = str(exc)
             result = checker.check(Path(args.store), seal_mod.load_keys(), Path(args.git) if args.git else None,
                                    producer.Recorder.from_env(os.environ), bucket,
-                                   declared["retention_years"] if declared else 0, worm_error)
+                                   declared["retention_years"] if declared else 0, worm_error, _targets(config))
             sealer.write_json(args.out, result)
             print("verified" if result["ok"] else f"REFUSED: {result['failures'][0]}")
             return 0  # the report job turns a refusal into a failed check and an issue
@@ -154,8 +169,15 @@ def _other(args) -> int:
         if args.command == "withdraw":
             from evidence import producer, withdraw
             from mission_router.router import load_config
+            pending = None
+            if os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY"):
+                import datetime
+                from mission_router.github import GitHub
+                request = GitHub(os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPOSITORY"]).request
+                pending = lambda: withdraw.unstored(request, Path(args.store), os.environ.get("GITHUB_RUN_ID", ""),  # noqa: E731
+                                                    datetime.datetime.now(datetime.timezone.utc))
             result = withdraw.run(Path(args.store), args.records.split(), args.reason, os.environ, load_config(),
-                                  producer.Recorder.from_env(os.environ), args.confirm)
+                                  producer.Recorder.from_env(os.environ), args.confirm, pending)
             for line in withdraw.lines(result, args.confirm):
                 print(line)
             return 0
