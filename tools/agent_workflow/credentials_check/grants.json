@@ -49,7 +49,7 @@
       "top level": {},
       "jobs": {
         "verify": {"contents": "read", "id-token": "write"},
-        "withdraw": {"contents": "read"},
+        "withdraw": {"contents": "read", "actions": "read"},
         "report": {"contents": "read", "checks": "write", "issues": "write"}
       },
       "app_tokens": {

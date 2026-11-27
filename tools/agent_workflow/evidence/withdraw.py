@@ -16,7 +16,9 @@ What is checked before anything is written:
 - **The digest** of each withdrawn record is computed from the store, never typed in: a withdrawal naming a wrong
   digest could never be taken back, and every later verification would refuse the store.
 
-Without ``--confirm`` nothing is written: the records that would be withdrawn are listed.
+Without ``--confirm`` nothing is written: the records that would be withdrawn are listed. A confirmed withdrawal is
+refused while an earlier one is not in the store yet (``unstored``, Amendment 056): it could not see those records'
+withdrawals, and would write them again.
 """
 
 from __future__ import annotations
@@ -116,10 +118,30 @@ def select(names: List[str], store: Path, records: Mapping[str, dict], chains: M
             [rid for rid in wanted if rid in withdrawn])
 
 
+def unstored(request, store: Path, current_run: str, now) -> List[str]:
+    """The runs whose withdrawal chain (artifact ``evidence-withdraw``) was kept within the seal sweep's lookback and
+    is not in the store yet (Amendment 056). Until Evidence Seal stores it, its withdrawals are not in the store, so
+    a second withdrawal could not see them and would write them again. ``request`` reads this repository's
+    artifacts (``actions: read``)."""
+    import datetime
+    from evidence import sweep
+    since = (now - datetime.timedelta(days=sweep.LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = set()
+    runs = Path(store) / verify.RUNS
+    for a in (request("GET", "/actions/artifacts?name=evidence-withdraw&per_page=100") or {}).get("artifacts") or []:
+        run = (a.get("workflow_run") or {}).get("id")
+        if not run or a.get("expired") or str(a.get("created_at", "")) < since or str(run) == str(current_run):
+            continue
+        if not any(runs.glob(f"gh-{int(run)}-*-withdraw/seal.json")):
+            out.add(str(run))
+    return sorted(out)
+
+
 def run(store: Path, names: List[str], reason: str, environ: Mapping[str, str], config: Mapping,
-        recorder=None, confirm: bool = False) -> dict:
+        recorder=None, confirm: bool = False, pending=None) -> dict:
     """``{"actor", "withdrawn": [{id, digest}], "skipped": [id], "written": bool}``. Raises ``EvidenceError`` on a
-    refusal, with nothing written."""
+    refusal, with nothing written. ``pending()`` names the earlier withdrawal runs not yet in the store
+    (``unstored``); a confirmed withdrawal is refused while there is one, or when it cannot be asked."""
     reason = " ".join((reason or "").split())
     if not reason:
         raise EvidenceError("a withdrawal names its reason")
@@ -132,6 +154,13 @@ def run(store: Path, names: List[str], reason: str, environ: Mapping[str, str], 
            "skipped": skipped, "written": False}
     if not confirm or not targets:
         return out
+    if pending is None:
+        raise EvidenceError("cannot check for an earlier withdrawal not yet stored; nothing was withdrawn")
+    waiting = pending()
+    if waiting:
+        raise EvidenceError(f"the withdrawal of run {', '.join(waiting)} is not in the store yet, so this one cannot see "
+                            "it: Evidence Seal stores it within about 10 minutes. Start this again after that; "
+                            "nothing was withdrawn")
     if recorder is None or not recorder.enabled:
         raise EvidenceError("this job keeps no evidence chain (EVIDENCE_DIR and EVIDENCE_RUN); nothing was withdrawn")
     ref = f"workflow_dispatch run {environ.get('GITHUB_RUN_ID', '?')} of {WORKFLOW} by {login}"

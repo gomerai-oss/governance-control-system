@@ -50,7 +50,7 @@ def pae(payload_type: str, payload: bytes) -> bytes:
 
 
 def _attempts(records: Iterable[Mapping]) -> List[tuple]:
-    """``[(landing record, refused)]`` for each ``router.landing`` record ``done`` that names its mission and commit.
+    """``[(landing record, the record of GitHub's refusal or None)]`` for each ``router.landing`` record ``done`` that names its mission and commit.
     The router records a write before it makes it (MISSION-ROUTER-001 Amendment 018), so ``done`` says only that the
     router asked GitHub to merge. A merge GitHub refused is recorded again, ``failed``, later in the same chain, for
     the same PR and commit: that attempt is ``refused`` (Amendment 055)."""
@@ -60,9 +60,9 @@ def _attempts(records: Iterable[Mapping]) -> List[tuple]:
         if not (r["action"] == "router.landing" and r["result"] == "done" and r["subject"]["mission"]
                 and r["subject"]["commit"]):
             continue
-        refused = any(x["action"] == "router.landing" and x["result"] == "failed"
-                      and x["subject"]["pr"] == r["subject"]["pr"] and x["subject"]["commit"] == r["subject"]["commit"]
-                      for x in records[i + 1:])
+        refused = next((x for x in records[i + 1:] if x["action"] == "router.landing" and x["result"] == "failed"
+                        and x["subject"]["pr"] == r["subject"]["pr"]
+                        and x["subject"]["commit"] == r["subject"]["commit"]), None)
         out.append((r, refused))
     return out
 
@@ -185,18 +185,79 @@ def problems(data: bytes, keys: Mapping[str, str], index: Mapping[str, str], nam
     return out
 
 
-def store_problems(store: Path, keys: Mapping[str, str]) -> List[str]:
-    """Every attestation in a clone of the store, against every record the store holds (the checker)."""
+def store_problems(store: Path, keys: Mapping[str, str], git: Optional[Path] = None,
+                   landing_branches: Iterable[str] = ("main",)) -> List[str]:
+    """Every attestation in a clone of the store, against every record the store holds and GitHub's own record
+    (the checker; Amendment 056). Besides its signature, form, citations and subject (``problems``), an attestation
+    that is not withdrawn (§3m item 4) must attest a landing:
+    - **not one GitHub refused:** its landing record is not followed in its chain by a ``failed`` one for the same PR
+      and commit (``refused_landings``);
+    - **merged:** with ``git`` (a clone of this repository, with its landing branches), its commit is in the history
+      of one of ``landing_branches``. The router merges with a merge commit, so a landed PR's head stays in it.
+    A withdrawal counts only when it names the landing record by its stored digest."""
     from evidence import chain as chain_mod
     base = Path(store)
     index: Dict[str, str] = {}
+    refused: Dict[str, str] = {}  # landing record id -> the record of GitHub's refusal
+    withdrawals: List[Mapping] = []
     for path in sorted((base / "runs").glob(f"*/{chain_mod.RECORDS}")):
         try:
-            for rec in chain_mod.read(path):
-                index[rec["id"]] = rec_mod.digest(rec)
+            records = chain_mod.read(path)
         except EvidenceError:
             continue  # the chain checks name a broken run
+        for rec in records:
+            index[rec["id"]] = rec_mod.digest(rec)
+            if rec.get("class") == "withdraw" and isinstance(rec.get("withdraws"), dict):
+                withdrawals.append(rec["withdraws"])
+        for landing, refusal in _attempts(records):
+            if refusal is not None:
+                refused[landing["id"]] = refusal["id"]
+    withdrawn = {w.get("id") for w in withdrawals if index.get(str(w.get("id"))) == w.get("digest")}
+    branches = list(dict.fromkeys(landing_branches))
     out: List[str] = []
     for path in sorted((base / PACKS).glob(f"*{SUFFIX}")) if (base / PACKS).is_dir() else []:
-        out += problems(path.read_bytes(), keys, index, path.relative_to(base).as_posix())
+        name = path.relative_to(base).as_posix()
+        data = path.read_bytes()
+        found = problems(data, keys, index, name)
+        out += found
+        landing, commit = landing_of(data), _subject_of(data)
+        if found or landing in withdrawn:
+            continue
+        if landing in refused:
+            out.append(f"{name}: attests {landing}, a landing GitHub refused ({refused[landing]} records the "
+                       "refusal); withdraw it (section 3m item 4)")
+        elif git is not None and commit:
+            held = _landed(Path(git), commit, branches)
+            if held is None:
+                out.append(f"{name}: cannot check its landing: no landing branch ({', '.join(branches)}) is in "
+                           "the clone")
+            elif not held:
+                out.append(f"{name}: attests {commit[:12]}, which no landing branch ({', '.join(branches)}) "
+                           "holds: GitHub never merged it; withdraw it (section 3m item 4)")
     return out
+
+
+def _subject_of(data: bytes) -> Optional[str]:
+    try:
+        st = json.loads(base64.b64decode(json.loads(data)["payload"], validate=True))
+        commit = st["subject"][0]["digest"]["gitCommit"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        return None
+    return commit if is_hex(commit, 40) else None
+
+
+def _landed(git: Path, commit: str, branches: List[str]) -> Optional[bool]:
+    """Whether ``commit`` is in the history of one of ``branches`` in the clone ``git``: True, False, or None when
+    none of the branches is in the clone. A branch is looked for as fetched (``origin/<b>``) and as a local branch."""
+    import subprocess
+    seen = False
+    for branch in branches:
+        for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
+            if subprocess.run(["git", "-C", str(git), "rev-parse", "--verify", "--quiet", ref],
+                              capture_output=True).returncode != 0:
+                continue
+            seen = True
+            if subprocess.run(["git", "-C", str(git), "merge-base", "--is-ancestor", commit, ref],
+                              capture_output=True).returncode == 0:
+                return True
+    return False if seen else None
