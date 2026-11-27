@@ -491,8 +491,8 @@ class SweepTests(Base):
             if path.startswith("/actions/artifacts?"):
                 page = int(path.rsplit("page=", 1)[1])
                 rows = self.artifacts[(page - 1) * 100:page * 100]
-                return {"artifacts": [{"name": n, "expired": False, "created_at": t, "workflow_run": {"id": r}}
-                                      for r, n, t in rows]}
+                return {"artifacts": [{"name": row[1], "expired": len(row) > 3 and row[3], "created_at": row[2],
+                                       "workflow_run": {"id": row[0]}} for row in rows]}
             return self.runs[int(path.split("/")[3])]
 
     class Trees:
@@ -593,6 +593,93 @@ class SweepTests(Base):
         sweep.unsealed_runs(actions, self.Trees({"gh-51-1-router": True}), self.NOW)
         self.assertFalse(any(p.startswith(("/pulls", "/commits/")) for p in actions.paths), actions.paths)
 
+    def test_vector_272_only_chain_artifacts_count(self):
+        """Policy CI's evidence-graph is not an evidence chain: before Amendment 057 each sweep read every such run of
+        the last two days, only to find it was not a sealed workflow's."""
+        from evidence import sweep
+        actions = self.Actions([self.run_(41, "policy-ci.yml"), self.run_(42, "mission-router.yml")],
+                               [(41, "evidence-graph", self.T), (42, "evidence-router", self.T)])
+        self.assertEqual(sweep.unsealed_runs(actions, self.Trees({}), self.NOW), [{"id": 42, "attempt": 1}])
+        self.assertNotIn("/actions/runs/41", actions.paths, "its run is never read")
+
+    def test_vector_272_every_chain_upload_is_a_chain_artifact_kept_less_than_the_deep_lookback(self):
+        import re
+        from evidence import sweep
+        def workflow(name):
+            live = ROOT / ".github" / "workflows" / name
+            return (live if live.is_file() else ROOT / "packaging" / "workflows" / name).read_text(encoding="utf-8")
+        found = 0
+        for file_ in sweep.WORKFLOWS.values():
+            text = workflow(file_)
+            for m in re.finditer(r"\n\s+name: (evidence-[^\n]*)\n(?:\s+\S.*\n)*?\s+retention-days: (\d+)", text):
+                found += 1
+                name = re.sub(r"\$\{\{[^}]*\}\}", "x", m.group(1))
+                with self.subTest(file_, name=name):
+                    self.assertRegex(name, sweep.CHAIN_ARTIFACT)
+                    self.assertLessEqual(int(m.group(2)), sweep.ARTIFACT_RETENTION_DAYS)
+        self.assertGreaterEqual(found, 11, "every evidence upload of the sealed workflows")
+        self.assertIsNone(sweep.CHAIN_ARTIFACT.fullmatch("evidence-graph"))
+        self.assertGreater(sweep.DEEP_LOOKBACK_DAYS, sweep.ARTIFACT_RETENTION_DAYS)
+
+    def test_vector_273_the_deep_sweep_seals_what_an_outage_left_past_the_lookback(self):
+        from evidence import sweep
+        month = "2026-10-11T04:00:00Z"  # 30 days back: past the 2-day lookback, inside the deep one
+        actions = self.Actions([self.run_(51, "credentials-check.yml"), self.run_(52, "mission-router.yml")],
+                               [(52, "evidence-router", self.T), (51, "evidence-credentials", month)])
+        self.assertEqual(sweep.unsealed_runs(actions, self.Trees({}), self.NOW), [{"id": 52, "attempt": 1}])
+        self.assertEqual(sweep.unsealed_runs(actions, self.Trees({}), self.NOW, deep=True),
+                         [{"id": 51, "attempt": 1}, {"id": 52, "attempt": 1}], "oldest first")
+
+    def test_vector_273_a_chain_that_expired_unsealed_is_named_lost(self):
+        from evidence import sweep
+        gone = "2026-08-11T04:00:00Z"  # 91 days back: GitHub has let it expire
+        actions = self.Actions(
+            [self.run_(61, "mission-router.yml"), self.run_(62, "mission-router.yml"), self.run_(63, "policy-ci.yml")],
+            [(61, "evidence-router", gone, True), (62, "evidence-router", gone, True), (63, "evidence-verify", gone, True)])
+        lost = []
+        self.assertEqual(sweep.unsealed_runs(actions, self.Trees({"gh-62-1-router": True}), self.NOW, True, lost), [])
+        self.assertEqual(lost, [{"id": 61, "attempt": 1}], "62 was sealed in time; 63 is not a sealed workflow")
+        quiet = []
+        sweep.unsealed_runs(actions, self.Trees({}), self.NOW, False, quiet)
+        self.assertEqual(quiet, [], "the routine sweep does not look that far back")
+
+    def test_vector_273_a_sweep_names_at_most_max_runs_oldest_first(self):
+        from evidence import sweep
+        n = sweep.MAX_RUNS + 5
+        actions = self.Actions([self.run_(100 + i, "mission-router.yml") for i in range(n)],
+                               [(100 + i, "evidence-router", self.T) for i in reversed(range(n))])
+        found = sweep.unsealed_runs(actions, self.Trees({}), self.NOW)
+        self.assertEqual([r["id"] for r in found], [100 + i for i in range(sweep.MAX_RUNS)])
+
+    def test_vector_274_the_workflow_runs_the_deep_sweep_daily_and_fails_on_lost_evidence(self):
+        live = ROOT / ".github" / "workflows" / "evidence-seal.yml"
+        text = (live if live.is_file() else ROOT / "packaging" / "workflows" / "evidence-seal.yml").read_text()
+        self.assertIn('- cron: "23 4 * * *"', text)
+        step = text[text.index("- name: Find the ended runs"):text.index("- name: Fetch those runs")]
+        self.assertIn("DEEP: ${{ github.event.schedule == '23 4 * * *' }}", step)
+        self.assertIn('if [ "$DEEP" = "true" ]; then args+=(--deep --lost "$RUNNER_TEMP/lost.txt"); fi', step)
+        fetch = text[text.index("- name: Fetch those runs"):text.index("- name: Copy the runs")]
+        self.assertIn('[ -z "$run$attempt" ] && continue', fetch, "a blank line is skipped")
+        self.assertIn("if ! gh run download", fetch, "one failed download leaves the others to be sealed")
+        self.assertIn('rm -rf "$RUNNER_TEMP/chains/$run-$attempt"', fetch, "and seals nothing half-downloaded")
+        lost = text[text.index("- name: Name evidence that expired"):text.index("\n  mark:\n")]
+        self.assertIn("if: always() && github.event.schedule == '23 4 * * *'", lost)
+        self.assertIn("exit 1", lost)
+
+    def test_vector_274_the_cli_writes_the_lost_runs(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from evidence import __main__ as cli, sweep
+        out = self.tmp / "lost.txt"
+        with mock.patch.object(sweep, "unsealed_runs", side_effect=lambda *a: (a[4].append({"id": 7, "attempt": 2}),
+                                                                             [{"id": 8, "attempt": 1}])[1]), \
+                mock.patch.dict("os.environ", {"GITHUB_TOKEN": "x", "STORE_TOKEN": "y"}):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(cli.main(["sweep", "--repo", "o/r", "--store-repo", "o/s", "--deep", "--lost", str(out)]), 0)
+        self.assertEqual((buf.getvalue(), out.read_text()), ("8 1\n", "7 2\n"))
+
     def test_a_truncated_store_listing_sweeps_nothing(self):
         from evidence import sweep
         with self.assertRaisesRegex(EvidenceError, "too large"):
@@ -658,7 +745,7 @@ class SweepTests(Base):
             return (live if live.is_file() else ROOT / "packaging" / "workflows" / name).read_text(encoding="utf-8")
         text = workflow("evidence-seal.yml")
         self.assertIn("schedule:", text)
-        self.assertIn("evidence sweep --repo", text)
+        self.assertIn("python3 -B -m evidence sweep", text)
         self.assertIn("--resume", text[text.index("python3 -B -m evidence seal"):])
         for name, file_ in sweep.WORKFLOWS.items():
             wf = workflow(file_)
