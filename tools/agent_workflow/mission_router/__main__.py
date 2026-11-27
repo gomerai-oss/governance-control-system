@@ -13,6 +13,7 @@ import sys
 
 from router_spec002.policy import load_tables, normalize_path
 
+from . import clock
 from .gate import classify_or_raise
 from .github import GitHub, GitHubError
 from .router import MissionRouter, load_config
@@ -31,6 +32,14 @@ def main(argv=None) -> int:
         print(f"sweep stopped: the missions could not be listed: {exc}")
         return 1
     print(f"swept {len(states)} mission(s)")
+    if args.dry_run:
+        return 0
+    try:  # the mission clock (Amendment 028): on while machines work on a mission, off when idle
+        for line in clock.tick(router, states):
+            print(f"clock: {line}")
+    except clock.ClockError as exc:
+        print(f"clock: {exc}")
+        return 1
     return 0
 
 

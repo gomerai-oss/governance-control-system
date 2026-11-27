@@ -43,7 +43,7 @@ MATRIX = "tool_selection/matrix.json"
 SEATS = "tool_selection/seats.json"
 REGISTRY = "tool_selection/runtime_registry.json"
 WORKFLOWS = ("mission-agent.yml", "mission-router.yml", "credentials-check.yml", "evidence-seal.yml",
-             "evidence-verify.yml")
+             "evidence-verify.yml", "mission-clock.yml")
 APP_TOKEN_ACTION = "actions/create-github-app-token@"
 GRANTS_TABLE = "credentials_check/grants.json"  # under the tooling tree (AUTHORITY with the rest of credentials_check/)
 GRANTS_SCHEMA = "workflow-grants-v1"

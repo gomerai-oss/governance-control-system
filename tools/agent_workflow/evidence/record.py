@@ -41,6 +41,7 @@ ACTIONS: Mapping[str, str] = {
     "router.dispatch": "send",
     "router.issue": "write",
     "router.label": "write",
+    "router.clock": "write",  # MISSION-ROUTER-001 Amendment 028: the mission clock switched on or off
     # the dispatcher
     "dispatch.prepare": "write",
     "dispatch.run": "write",

@@ -226,6 +226,36 @@ governance switches on the landing path check and the security-scan hold, which 
   (MISSION-DISPATCH-001 Amendment 041).
 
 Vector 145.
+**Amendment 028 (2026-11-27, HITL direction: "start router F2, dispatcher F17 and evidence F14"; HITL chose the
+mission clock):** the router's 5-minute sweep runs only while machines work on a mission.
+- **What was found:** the router audit's F2, with the dispatcher audit's F17 and the evidence audit's F14 (E-3, E-6).
+  A scheduled run bills at least a minute whether or not it finds anything. In the 24 hours to 2026-11-27 04:30 UTC
+  governance ran 151 router, 133 Mission Agent and 122 seal-sweep runs on their schedules, and Core 136, 137 and 112,
+  at 1 to 1.25 billed minutes each: about 860 minutes a day. Core had no mission open; governance's 11 unfinished
+  missions are plan branches with no PR (`AWAIT_A1`, no tracking issue).
+- **The clock:** the router's 5-minute schedule is its own workflow, Mission Clock (`mission-clock.yml`): the same job
+  as the router's sweep, step for step, with the same token and permissions, in the same concurrency group. After
+  every sweep, whatever started it, the router (`mission_router/clock.py`):
+  - **switches the clock on** when machines work on a mission: one waits on A2 or A3 (an agent run, its checks, its
+    scan or its evidence seal), or a plan, stage or landing PR is open (AR's rounds, a plan PR's checks, a landing
+    PR's checks);
+  - **keeps it on for 30 minutes** after the last mission or stack PR closed, so the seal sweep seals the last runs;
+  - **switches it off** otherwise. A mission waiting on HITL (an approval, `/mission retry`, `/mission resume`) is
+    idle: HITL's comment starts the router by its own event. So is a plan branch with no PR.
+
+  Each switch is a write recorded first (`router.clock`, a new action of class `write`). A clock that must be on and
+  cannot be switched on (or whose state cannot be read) fails the router's run, so it is seen. One that cannot be
+  switched off is only cost: the next sweep tries again. A repository without `mission-clock.yml` has no clock.
+- **The heartbeat:** the router's own schedule runs every 30 minutes instead of 5. A plan PR goes into the mission's
+  integration branch, which sends the router no event (its `pull_request_target` is limited to PRs into `main`), so
+  a new mission is picked up within 30 minutes even with the clock off. HITL's `/mission approve` starts it at once.
+- **The fallbacks:** while the clock is on, the router starts the Mission Agent workflow and the seal sweep
+  (MISSION-DISPATCH-001 Amendment 058), each at most every 10 minutes and never while a run of it is still going.
+- **`actions: write`** is now also used to switch the clock and to start the seal sweep; the grant is unchanged.
+- **What it costs and saves:** with no mission working, one router run every 30 minutes and the daily deep sweep,
+  about 50 runs a day per repository instead of about 400. While the clock is on, the runs are those of before.
+
+Vectors 146, 147 and 148.
 **Amendment 009 (2026-10-25, HITL direction, HITL-approved pipeline patch):** the capacity queue is removed
 (Amendment 007 is superseded in full). No timer is consulted: jobs start in approval order, and a run whose
 runtime is out of compute is an ordinary failure, counting toward the 3 failures that block a stage for HITL
@@ -311,7 +341,8 @@ the Mission Agent restarted a failed run twice. Vectors 40–43 cover it.
 **Starting the agent.** When that comment is first posted for an `AWAIT_A2` or `AWAIT_A3` stage whose role names a
 `runtime`, the router starts the Mission Agent workflow (`mission-agent.yml`) on `main`. That workflow starts the
 assigned runtime and opens the stage PR as the assigned agent's App (MISSION-DISPATCH-001). The request is a nudge
-only: the workflow derives everything itself and also runs on a schedule, so a failed request is logged, not fatal.
+only: the workflow derives everything itself, and while the mission clock is on the router starts it every 10 minutes
+as the fallback (Amendment 028), so a failed request is logged, not fatal.
 
 ## 2. Stacks: PARALLEL and CHAINED
 
@@ -946,3 +977,6 @@ The router enforces everything it can see. These settings live in GitHub and onl
 | 143 | HITL approves the plan before AR runs; AR passes it unchanged; AR challenges, A1 changes the plan, AR passes it; AR challenges and nobody answers; A1 defends; an approval of a commit outside the plan's history | The mission starts with no second approval; it starts, and the router lists the changed plan files once; it waits until HITL approves the challenged head itself; it starts, nothing listed; it does not start (Amendment 025) |
 | 144 | A read answered by a dropped connection, a timeout or a 5xx; the same three times; a write that fails; a 403, 404, 422 or 429; the label listing or a "Not a mission" check fails; the open-PR listing fails | Sent again and answered; a `GitHubError` after 3 tries; one try, a `GitHubError`; one try, a `GitHubError`; logged, and every mission is still swept; the sweep decides nothing and the command exits 1 (Amendment 026) |
 | 145 | Governance's config; a plan path under `change-specs/` outside the live areas, in a live area, elsewhere, `UPGRADES/`; a policy naming no live area | The path check and `security_scan: enforce` are named; refused, allowed, allowed, allowed; every `change-specs/` path refused (Amendment 027) |
+| 146 | A mission waiting on A2 or A3; an open plan, stage or landing PR; a plan branch with no PR, a mission waiting on HITL; a mission PR closed 29 and 31 minutes ago | The clock is switched on, recorded first, and the fallbacks start; on; off, nothing started; on and cooling, off (Amendment 028) |
+| 147 | A fallback started 9 minutes ago, another still going; GitHub refusing to switch the clock on, to read its state, to switch it off, to start a fallback; no clock workflow; a dry run | Neither started; the run fails each time; the next sweep tries again; the next sweep tries again; no clock; nothing switched (Amendment 028) |
+| 148 | `mission-clock.yml`, `mission-router.yml`, `mission-agent.yml` and `evidence-seal.yml` | The clock is the router's sweep step for step in the same concurrency group, every 5 minutes; the router's schedule is every 30; the agent has none; the seal workflow only the daily deep sweep, and the sweep with `sweep=true`; the clock is sealed and checked like the router (Amendment 028) |

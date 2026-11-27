@@ -33,6 +33,7 @@ from evidence import store as store_mod
 WORKFLOWS = {
     "Mission Agent": "mission-agent.yml",
     "Mission Router": "mission-router.yml",
+    "Mission Clock": "mission-clock.yml",  # the router's sweep while a mission is open (router Amendment 028)
     "Credentials Check": "credentials-check.yml",
     "Evidence Verify": "evidence-verify.yml",
 }

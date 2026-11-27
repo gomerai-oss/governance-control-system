@@ -713,6 +713,23 @@ no evidence that still exists, and evidence that is lost is named.
 
 Vectors 272 to 274.
 
+**Amendment 058 (2026-11-27, HITL direction: "start router F2, dispatcher F17 and evidence F14"; HITL chose the
+mission clock):** the Mission Agent workflow and the seal sweep run while the mission clock is on, not on their own
+schedules.
+- **What was found:** the dispatcher audit's F17 and the evidence audit's F14 (E-3, E-6), with the router audit's F2.
+  Mission Agent's 10-minute schedule (its plan job, about 80% of the workflow's billed minutes) and the seal workflow's
+  10-minute sweep ran whether or not a mission was open: 133 and 122 runs a day in governance, 137 and 112 in Core.
+- **Mission Agent:** its schedule is removed. The router starts it at every handoff, as before, and while the mission
+  clock is on (MISSION-ROUTER-001 Amendment 028) every 10 minutes as the fallback, never while a run started by the
+  router or a schedule is still going. A run started by a comment (`/mission perform`) does not count.
+- **The seal sweep:** its 10-minute schedule is removed. The router starts it the same way, with the new input
+  `sweep=true`. Started by hand without it, the workflow still runs the WORM backfill and nothing else. The daily deep
+  sweep (Amendment 057) keeps its schedule: it seals what runs kept while no mission was open, which no merge waits on.
+- **Mission Clock is a sealed workflow:** its runs keep the router's evidence chain, so the sweep seals them
+  (`sweep.WORKFLOWS`), and it is held to the same grants, pins and substrate checks as the router.
+
+Vector 275.
+
 Vector 194.
 
 ## 1. Purpose
@@ -738,7 +755,7 @@ machines HITL has declared meet the same properties (§3h item 6, Amendment 015)
 and no HITL login are involved. The workflow runs:
 
 - when the router starts it at a handoff;
-- every 10 minutes on a schedule, as a fallback;
+- every 10 minutes as a fallback while the mission clock is on (Amendment 058; until then on its own schedule);
 - when HITL comments `/mission retry`.
 
 Every run re-derives the missions itself. A trigger is only a nudge, and no event payload is read.
@@ -1873,8 +1890,9 @@ on" below).
      (limit 32).
 
    **Clarified in part 4 (the seal job, the evidence key, the evidence store and item 6):**
-   - **The seal workflow.** `evidence-seal.yml` runs every 10 minutes and seals the Mission Agent, Mission Router,
-     Credentials Check and Evidence Verify runs that have ended since (Amendment 047; until then it also ran when
+   - **The seal workflow.** `evidence-seal.yml` seals the Mission Agent, Mission Router, Mission Clock, Credentials
+     Check and Evidence Verify runs that have ended since. It runs every 10 minutes while the mission clock is on, the
+     router starting it, and daily for the deep sweep (Amendments 047, 057 and 058; until Amendment 047 it also ran when
      each such run ended). Its `seal` job runs in the `evidence-seal` environment, deployable from the default branch only, with
      three credentials: the evidence key (`EVIDENCE_SEAL_KEY`), the evidence App's key (`EVIDENCE_APP_PRIVATE_KEY`)
      and the App's id. Its own token can only read this repository's runs and artifacts.
@@ -3249,3 +3267,4 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 272 | The sweep with Policy CI's `evidence-graph` and a router chain; every evidence upload of the sealed workflows | Only the router's run is named, and the other run is never read; each name is a chain artifact, kept no longer than the deep lookback (Amendment 057) |
 | 273 | A chain 30 days old and unsealed; a chain that expired unsealed, one sealed in time, one of another workflow; more than 50 runs | Named by the deep sweep only, oldest first; only the first named lost; the 50 oldest (Amendment 057) |
 | 274 | The seal workflow; the CLI with `--deep --lost` | The deep sweep daily, a blank line skipped, one failed download leaving the others, lost evidence failing the job; the lost runs written to the file (Amendment 057) |
+| 275 | The Mission Agent and seal workflows; the router with the clock on | No 10-minute schedule; the seal sweep by `sweep=true`, the backfill by hand without it; the router starts each at most every 10 minutes, never while one is going (Amendment 058) |

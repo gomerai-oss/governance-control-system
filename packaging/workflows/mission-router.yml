@@ -12,11 +12,15 @@ name: Mission Router
 #   pull_request_target is limited to PRs into main (its workflow file comes
 #   from main); PRs into mission integration branches are picked up by the
 #   schedule, which also runs from main. No PR code is ever checked out.
+# - The schedule is a 30-minute heartbeat. While machines are working on a
+#   mission the router switches on Mission Clock (mission-clock.yml), the same
+#   sweep every 5 minutes, and off when idle (Amendment 028); that, and starting
+#   the Mission Agent and Evidence Seal workflows as the clock's fallbacks, are
+#   its other uses of actions: write.
 # - Every trigger runs the same idempotent sweep; event payloads are not read,
 #   so no PR-controlled text reaches a shell.
 # - On a handoff to A2 or A3 whose plan names a runtime it starts the Mission
-#   Agent workflow (mission-agent.yml) on the default branch; that is its only
-#   use of actions: write.
+#   Agent workflow (mission-agent.yml) on the default branch.
 # - /mission comments on PRs and on tracking issues (approve, cancel) trigger a
 #   sweep; the sweep reads the comments back from the API, not the payload.
 
@@ -27,7 +31,7 @@ on:
   issue_comment:
     types: [created]
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/30 * * * *"  # the heartbeat: a plan PR into a mission branch sends no event (Amendment 028)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -56,7 +60,7 @@ jobs:
       pull-requests: write
       issues: write
       checks: write
-      actions: write  # start mission-agent.yml on a handoff; nothing else
+      actions: write  # start mission-agent.yml and evidence-seal.yml; switch mission-clock.yml on and off
     steps:
       - name: Check out the default branch only
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
