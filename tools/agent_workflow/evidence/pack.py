@@ -49,9 +49,45 @@ def pae(payload_type: str, payload: bytes) -> bytes:
     return b"DSSEv1 %d %s %d %s" % (len(t), t, len(payload), payload)
 
 
+def _attempts(records: Iterable[Mapping]) -> List[tuple]:
+    """``[(landing record, refused)]`` for each ``router.landing`` record ``done`` that names its mission and commit.
+    The router records a write before it makes it (MISSION-ROUTER-001 Amendment 018), so ``done`` says only that the
+    router asked GitHub to merge. A merge GitHub refused is recorded again, ``failed``, later in the same chain, for
+    the same PR and commit: that attempt is ``refused`` (Amendment 055)."""
+    records = list(records)
+    out = []
+    for i, r in enumerate(records):
+        if not (r["action"] == "router.landing" and r["result"] == "done" and r["subject"]["mission"]
+                and r["subject"]["commit"]):
+            continue
+        refused = any(x["action"] == "router.landing" and x["result"] == "failed"
+                      and x["subject"]["pr"] == r["subject"]["pr"] and x["subject"]["commit"] == r["subject"]["commit"]
+                      for x in records[i + 1:])
+        out.append((r, refused))
+    return out
+
+
 def landings(records: Iterable[Mapping]) -> List[Mapping]:
-    return [r for r in records if r["action"] == "router.landing" and r["result"] == "done"
-            and r["subject"]["mission"] and r["subject"]["commit"]]
+    """The landing attempts of one chain that GitHub did not refuse. The seal job attests one only once GitHub shows
+    its PR merged at that commit (``sealer.github_merged``): a router stopped between its record and GitHub's answer
+    leaves no ``failed`` record (Amendment 055)."""
+    return [r for r, refused in _attempts(records) if not refused]
+
+
+def refused_landings(records: Iterable[Mapping]) -> List[Mapping]:
+    """The landing attempts of one chain that GitHub refused: never a landing (Amendment 055)."""
+    return [r for r, refused in _attempts(records) if refused]
+
+
+def landing_of(data: bytes) -> Optional[str]:
+    """The landing record id an attestation's statement names, or None when it cannot be read. The signature is not
+    checked here: the checker does that (``problems``)."""
+    try:
+        st = json.loads(base64.b64decode(json.loads(data)["payload"], validate=True))
+        landing = st["predicate"]["buildDefinition"]["internalParameters"]["landing"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return landing if isinstance(landing, str) else None
 
 
 def name_for(landing: Mapping) -> str:

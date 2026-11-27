@@ -41,7 +41,7 @@ jobs:
     permissions:
       contents: read  # check out this repository's tooling
       actions: read
-      pull-requests: read  # the sweep: open stage PRs a sealed run published and no seal job marked (Amendment 049)
+      pull-requests: read  # the sweep: open stage PRs a sealed run published and no seal job marked (Amendment 049); a landing's PR merged (055)
       checks: read  # the sweep: whether those PRs' heads have evidence-sealed (Amendment 049)
       id-token: write  # the WORM copy (§3m item 3): GitHub's OIDC token, exchanged for a short-lived cloud token
     outputs:
@@ -109,6 +109,7 @@ jobs:
           EVIDENCE_SEAL_KEY: ${{ secrets.EVIDENCE_SEAL_KEY }}
           STORE_TOKEN: ${{ steps.token.outputs.token }}
           STORE: ${{ steps.store.outputs.full }}
+          GITHUB_TOKEN: ${{ github.token }}  # read only: a landing is attested once GitHub shows its PR merged (Amendment 055)
         run: |
           mkdir -p "$RUNNER_TEMP/chains" "$RUNNER_TEMP/sealed"
           python3 -B -m evidence seal --chains "$RUNNER_TEMP/chains" --store-repo "$STORE" --out "$RUNNER_TEMP/sealed/sealed.json" --resume

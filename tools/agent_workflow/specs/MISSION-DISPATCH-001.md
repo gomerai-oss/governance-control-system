@@ -585,6 +585,59 @@ job while the app gateway is off, and a seat that cannot publish starts no work.
 
 Vectors 259, 260 and 261.
 
+**Amendment 055 (2026-11-26, HITL direction: "start evidence F3 and F5"):** a landing is attested only when it was
+one, and HITL can withdraw a record.
+- **What was found:** the evidence audit (M-AUDIT-EVIDENCE-001, findings F3 and F5, evidence E-4 and E-5), and
+  more on reading both stores.
+  - F3: the router records a write before it makes it (MISSION-ROUTER-001 Amendment 018), so a `router.landing`
+    record `done` says only that the router asked GitHub to merge. A merge GitHub refused is recorded again, `failed`,
+    later in the same chain. `pack.landings` took every `done` record and never looked for the `failed` one, so each
+    refused attempt, retried every sweep, got a signed attestation that the mission landed. Core's store holds 55,
+    all for Core #300, which GitHub never merged. Governance's holds 135 more: 79 for #1389 (never merged), 55 for
+    #1390 and one for #1399, failed attempts at PRs a later sweep merged. #1390's real landing has no attestation at
+    all: its run was sealed first, and an attestation refused after the seal (Amendment 049) was never made again.
+  - F5: `evidence.withdraw` existed as a record class, but nothing could write one, so none of the false
+    attestations could be withdrawn.
+- **Only a landing is attested:**
+  - **A refused attempt is never one:** `pack.landings` leaves out a `done` landing followed in its chain by a
+    `failed` one for the same PR and commit (`pack.refused_landings` names those).
+  - **GitHub must show it merged:** the seal job attests a landing only when GitHub shows its PR merged at that
+    commit (`sealer.github_merged`, with the seal job's own token, `pull-requests: read` as Amendment 049 granted; the
+    seal step now gets it). A router stopped between its record and GitHub's answer leaves no `failed` record. A PR
+    GitHub does not have is not merged; any other refusal holds the landing's run.
+  - **Each landing that is not one** is listed in the seal result (`not_landed`) and the seal step's log. Its run is
+    still sealed.
+  - **Fail closed:** a merge whose answer was lost in transit, though GitHub made it, is recorded `failed` and not
+    attested. A missing attestation is the safe side of a false one.
+- **The attestation is made before its run's seal:** every chain's records are stored first, then for each run its
+  landings are confirmed, attested (store, then bucket) and only then is the run sealed. An attestation the store or
+  the bucket refuses, or a PR GitHub would not show, refuses the run, which stays unsealed, so the next sweep names
+  it again and attests it then. One the store already holds from an attempt whose seal was refused is kept as stored
+  and copied to the bucket: a stored file is never replaced.
+- **HITL withdraws a record (§3m item 4):**
+  - **How:** HITL starts Evidence Verify by hand with `withdraw` (record ids, space separated, or `refused-landings`),
+    `reason`, and `confirm`. Its `withdraw` job runs only then, in the `evidence-verify` environment with the
+    evidence reader App (contents read on the store only) and `contents: read` here: it cannot change the store. It
+    writes one `evidence.withdraw` record per record in its own chain (`gh-<run>-<attempt>-withdraw`, artifact
+    `evidence-withdraw`), which Evidence Seal seals and stores like the checker's. From then the verifier lists each
+    record as withdrawn. Without `confirm`, nothing is written: the records are listed in the job's log and summary.
+  - **Who:** the run was started by hand, by a login in `hitl_logins` whose account id is the one in
+    `hitl_account_ids`, and not re-run by anyone else (`GITHUB_ACTOR` is `GITHUB_TRIGGERING_ACTOR`). The record's actor
+    is that login and account id, and its authority is `hitl_command`, naming the run.
+  - **What:** each record named must be in the store and not itself a withdrawal, or nothing is written. One already
+    withdrawn is skipped. The digest is computed from the store, never typed: a withdrawal naming a wrong digest
+    could never be taken back, and every later verification would refuse the store.
+  - **`refused-landings`** names each landing record whose stored attestation is false (a landing GitHub refused,
+    as above). On 2026-11-26 it names exactly the 55 in Core's store and the 135 in governance's. Withdrawing the
+    landing record withdraws its attestation, which stays in the store.
+- **What it does not do:**
+  - **The checker** still passes a store holding a false attestation that is not withdrawn (the audit's F11, F17 and
+    F20): the next change makes it refuse one.
+  - **#1390's real landing** stays without an attestation.
+- **What it costs:** one read of a PR per landing; nothing on a sweep with no landing.
+
+Vectors 262 to 266.
+
 Vector 194.
 
 ## 1. Purpose
@@ -1625,7 +1678,8 @@ on" below).
 4. **A record is withdrawn, never deleted.** A wrong record, or one that must no longer be relied on, is withdrawn by a
    later record of class `withdraw`. That record names the record withdrawn, the reason, and who withdrew it, by HITL
    direction only. The withdrawn record stays in the chain and the store. A rebuild after a withdrawal (for example of
-   a bad memory promotion, later) is new records that cite the withdrawal.
+   a bad memory promotion, later) is new records that cite the withdrawal. HITL makes one by starting Evidence Verify by hand with
+   the records to withdraw (its `withdraw` job, Amendment 055).
 5. **A verifier replays the chain** (`python3 -m evidence verify`). For a run, a mission or a date range, it checks:
    - every record's schema;
    - every chain link;
@@ -3107,3 +3161,8 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 259 | The app gateway off; on | The plan job outputs `off` and the agent job's run and collect steps get no `APP_KEY_1`; they get it (Amendment 054) |
 | 260 | A lane's due step with the publisher's record; without it | Not due, no not-started record, GitHub not read; as before (Amendment 054) |
 | 261 | The workflow's publisher job; the report with the publisher's record | Per lane, in the seat's environment, `contents: read`, checks out only the tooling and runs the substrate check, mints the token with publish's permissions; the checks and agent jobs read its record per lane; the report quotes it as a refusal in publish (Amendment 054) |
+| 262 | A landing GitHub refused; a refused attempt and the retry that landed; a landing GitHub does not show merged | None attested, GitHub not asked, the run sealed and the landing listed as not one; only the retry is attested; not attested, the run sealed (Amendment 055) |
+| 263 | GitHub unreadable at the seal; an attestation the bucket refused; a repository and no GitHub; the PR read; the seal step | The run unsealed, the next sweep attests it; the run unsealed, the next sweep keeps the stored attestation and copies it; nothing sealed; merged at the head only, 404 not merged, other refusals raise; it gets the read token (Amendment 055) |
+| 264 | HITL withdraws `refused-landings`, without and with confirm; a record by id; again | Only the false attestation's landing named, nothing written; one withdrawal per record, by HITL's account, sealed, the verifier marks the record and nothing is deleted; the digest from the store; already withdrawn, nothing written (Amendment 055) |
+| 265 | A withdrawal on a push, by a login that is not HITL's, by another account of that name, re-run by another, with no account id or none pinned; one unknown record; a withdrawal of a withdrawal; no reason; no chain; the CLI on a schedule | Each refused and nothing written; exit 1 (Amendment 055) |
+| 266 | Evidence Verify's withdraw job | Only by hand with records named, in `evidence-verify` with the reader App and `contents: read`, the substrate check, inputs only through the environment, its own chain sealed by Evidence Seal (Amendment 055) |
