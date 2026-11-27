@@ -13,7 +13,9 @@ name: Evidence Seal
 # store.
 #
 # The sweep (Amendments 022 and 047) is the only way in: the workflow no longer starts on workflow_run after every run
-# of those workflows. Most such runs kept no evidence, and GitHub sends no workflow_run for the Mission Agent runs the
+# of those workflows. Once a day the deep sweep looks back as far as the chains are kept (90 days), so an outage
+# longer than the sweep's 2 days loses nothing that still exists, and it fails, naming the run, when a chain expired
+# before it was sealed (Amendment 057). Most such runs kept no evidence, and GitHub sends no workflow_run for the Mission Agent runs the
 # router starts with its GITHUB_TOKEN anyway. The sweep lists this repository's evidence-* artifacts from the last 2
 # days, downloads those of each ended run that the store holds fewer seals for, and seals them. The mark job runs only
 # when a sealed run published a PR.
@@ -21,6 +23,7 @@ name: Evidence Seal
 on:
   schedule:
     - cron: "*/10 * * * *"  # the sweep (Amendments 022 and 047)
+    - cron: "23 4 * * *"  # the deep sweep: as far back as chains are kept, and lost evidence named (Amendment 057)
   workflow_dispatch:  # by hand: copy the runs already in the store to the WORM bucket (backfill), nothing else
 
 permissions: {}
@@ -81,18 +84,27 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           STORE_TOKEN: ${{ steps.token.outputs.token }}
           STORE: ${{ steps.store.outputs.full }}
-        run: python3 -B -m evidence sweep --repo "$GITHUB_REPOSITORY" --store-repo "$STORE" > "$RUNNER_TEMP/sweep.txt"
+          DEEP: ${{ github.event.schedule == '23 4 * * *' }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --store-repo "$STORE")
+          if [ "$DEEP" = "true" ]; then args+=(--deep --lost "$RUNNER_TEMP/lost.txt"); fi
+          python3 -B -m evidence sweep "${args[@]}" > "$RUNNER_TEMP/sweep.txt"
 
       - name: Fetch those runs' evidence chains (the sweep)
         if: steps.store.outputs.full != '' && github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
+        # A run whose download fails is left for the next sweep, and the others are still sealed (Amendment 057).
         run: |
           mkdir -p "$RUNNER_TEMP/chains"
           while read -r run attempt; do
-            case "$run$attempt" in *[!0-9]*|"") echo "::error::bad sweep line: $run $attempt"; exit 1 ;; esac
+            [ -z "$run$attempt" ] && continue
+            case "$run$attempt" in *[!0-9]*) echo "::error::bad sweep line: $run $attempt"; exit 1 ;; esac
             echo "sweep: run $run attempt $attempt"
-            gh run download "$run" -R "$GITHUB_REPOSITORY" -p 'evidence-*' -D "$RUNNER_TEMP/chains/$run-$attempt"
+            if ! gh run download "$run" -R "$GITHUB_REPOSITORY" -p 'evidence-*' -D "$RUNNER_TEMP/chains/$run-$attempt"; then
+              echo "::warning::run $run: its evidence could not be downloaded; the next sweep tries again"
+              rm -rf "$RUNNER_TEMP/chains/$run-$attempt"
+            fi
           done < "$RUNNER_TEMP/sweep.txt"
 
       - name: Copy the runs already in the store to the WORM bucket (by hand only)
@@ -132,6 +144,17 @@ jobs:
           path: ${{ runner.temp }}/sealed/sealed.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Name evidence that expired before it was sealed (the deep sweep, Amendment 057)
+        if: always() && github.event.schedule == '23 4 * * *' && steps.store.outputs.full != ''
+        run: |
+          if [ -s "$RUNNER_TEMP/lost.txt" ]; then
+            while read -r run attempt; do
+              echo "::error::run $run (attempt $attempt): its evidence chain expired before it was sealed; it is lost"
+            done < "$RUNNER_TEMP/lost.txt"
+            exit 1
+          fi
+          echo "no evidence chain expired unsealed"
 
   mark:
     name: mark

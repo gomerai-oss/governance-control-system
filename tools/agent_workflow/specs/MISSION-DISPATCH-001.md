@@ -678,6 +678,41 @@ attestation that is not withdrawn, closes its issue after a pass, and says a cau
 
 Vectors 267 to 271.
 
+**Amendment 057 (2026-11-27, HITL direction: "start evidence F9"):** an outage longer than the sweep's lookback loses
+no evidence that still exists, and evidence that is lost is named.
+- **What was found:** the evidence audit (M-AUDIT-EVIDENCE-001, finding F9, evidence E-2 and E-4), and a count
+  against GitHub's own artifact listing on 2026-11-27.
+  - **The lookback:** the sweep (Amendments 022 and 047) looks back 2 days. A run whose chains were not sealed within
+    them was never looked at again. 31 runs had been missed that way: 11 in governance (2026-11-07 to 11-09, 11-12,
+    11-16) and 20 in Core (2026-11-07 to 11-11, the switch-on and evidence App outages). Each keeps one chain of one
+    record; all 31 verify, and every commit they name is in its repository. Their artifacts are kept until about
+    2027-02-05, so they can still be sealed.
+  - **The cost:** Policy CI uploads `evidence-graph`, which is not an evidence chain. The sweep counted it, and read
+    each such run of the last 2 days only to find it was not a sealed workflow's: 47 of the governance sweep's 52
+    calls, 144 times a day.
+  - **The 2026-11-10 failure** ("bad sweep line", "cannot iterate over: null") is in no log GitHub still keeps; that
+    day's only failed scheduled seal run failed in the seal step (the WORM token exchange, 504). The sweep line and
+    the download loop are made robust anyway.
+- **The deep sweep:** once a day (04:23 UTC) the sweep looks back `DEEP_LOOKBACK_DAYS` (97): a week past the 90 days
+  GitHub keeps an evidence chain artifact (each upload's `retention-days`). Every run whose chains still exist and are
+  not all sealed is named, and sealed as by any sweep (`seal --resume`).
+- **Lost evidence is named:** a chain artifact of a sealed workflow that expired before the store held its seal is
+  lost. The deep sweep names each such run (`--lost`), and a final step of the seal job fails, naming it. On
+  2026-11-27 there is none.
+- **Only evidence chains count:** an artifact counts when its name is one a sealed workflow uploads
+  (`sweep.CHAIN_ARTIFACT`). Another workflow's `evidence-*` artifact is not counted and its run is never read: the
+  governance sweep makes 5 calls instead of 52. A test holds every evidence upload of the sealed workflows to the
+  pattern, and to a retention within the deep lookback.
+- **A backlog is sealed in turn:** a sweep names at most 50 runs (`MAX_RUNS`), oldest first; the rest wait for the
+  next sweep.
+- **Downloads:** a run whose evidence cannot be downloaded is left for the next sweep (warned, its partial download
+  removed), and the other runs are still sealed. Before, one failed download ended the step and nothing was sealed.
+  A blank sweep line is skipped; a line that is not two numbers still stops the step.
+- **What it costs:** one sweep a day reads up to 97 days of the artifact listing (27 calls in governance and 26 in Core
+  on 2026-11-27, with the backlog). The routine sweep costs fewer calls than before.
+
+Vectors 272 to 274.
+
 Vector 194.
 
 ## 1. Purpose
@@ -3211,3 +3246,6 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 269 | `evidence verify` of a whole store holding a false attestation; of one run | Refused, naming it; that run's chain only, as before (Amendment 056) |
 | 270 | A confirmed withdrawal while an earlier one is not stored; one that cannot list the artifacts; a dry run then; a reason or confirm with no record named | Refused, nothing written; refused; it lists; the job runs and says no record was named (Amendment 056) |
 | 271 | A pass with the HITL issue open; the same failures twice; a different failure; an issue opened with these failures | Closed, naming the commit; one comment, the check still fails; commented; not commented again (Amendment 056) |
+| 272 | The sweep with Policy CI's `evidence-graph` and a router chain; every evidence upload of the sealed workflows | Only the router's run is named, and the other run is never read; each name is a chain artifact, kept no longer than the deep lookback (Amendment 057) |
+| 273 | A chain 30 days old and unsealed; a chain that expired unsealed, one sealed in time, one of another workflow; more than 50 runs | Named by the deep sweep only, oldest first; only the first named lost; the 50 oldest (Amendment 057) |
+| 274 | The seal workflow; the CLI with `--deep --lost` | The deep sweep daily, a blank line skipped, one failed download leaving the others, lost evidence failing the job; the lost runs written to the file (Amendment 057) |

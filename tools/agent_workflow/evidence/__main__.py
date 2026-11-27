@@ -4,9 +4,10 @@
   (§3m item 5); without ``--run``, every landing attestation too (Amendment 056);
 - ``seal --chains DIR --store-repo OWNER/NAME --out FILE``: the seal job (item 2), with ``EVIDENCE_SEAL_KEY`` and
   ``STORE_TOKEN``;
-- ``sweep --repo OWNER/NAME --store-repo OWNER/NAME``: the ended runs the seal job was never started for, one
-  ``<run id> <attempt>`` per line (Amendment 022), with ``GITHUB_TOKEN`` and ``STORE_TOKEN``; ``seal --resume`` then
-  seals them without sealing a chain twice;
+- ``sweep --repo OWNER/NAME --store-repo OWNER/NAME [--deep [--lost FILE]]``: the ended runs the seal job was never
+  started for, one ``<run id> <attempt>`` per line (Amendment 022), with ``GITHUB_TOKEN`` and ``STORE_TOKEN``;
+  ``seal --resume`` then seals them without sealing a chain twice. ``--deep`` looks back as far as chains are kept,
+  and ``--lost`` names each run whose chain expired unsealed (Amendment 057);
 - ``backfill --store-repo OWNER/NAME``: copy the runs already in the store to the declared WORM bucket, with
   ``STORE_TOKEN``;
 - ``mark --repo OWNER/NAME --result FILE --store-repo OWNER/NAME``: the ``evidence-sealed`` checks, with
@@ -59,6 +60,8 @@ def main(argv=None) -> int:
     w = sub.add_parser("sweep", help="name the ended runs the seal job was never started for (Amendment 022)")
     w.add_argument("--repo", required=True)
     w.add_argument("--store-repo", required=True)
+    w.add_argument("--deep", action="store_true", help="the daily deep sweep: as far back as chains are kept (057)")
+    w.add_argument("--lost", help="with --deep: write each run whose chain expired unsealed to this file")
     b = sub.add_parser("backfill", help="copy the runs already in the store to the declared WORM bucket")
     b.add_argument("--store-repo", required=True)
     m = sub.add_parser("mark", help="set evidence-sealed on the PRs a sealed run published")
@@ -216,11 +219,15 @@ def _other(args) -> int:
         if args.command == "sweep":
             import datetime
             from evidence import sweep
+            lost = []
             found = sweep.unsealed_runs(GitHub(os.environ["GITHUB_TOKEN"], args.repo).request,
                                         GitHub(os.environ["STORE_TOKEN"], args.store_repo).request,
-                                        datetime.datetime.now(datetime.timezone.utc))
+                                        datetime.datetime.now(datetime.timezone.utc), args.deep,
+                                        lost if args.deep else None)
             for run in found:
                 print(f"{run['id']} {run['attempt']}")  # one ended run per line, for the download step
+            if args.lost:
+                Path(args.lost).write_text("".join(f"{r['id']} {r['attempt']}\n" for r in lost), encoding="utf-8")
             return 0
         if args.command == "backfill":
             from evidence import worm as worm_mod

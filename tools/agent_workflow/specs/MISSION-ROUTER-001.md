@@ -175,6 +175,18 @@ approve once.
 - **What does not carry:** an approval onto a head whose latest AR round is a `CHALLENGE` (approving over AR stays a
   deliberate approval of that exact head); onto a loop HITL ended; from a commit outside the head's history; or
   without an AR seat. The approval request and the "not counted yet" comment now say that one approval is enough.
+- **Live (recorded 2026-11-27, HITL direction: "record it in the router spec"):** one approval has carried live twice.
+  The router audit (M-AUDIT-ROUTER-001, finding F6) called this never run: its evidence predates both runs. The
+  router's sealed records (governance's evidence store) and each PR's comments show the following.
+  - **#1363, M-AUDIT-ROUTER-001's plan:** HITL approved `3f35e828` once (2026-11-23 23:23Z). Four more AR rounds and
+    three A1 responses then moved the head ten commits, to AR round 5's `NO_CHALLENGE` at `306def67`. The router
+    recorded "HITL command: /mission approve 3f35e828... (carried to 306def67ac49, Amendment 025)" in
+    `gh-45327476474-1-router`, merged the plan and opened the mission's tracking issue (2026-11-24 04:43Z).
+  - **#1370, M-AUDIT-EVIDENCE-001's plan:** HITL approved the first plan commit `58896f18` once (2026-11-24 03:44Z).
+    Three AR rounds and two A1 responses ended in `NO_CHALLENGE` at `68745112`. It was carried in
+    `gh-45403866659-1-router`, and the mission started (13:40Z).
+
+  In each, the PR holds one `/mission approve` and no other HITL command, from HITL's login and account id.
 
 Vector 143.
 **Amendment 026 (2026-11-26, HITL direction: "start with router F1 and F14"):** one failed GitHub call never ends a

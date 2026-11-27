@@ -6,8 +6,11 @@ evidence, and each still cost two jobs. GitHub sends no ``workflow_run`` for a r
 ``GITHUB_TOKEN`` anyway, which is how the router starts every Mission Agent run it dispatches (Amendment 022), so the
 schedule was already the only path for those.
 
-Each sweep lists this repository's unexpired ``evidence-*`` artifacts from the last ``LOOKBACK_DAYS`` days, in one
-paged call, and counts them per run. A run with more evidence artifacts than chains sealed in the store is read once:
+Each sweep lists this repository's unexpired chain artifacts (``CHAIN_ARTIFACT``) from the last ``LOOKBACK_DAYS``
+days, in one paged call, and counts them per run. Once a day the deep sweep looks back ``DEEP_LOOKBACK_DAYS``
+instead, past the time GitHub keeps a chain artifact, so an outage longer than ``LOOKBACK_DAYS`` loses nothing that
+still exists, and an artifact that expired unsealed is named as lost (Amendment 057). A sweep names at most
+``MAX_RUNS`` runs, oldest first; the rest wait for the next one. A run with more evidence artifacts than chains sealed in the store is read once:
 it is named when it has ended and is a run of a sealed workflow. So is a run whose publish chain names an open stage
 PR with no ``evidence-sealed`` on its head, even when every chain is sealed: a sweep that sealed it and then stopped, or
 whose mark job failed, never marked that PR (Amendment 049). The seal job then downloads those runs' ``evidence-*``
@@ -34,7 +37,18 @@ WORKFLOWS = {
     "Evidence Verify": "evidence-verify.yml",
 }
 LOOKBACK_DAYS = 2
+# The daily deep sweep (Amendment 057) looks back a week further than GitHub keeps a chain artifact (each evidence
+# upload's retention-days, 90): a run an outage left unsealed for longer than LOOKBACK_DAYS is still sealed while its
+# chains exist, and one whose chain artifact expired unsealed is still seen, and named as lost.
+ARTIFACT_RETENTION_DAYS = 90
+DEEP_LOOKBACK_DAYS = ARTIFACT_RETENTION_DAYS + 7
+# At most this many runs per sweep, oldest first: a backlog is sealed over several sweeps, inside the job's time limit.
+MAX_RUNS = 50
 EVIDENCE_PREFIX = "evidence-"
+# The evidence chain artifacts the sealed workflows upload (Amendment 057). Another workflow's artifact that happens to
+# start with "evidence-" (Policy CI's evidence-graph) is not a chain: it is not counted, and its run is never read.
+CHAIN_ARTIFACT = re.compile(r"evidence-(router|credentials|verify|withdraw|agent-.+|baseline-.+|checks-.+|perform-.+|"
+                            r"publish-.+|report-.+|secscan-.+)")
 
 
 def run_prefix(run_id: int, attempt: int) -> str:
@@ -64,26 +78,33 @@ def sealed_chains(store_request: Callable) -> Set[str]:
 _PUBLISH = re.compile(r"evidence-publish-(M-[A-Z0-9-]+)-(A2|A3|AR)-r([1-9][0-9]*)")
 
 
-def _evidence_counts(request: Callable, since: str) -> Tuple[Dict[int, int], Dict[str, Tuple[str, int]]]:
-    """``{run id: unexpired evidence-* artifacts}`` for the artifacts created since ``since``, and ``{stage branch:
-    (created at, run id)}``, the newest run whose publish chain names that stage. GitHub lists a repository's artifacts newest
-    first, though not strictly, so paging stops only after a whole page older than ``since``, or at the last page."""
+def _evidence_counts(request: Callable, since: str, expired: Dict[int, int] = None
+                     ) -> Tuple[Dict[int, int], Dict[str, Tuple[str, int]]]:
+    """``{run id: unexpired chain artifacts}`` for the artifacts created since ``since``, and ``{stage branch:
+    (created at, run id)}``, the newest run whose publish chain names that stage. ``expired``, when given, gains
+    ``{run id: expired chain artifacts}``. GitHub lists a repository's artifacts newest first, though not strictly, so
+    paging stops only after a whole page older than ``since``, or at the last page."""
     counts: Dict[int, int] = {}
     published: Dict[str, Tuple[str, int]] = {}
     page = 1
     while True:
-        batch = request("GET", f"/actions/artifacts?per_page=100&page={page}")
+        batch = request("GET", f"/actions/artifacts?per_page=100&page={page}") or {}
         artifacts = batch.get("artifacts") or []
         for a in artifacts:
             run = (a.get("workflow_run") or {}).get("id")
             name, created = str(a.get("name", "")), str(a.get("created_at", ""))
-            if name.startswith(EVIDENCE_PREFIX) and not a.get("expired") and run and created >= since:
-                counts[int(run)] = counts.get(int(run), 0) + 1
-                stage = _PUBLISH.fullmatch(name)
-                if stage:
-                    branch = f"mission/{stage.group(1)}/{stage.group(2).lower()}-r{stage.group(3)}"
-                    if branch not in published or published[branch] < (created, int(run)):
-                        published[branch] = (created, int(run))
+            if not (CHAIN_ARTIFACT.fullmatch(name) and run and created >= since):
+                continue
+            if a.get("expired"):
+                if expired is not None:
+                    expired[int(run)] = expired.get(int(run), 0) + 1
+                continue
+            counts[int(run)] = counts.get(int(run), 0) + 1
+            stage = _PUBLISH.fullmatch(name)
+            if stage:
+                branch = f"mission/{stage.group(1)}/{stage.group(2).lower()}-r{stage.group(3)}"
+                if branch not in published or published[branch] < (created, int(run)):
+                    published[branch] = (created, int(run))
         if len(artifacts) < 100 or all(str(a.get("created_at", "")) < since for a in artifacts):
             return counts, published
         page += 1
@@ -116,15 +137,20 @@ def _workflow_file(run: dict) -> str:
     return str(run.get("path") or "").split("@", 1)[0].rsplit("/", 1)[-1]
 
 
-def unsealed_runs(request: Callable, store_request: Callable, now: datetime.datetime) -> List[Dict[str, int]]:
-    """``[{"id", "attempt"}]``: each ended run of a sealed workflow, with an evidence artifact from the lookback, that
-    holds more evidence artifacts than the store holds seals for. ``request`` reads this repository (Actions read);
-    ``store_request`` the store."""
-    since = (now - datetime.timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+def unsealed_runs(request: Callable, store_request: Callable, now: datetime.datetime, deep: bool = False,
+                  lost: List[Dict[str, int]] = None) -> List[Dict[str, int]]:
+    """``[{"id", "attempt"}]``: each ended run of a sealed workflow, with a chain artifact from the lookback, that
+    holds more chain artifacts than the store holds seals for, oldest first and at most ``MAX_RUNS``. ``deep`` (the
+    daily deep sweep, Amendment 057) looks back ``DEEP_LOOKBACK_DAYS``, beyond the time GitHub keeps a chain artifact,
+    and adds to ``lost`` each run of a sealed workflow whose chain artifact expired before the store held its seal.
+    ``request`` reads this repository (Actions read); ``store_request`` the store."""
+    days = DEEP_LOOKBACK_DAYS if deep else LOOKBACK_DAYS
+    since = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     sealed = sealed_chains(store_request)
     files = set(WORKFLOWS.values())
     out = []
-    counts, published = _evidence_counts(request, since)
+    expired: Dict[int, int] = {}
+    counts, published = _evidence_counts(request, since, expired if deep else None)
     unmarked = set(_unmarked(request, published))
     for run_id, count in sorted(counts.items()):
         if count <= sum(1 for chain in sealed if chain.startswith(f"gh-{run_id}-")) and run_id not in unmarked:
@@ -136,4 +162,11 @@ def unsealed_runs(request: Callable, store_request: Callable, now: datetime.date
         prefix = run_prefix(run_id, attempt)
         if count > sum(1 for chain in sealed if chain.startswith(prefix)) or run_id in unmarked:
             out.append({"id": run_id, "attempt": attempt})  # an unmarked run is all sealed: --resume marks it
-    return out
+    if lost is not None:
+        for run_id, gone in sorted(expired.items()):
+            held = sum(1 for chain in sealed if chain.startswith(f"gh-{run_id}-"))
+            if held < gone + counts.get(run_id, 0):
+                run = request("GET", f"/actions/runs/{run_id}")
+                if _workflow_file(run) in files:
+                    lost.append({"id": run_id, "attempt": int(run.get("run_attempt") or 1)})
+    return out[:MAX_RUNS]
