@@ -1,10 +1,10 @@
 name: Evidence Seal
 
-# Ring 6 (MISSION-DISPATCH-001 §3m items 2, 3 and 6; Amendment 020, part 4): every 10 minutes, find the ended Mission
-# Agent, Mission Router, Credentials Check and Evidence Verify runs whose evidence is not all sealed, seal each job's
-# evidence chain from those runs with the evidence key, add the records and seals to the evidence store (config.json
-# "evidence_store"), and set the evidence-sealed check on each PR those runs published. Under "evidence": "enforce"
-# the router merges an A2 or A3 stage PR only once that check is set.
+# Ring 6 (MISSION-DISPATCH-001 §3m items 2, 3 and 6; Amendment 020, part 4): find the ended runs of
+# Mission Agent, Mission Router, Mission Clock, Credentials Check and Evidence Verify whose evidence is not all sealed,
+# seal each job's evidence chain from those runs with the evidence key, add the records and seals to the evidence
+# store (config.json "evidence_store"), and set the evidence-sealed check on each PR those runs published. Under
+# "evidence": "enforce" the router merges an A2 or A3 stage PR only once that check is set.
 #
 # Security model: the seal job holds the evidence key and the evidence App's key, in the evidence-seal environment
 # (deployable from the default branch only), and no other credential: its own token can only read this repository
@@ -12,19 +12,29 @@ name: Evidence Seal
 # secret; its token can read this repository, set check runs and read PRs. Nothing runs until config.json names the
 # store.
 #
-# The sweep (Amendments 022 and 047) is the only way in: the workflow no longer starts on workflow_run after every run
-# of those workflows. Once a day the deep sweep looks back as far as the chains are kept (90 days), so an outage
-# longer than the sweep's 2 days loses nothing that still exists, and it fails, naming the run, when a chain expired
-# before it was sealed (Amendment 057). Most such runs kept no evidence, and GitHub sends no workflow_run for the Mission Agent runs the
-# router starts with its GITHUB_TOKEN anyway. The sweep lists this repository's evidence-* artifacts from the last 2
+# The sweep (Amendments 022 and 047) is the only way in: the workflow does not start on workflow_run after every run
+# of those workflows (most kept no evidence, and GitHub sends no workflow_run for the Mission Agent runs the router
+# starts with its GITHUB_TOKEN anyway). The sweep lists this repository's evidence chain artifacts from the last 2
 # days, downloads those of each ended run that the store holds fewer seals for, and seals them. The mark job runs only
 # when a sealed run published a PR.
+# - When: the router starts it with sweep=true every 10 minutes while the mission clock is on, that is while machines
+#   work on a mission or one of its PRs closed in the last 30 minutes (Amendment 058). With no mission open nothing
+#   waits on a seal.
+# - Once a day the deep sweep looks back as far as the chains are kept (90 days): it seals what idle-time runs kept and
+#   what an outage longer than 2 days left, and fails, naming the run, when a chain expired before it was sealed
+#   (Amendment 057).
 
 on:
   schedule:
-    - cron: "*/10 * * * *"  # the sweep (Amendments 022 and 047)
     - cron: "23 4 * * *"  # the deep sweep: as far back as chains are kept, and lost evidence named (Amendment 057)
-  workflow_dispatch:  # by hand: copy the runs already in the store to the WORM bucket (backfill), nothing else
+  workflow_dispatch:
+    inputs:
+      sweep:
+        # The router starts the sweep with sweep=true every 10 minutes while the mission clock is on (Amendment 058).
+        # By hand, unticked: copy the runs already in the store to the WORM bucket (backfill), nothing else.
+        description: "Sweep and seal (the router's fallback); unticked: the WORM backfill"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -79,7 +89,7 @@ jobs:
           permission-contents: write
 
       - name: Find the ended runs whose evidence is not all sealed (the sweep, Amendments 022 and 047)
-        if: steps.store.outputs.full != '' && github.event_name == 'schedule'
+        if: steps.store.outputs.full != '' && (github.event_name == 'schedule' || inputs.sweep)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           STORE_TOKEN: ${{ steps.token.outputs.token }}
@@ -91,7 +101,7 @@ jobs:
           python3 -B -m evidence sweep "${args[@]}" > "$RUNNER_TEMP/sweep.txt"
 
       - name: Fetch those runs' evidence chains (the sweep)
-        if: steps.store.outputs.full != '' && github.event_name == 'schedule'
+        if: steps.store.outputs.full != '' && (github.event_name == 'schedule' || inputs.sweep)
         env:
           GH_TOKEN: ${{ github.token }}
         # A run whose download fails is left for the next sweep, and the others are still sealed (Amendment 057).
@@ -108,7 +118,7 @@ jobs:
           done < "$RUNNER_TEMP/sweep.txt"
 
       - name: Copy the runs already in the store to the WORM bucket (by hand only)
-        if: steps.store.outputs.full != '' && github.event_name == 'workflow_dispatch'
+        if: steps.store.outputs.full != '' && github.event_name == 'workflow_dispatch' && !inputs.sweep
         env:
           STORE_TOKEN: ${{ steps.token.outputs.token }}
           STORE: ${{ steps.store.outputs.full }}
@@ -116,7 +126,7 @@ jobs:
 
       - name: Seal each chain and add it to the store
         id: seal
-        if: steps.store.outputs.full != '' && github.event_name == 'schedule'
+        if: steps.store.outputs.full != '' && (github.event_name == 'schedule' || inputs.sweep)
         env:
           EVIDENCE_SEAL_KEY: ${{ secrets.EVIDENCE_SEAL_KEY }}
           STORE_TOKEN: ${{ steps.token.outputs.token }}
@@ -130,14 +140,14 @@ jobs:
       # handed over, so the other runs' PRs are marked. No result (the step stopped before writing one) marks nothing.
       - name: Count the PRs to mark
         id: count
-        if: always() && github.event_name == 'schedule' && steps.seal.outcome != 'skipped'
+        if: always() && (github.event_name == 'schedule' || inputs.sweep) && steps.seal.outcome != 'skipped'
         run: |
           if [ -f "$RUNNER_TEMP/sealed/sealed.json" ]; then
             python3 -B -m evidence count --result "$RUNNER_TEMP/sealed/sealed.json" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Hand the result to the mark job
-        if: always() && github.event_name == 'schedule' && steps.count.outputs.prs != '' && steps.count.outputs.prs != '0'
+        if: always() && (github.event_name == 'schedule' || inputs.sweep) && steps.count.outputs.prs != '' && steps.count.outputs.prs != '0'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sealed
@@ -160,7 +170,7 @@ jobs:
     name: mark
     needs: seal
     if: >-
-      always() && github.event_name == 'schedule' && needs.seal.outputs.store != '' &&
+      always() && (github.event_name == 'schedule' || inputs.sweep) && needs.seal.outputs.store != '' &&
       needs.seal.outputs.prs != '' && needs.seal.outputs.prs != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 5

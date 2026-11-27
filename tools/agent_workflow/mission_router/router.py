@@ -1614,8 +1614,9 @@ class MissionRouter:
     def _start_agent(self, state: MissionState, manifest: Optional[Manifest]) -> None:
         """Ask the Mission Agent workflow to start the role the mission now waits on.
 
-        A nudge only: the workflow re-derives everything itself and also runs on a
-        schedule, so a failed request just means the agent starts a few minutes later.
+        A nudge only: the workflow re-derives everything itself, and while the mission clock is on the router starts
+        it every 10 minutes as the fallback (Amendment 028), so a failed request just means the agent starts a few
+        minutes later.
         """
         role = _target(state)
         if role is None or manifest is None or not manifest.roles[role].runtime:
@@ -1625,7 +1626,7 @@ class MissionRouter:
                         lambda: self.gh.dispatch_workflow(AGENT_WORKFLOW, self.main), "router.dispatch",
                         mission=state.mission_id, round_n=state.round)
         except GitHubError as exc:
-            self.log(f"{state.mission_id}: could not start {AGENT_WORKFLOW}; its schedule will pick it up: {exc}")
+            self.log(f"{state.mission_id}: could not start {AGENT_WORKFLOW}; the clock's fallback will: {exc}")
 
     def _add_labels(self, number: int, labels: List[str]) -> None:
         self._write(f"label #{number} {labels}", lambda: self.gh.request("POST", f"/issues/{number}/labels", {"labels": labels}),
@@ -1946,7 +1947,7 @@ class MissionRouter:
                     self._write(f"start {AGENT_WORKFLOW} to land stack {status.stack_id}",
                                 lambda: self.gh.dispatch_workflow(AGENT_WORKFLOW, self.main), "router.dispatch")
                 except GitHubError as exc:
-                    self.log(f"stack {status.stack_id}: could not start {AGENT_WORKFLOW}; its schedule will pick it up: {exc}")
+                    self.log(f"stack {status.stack_id}: could not start {AGENT_WORKFLOW}; the clock's fallback will: {exc}")
 
     # -------------------------------------------------------- tracking issue
     def _sync_tracking_issue(self, state: MissionState, manifest: Optional[Manifest]) -> None:

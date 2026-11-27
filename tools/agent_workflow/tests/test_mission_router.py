@@ -1553,7 +1553,7 @@ class RouterLoopTests(unittest.TestCase):
         self.gh.comment_as(n, HITL, f"/mission approve {self.gh.branches[branch]}")
         self.sweep()
         self.assertIn("mission:stage-a2", [l["name"] for l in self.issue()["labels"]])
-        self.assertTrue(any("schedule will pick it up" in line for line in self.logs))
+        self.assertTrue(any("the clock's fallback will" in line for line in self.logs))
 
     def test_survey_reads_without_writing(self):
         self.start_mission()

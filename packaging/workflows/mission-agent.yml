@@ -1,9 +1,11 @@
 name: Mission Agent
 
 # Starts the agent a mission waits on (A2 build or A3 review) and opens its PR as
-# that agent's GitHub App. The mission router starts this workflow on every handoff;
-# the schedule is the fallback. Every run re-derives the missions itself, so a
-# trigger is only a nudge and nothing in an event payload is read.
+# that agent's GitHub App. The mission router starts this workflow on every handoff,
+# and every 10 minutes while the mission clock is on, as the fallback that replaced
+# this workflow's own schedule (MISSION-DISPATCH-001 Amendment 058). Every run
+# re-derives the missions itself, so a trigger is only a nudge and nothing in an
+# event payload is read.
 # Spec: tools/agent_workflow/specs/MISSION-DISPATCH-001.md
 #
 # Security model (no job holds both agent-written content and a credential that
@@ -51,8 +53,6 @@ on:
   workflow_dispatch:
   issue_comment:
     types: [created]
-  schedule:
-    - cron: "*/10 * * * *"
 
 permissions: {}
 

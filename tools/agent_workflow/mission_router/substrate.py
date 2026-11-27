@@ -31,7 +31,7 @@ MODES = ("observe", "enforce")
 HOSTED = "github-hosted"
 DECLARATION_NAME = "SUBSTRATE-DECLARATION.md"  # SPEC-002 AUTHORITY by basename (policy_tables.json)
 MAX_DECLARATION = 1 << 16
-WORKFLOWS = ("mission-agent.yml", "mission-router.yml")
+WORKFLOWS = ("mission-agent.yml", "mission-router.yml", "mission-clock.yml")
 # The headings a declaration must carry: one per machine property of §3h item 6, and who confirmed it, and when.
 SECTIONS = ("## Disposable", "## No ambient credentials", "## Not shared", "## Root for the job")
 CONFIRMED = ("Confirmed by:", "Confirmed on:")

@@ -195,9 +195,19 @@ class GitHub:
         return self.request("POST", "/pulls", {"head": head, "base": base, "title": title, "body": body,
                                                "maintainer_can_modify": False})
 
-    def dispatch_workflow(self, workflow: str, ref: str) -> None:
-        """Start ``workflow`` (a file name under .github/workflows) on ``ref``. No inputs are passed."""
-        self.request("POST", f"/actions/workflows/{q(workflow)}/dispatches", {"ref": ref})
+    def dispatch_workflow(self, workflow: str, ref: str, inputs: Optional[Dict[str, str]] = None) -> None:
+        """Start ``workflow`` (a file name under .github/workflows) on ``ref``, with ``inputs`` when given."""
+        body: Dict[str, Any] = {"ref": ref}
+        if inputs:
+            body["inputs"] = dict(inputs)
+        self.request("POST", f"/actions/workflows/{q(workflow)}/dispatches", body)
+
+    def workflow_state(self, workflow: str) -> str:
+        """``active``, ``disabled_manually`` or another of GitHub's workflow states."""
+        return str((self.request("GET", f"/actions/workflows/{q(workflow)}") or {}).get("state", ""))
+
+    def set_workflow_enabled(self, workflow: str, enabled: bool) -> None:
+        self.request("PUT", f"/actions/workflows/{q(workflow)}/{'enable' if enabled else 'disable'}")
 
     def comment(self, number: int, body: str) -> None:
         self.request("POST", f"/issues/{number}/comments", {"body": body})

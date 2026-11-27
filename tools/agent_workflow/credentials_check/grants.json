@@ -30,6 +30,13 @@
       },
       "app_tokens": {}
     },
+    "mission-clock.yml": {
+      "top level": {},
+      "jobs": {
+        "sweep": {"contents": "write", "pull-requests": "write", "issues": "write", "checks": "write", "actions": "write"}
+      },
+      "app_tokens": {}
+    },
     "credentials-check.yml": {
       "top level": {"contents": "read"},
       "jobs": {},

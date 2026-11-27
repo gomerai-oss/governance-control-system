@@ -1,0 +1,70 @@
+name: Mission Clock
+
+# The router's 5-minute sweep while machines are working on a mission (MISSION-ROUTER-001 Amendment 028). The router
+# switches this workflow on when a mission waits on A2 or A3, or a plan, stage or landing PR is open, and off 30
+# minutes after the last such PR closed: a scheduled run bills at least a minute whether or not it finds anything,
+# and with no mission open these schedules cost about 860 billed minutes a day across governance and Core.
+# While it is on, the router also starts the Mission Agent workflow and the seal sweep, each at most every 10 minutes
+# and never while a run of it is going (MISSION-DISPATCH-001 Amendment 058).
+# Spec: tools/agent_workflow/specs/MISSION-ROUTER-001.md
+#
+# Security model: the same job as Mission Router's sweep (mission-router.yml), step for step (a test holds them equal),
+# with the same token and permissions, in the same concurrency group, so a clock sweep and an event sweep never run
+# at once. It runs only the default branch's copy of this file and of the router code, and reads no event payload.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions: {}
+
+concurrency:
+  group: mission-router
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: mission-router
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: write  # start mission-agent.yml and evidence-seal.yml; switch mission-clock.yml on and off
+    steps:
+      - name: Check out the default branch only
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+          PYTHONPATH: tools/agent_workflow
+        run: python3 -B -m mission_router.substrate
+
+      - name: Start this sweep's evidence chain (MISSION-ROUTER-001 Amendment 018, ring 6)
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-router" >> "$GITHUB_ENV"
+
+      - name: Sweep missions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PYTHONPATH: tools/agent_workflow
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python3 -m mission_router --repo "$GITHUB_REPOSITORY" $DRY_RUN
+
+      - name: Keep this sweep's evidence chain (MISSION-DISPATCH-001 §3m; the store replaces this in part 4)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-router
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90
