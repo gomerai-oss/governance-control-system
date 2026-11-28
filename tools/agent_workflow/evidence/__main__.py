@@ -19,6 +19,11 @@
 - ``withdraw --store DIR --records "ID ..." --reason TEXT [--confirm]``: HITL's withdrawal of stored records (§3m item
   4; Amendment 055), in Evidence Verify's ``withdraw`` job; ``refused-landings`` names every landing whose stored
   attestation is false. Without ``--confirm`` it lists them and writes nothing;
+- ``summon --pr N --repo OWNER/NAME --store DIR --git DIR --out DIR``: EPAP, the evidence pack of one PR for an
+  outside auditor (Amendment 061), with ``GITHUB_TOKEN`` to read the PRs;
+- ``replay --pack DIR --work DIR [--keys key.json] [--checks none|last|all] [--sandbox auto|unshare|offline]
+  [--keep-home]``: EPAP, a pack rerun as an outside auditor would, with no network (Amendment 062); exit 0 when every
+  step reproduced, 1 at the first divergence;
 - ``store-name``: ``config.json``'s ``evidence_store``, for the seal workflow;
 - ``keygen --repo OWNER/NAME --env ENV``: a new evidence key, its seed set as the environment secret by ``gh``, its
   public half printed to pin in ``key.json``.
@@ -84,6 +89,24 @@ def main(argv=None) -> int:
     x.add_argument("--records", required=True, help="record ids, space separated, or refused-landings")
     x.add_argument("--reason", required=True)
     x.add_argument("--confirm", action="store_true", help="write the withdrawals (without it, list them only)")
+    sm = sub.add_parser("summon", help="EPAP: the evidence pack of one PR, for an outside auditor (Amendment 061)")
+    sm.add_argument("--pr", type=int, required=True)
+    sm.add_argument("--repo", required=True, help="OWNER/NAME of the PR's repository")
+    sm.add_argument("--store", required=True, help="a clone of the evidence store")
+    sm.add_argument("--git", required=True, help="a clone of the repository, with the PR heads fetched")
+    sm.add_argument("--out", required=True, help="a new directory for the pack")
+    sm.add_argument("--keys", default=str(seal_mod.KEYS_FILE))
+    sm.add_argument("--no-bundle", action="store_true", help="leave out the git bundle")
+    rp = sub.add_parser("replay", help="EPAP: rerun an evidence pack in a sandbox, as an outside auditor would (062)")
+    rp.add_argument("--pack", required=True, help="the evidence pack (a summoned epap-pack-pr-<N> directory)")
+    rp.add_argument("--work", required=True, help="a new directory to replay in; the report is written there")
+    rp.add_argument("--keys", help="your own pin of the evidence keys (default: the keys the repository pins)")
+    rp.add_argument("--checks", default="last", choices=("none", "last", "all"),
+                    help="rerun the checks of the last A3 review (default), of every review, or none")
+    rp.add_argument("--sandbox", default="auto", choices=("auto", "unshare", "offline"),
+                    help="unshare: a namespace with no network; offline: this machine has none (probed either way)")
+    rp.add_argument("--keep-home", action="store_true", help="leave your home visible to the checks")
+    rp.add_argument("--check-timeout", type=float, default=1800.0, help="seconds per check")
     sub.add_parser("store-name", help="print full=<owner/name> and name=<name> of config.json's evidence_store")
     k = sub.add_parser("keygen", help="make an evidence key; the seed goes to the environment secret only")
     k.add_argument("--repo", required=True)
@@ -184,6 +207,52 @@ def _other(args) -> int:
             for line in withdraw.lines(result, args.confirm):
                 print(line)
             return 0
+        if args.command == "summon":
+            from evidence import producer, summon
+            from mission_router.github import GitHub, GitHubError
+            gh = GitHub(os.environ["GITHUB_TOKEN"], args.repo)
+
+            def pulls(n):
+                try:
+                    return gh.request("GET", f"/pulls/{int(n)}")
+                except GitHubError as exc:
+                    if exc.status == 404:
+                        return None
+                    raise EvidenceError(f"GitHub would not show PR #{n} ({exc.status})") from None
+            actor = os.environ.get("GITHUB_ACTOR", "")
+            run = os.environ.get("RUN_URL", "")
+            keys_doc = json.loads(Path(args.keys).read_text(encoding="utf-8"))
+            manifest = summon.summon(Path(args.store), Path(args.git), args.repo, args.pr, pulls, Path(args.out),
+                                     seal_mod.load_keys(Path(args.keys)), keys_doc,
+                                     f"{actor} ({run})" if actor and run else actor, bundle=not args.no_bundle)
+            published = [s for s in manifest["stages"] if s.get("published")]
+            proven = [s for s in published if (s.get("change") or {}).get("proven") and s["head_bound"]]
+            line = (f"evidence pack of PR #{args.pr}: mission {manifest['mission'] or 'none'}, "
+                    f"{len(manifest['chains'])} chains, {len(published)} published stages, {len(proven)} bound and "
+                    f"proven")
+            recorder = producer.Recorder.from_env(os.environ)
+            try:
+                account = int(os.environ.get("GITHUB_ACTOR_ID", ""))
+            except ValueError:
+                account = None
+            recorder.record(actor=actor or "evidence-pack", account_id=account, action="evidence.summon",
+                            result="done", reason=line, mission=manifest["mission"], pr=args.pr,
+                            outputs={"manifest": producer.file_digest(Path(args.out) / "manifest.json")},
+                            authority_kind="spec_rule", authority_ref="MISSION-DISPATCH-001 Amendment 061")
+            print(line)
+            for s in manifest["stages"]:
+                print(f"- {s['role']} r{s['round']} PR #{s['pr']}: "
+                      + ("; ".join(s["problems"]) or "bound and proven" if s.get("published") else s.get("note", "")))
+            for limit in manifest["limits"]:
+                print(f"limit: {limit}")
+            return 0
+        if args.command == "replay":
+            from evidence import replay
+            report = replay.replay(Path(args.pack), Path(args.work), Path(args.keys) if args.keys else None,
+                                   args.checks, args.sandbox, args.keep_home, args.check_timeout)
+            print(replay.text(report))
+            print(f"report: {Path(args.work) / 'replay-report.json'}")
+            return 1 if report["result"] == "DIVERGED" else 0
         if args.command == "count":
             result = json.loads(Path(args.result).read_text(encoding="utf-8"))
             print(f"prs={len(sealer.to_mark(result))}")

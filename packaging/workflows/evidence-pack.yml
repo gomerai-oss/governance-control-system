@@ -1,0 +1,133 @@
+name: Evidence Pack
+
+# EPAP (MISSION-DISPATCH-001 Amendment 061): summon the evidence pack of one PR, for an outside auditor. Started by
+# hand with the PR's number. The pack holds every sealed chain of the PR's mission with its seal, the mission's
+# landing attestations and the pinned evidence keys, each agent stage's change regenerated from git and proven
+# against its sealed digest, a git bundle of every commit it names, and GitHub's metadata of the PRs, marked unsealed.
+# It is uploaded as the run's artifact epap-pack-pr-<N>, kept 90 days: HITL downloads it and hands it on. Who summoned
+# which pack is itself recorded (evidence.summon) and sealed by Evidence Seal.
+#
+# Security model: the pack job reads the store with the evidence reader App (contents read on the store only), in
+# the evidence-verify environment (deployable from the default branch only), and its own token can only read this
+# repository and its PRs. It changes nothing anywhere. Only the default branch's tooling runs. The PR number reaches
+# the job through the environment and is refused unless it is a number.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "The number of the PR whose evidence pack to summon"
+        required: true
+
+permissions: {}
+
+env:
+  PYTHONPATH: tooling/tools/agent_workflow
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  pack:
+    name: pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: evidence-verify
+    permissions:
+      contents: read  # this repository's whole history and its PR heads: the changes and the bundle
+      pull-requests: read  # the PRs' metadata
+    steps:
+      - name: Check out the default branch's tooling, with its whole history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the machine is a GitHub-hosted runner or declared (MISSION-DISPATCH-001 §3h item 6)
+        env:
+          SUBSTRATE_RUNNER: ${{ runner.environment }}
+        run: python3 -B -m mission_router.substrate
+
+      - name: The PR number (a number, nothing else)
+        id: pr
+        env:
+          PR: ${{ inputs.pr }}
+        run: |
+          case "$PR" in ''|*[!0-9]*) echo "::error::the PR must be a number"; exit 1 ;; esac
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      - name: Name the evidence store (config.json evidence_store; nothing runs without one)
+        id: store
+        run: python3 -B -m evidence store-name >> "$GITHUB_OUTPUT"
+
+      - name: Start this job's evidence chain (who summoned which pack, Amendment 061)
+        if: steps.store.outputs.full != ''
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/evidence"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+          echo "EVIDENCE_RUN=gh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-summon" >> "$GITHUB_ENV"
+
+      - name: Mint the evidence reader App's token (the evidence store only, contents read only)
+        id: token
+        if: steps.store.outputs.full != ''
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.EVIDENCE_READER_APP_ID }}
+          private-key: ${{ secrets.EVIDENCE_READER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.store.outputs.name }}
+          permission-contents: read
+
+      - name: Clone the store (the token is passed to git in its environment, never in a URL)
+        if: steps.store.outputs.full != ''
+        env:
+          STORE: ${{ steps.store.outputs.full }}
+          STORE_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$STORE_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git clone --quiet --depth 1 "https://github.com/$STORE.git" "$RUNNER_TEMP/store"
+
+      - name: Fetch this repository's PR heads (a stage branch is deleted once merged; its commit stays on its PR)
+        if: steps.store.outputs.full != ''
+        env:
+          REPO_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$REPO_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git -C tooling fetch --quiet --no-tags origin '+refs/pull/*/head:refs/remotes/pull/*'
+
+      - name: Summon the evidence pack
+        if: steps.store.outputs.full != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          python3 -B -m evidence summon --pr "$PR" --repo "$GITHUB_REPOSITORY" --store "$RUNNER_TEMP/store" \
+            --git tooling --out "$RUNNER_TEMP/pack/epap-pack-pr-$PR" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the pack to HITL (the run's artifact, kept 90 days)
+        if: steps.store.outputs.full != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: epap-pack-pr-${{ steps.pr.outputs.number }}
+          path: ${{ runner.temp }}/pack
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Keep this job's evidence chain (Evidence Seal seals it)
+        if: always() && steps.store.outputs.full != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-summon
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 90

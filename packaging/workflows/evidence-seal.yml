@@ -1,10 +1,10 @@
 name: Evidence Seal
 
 # Ring 6 (MISSION-DISPATCH-001 §3m items 2, 3 and 6; Amendment 020, part 4): find the ended runs of
-# Mission Agent, Mission Router, Mission Clock, Credentials Check and Evidence Verify whose evidence is not all sealed,
-# seal each job's evidence chain from those runs with the evidence key, add the records and seals to the evidence
-# store (config.json "evidence_store"), and set the evidence-sealed check on each PR those runs published. Under
-# "evidence": "enforce" the router merges an A2 or A3 stage PR only once that check is set.
+# Mission Agent, Mission Router, Mission Clock, Credentials Check, Evidence Verify and Evidence Pack whose evidence is
+# not all sealed, seal each job's evidence chain from those runs with the evidence key, add the records and seals to
+# the evidence store (config.json "evidence_store"), and set the evidence-sealed check on each PR those runs
+# published. Under "evidence": "enforce" the router merges an A2 or A3 stage PR only once that check is set.
 #
 # Security model: the seal job holds the evidence key and the evidence App's key, in the evidence-seal environment
 # (deployable from the default branch only), and no other credential: its own token can only read this repository

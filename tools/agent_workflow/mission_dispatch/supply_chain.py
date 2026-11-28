@@ -37,7 +37,7 @@ CONFIG_KEY = "supply_chain"
 PINS_TABLE = "credentials_check/pins.json"
 PINS_SCHEMA = "workflow-pins-v1"
 MISSION_WORKFLOWS = ("mission-agent.yml", "mission-router.yml", "credentials-check.yml", "evidence-seal.yml",
-                     "evidence-verify.yml", "mission-clock.yml")
+                     "evidence-verify.yml", "mission-clock.yml", "evidence-pack.yml")
 RUNTIME_PINS: Mapping[str, Tuple[str, str]] = {
     "claude-code": ("CLAUDE_CODE_VERSION", "CLAUDE_CODE_SHA256"),
     "cursor-cli": ("CURSOR_CLI_VERSION", "CURSOR_CLI_SHA256"),

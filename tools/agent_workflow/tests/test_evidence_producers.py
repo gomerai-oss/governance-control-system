@@ -196,19 +196,65 @@ class DispatcherTests(Base):  # vector 102
         self.assertEqual((rec["action"], rec["class"]), ("dispatch.report", "send"))
         self.assertEqual(rec["outputs"], {"comment": producer.text_digest("the comment")})
 
-    def test_the_checks_job_records_each_exit_code(self):
-        out = self.tmp / "checks"
-        out.mkdir()
-        (out / "checks.json").write_text(json.dumps([
-            {"index": 1, "command": "python3 -m unittest", "exit_code": 0, "passed": True, "output_tail": "OK"},
-            {"index": 2, "command": "make lint", "exit_code": 2, "passed": False, "output_tail": "error"},
-            {"index": 3, "command": "make docs", "exit_code": None, "passed": False, "output_tail": ""}]))
+    def checks_out(self, landing_merged=True):
+        """The checks job's own result files, written by the real writers (``dispatch.run_checks``), never by hand:
+        until Amendment 060 this test wrote a bare list, which no job ever wrote, so it passed while no check result
+        was ever recorded."""
+        from mission_dispatch import dispatch
+        tree, out = self.tmp / "tree", self.tmp / "checks"
+        tree.mkdir()
+        job = dataclasses.replace(JOB, role="A3", checks=("python3 -c 'pass'", "python3 -c 'raise SystemExit(2)'"))
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        dispatch.run_checks(job, tree, out, env, timeout=30,
+                            network=lambda: {"mode": "enforce", "network": "closed"},
+                            landing={"commands": ["python3 -c 'raise SystemExit(1)'"], "branch": "main",
+                                     "head": "b" * 40, "merged": landing_merged, "error": "", "root": tree})
+        return job, tree, out
+
+    def test_vector_277_the_checks_job_records_each_result_it_wrote(self):
+        job, _, out = self.checks_out()
+        self.env["JOB"] = json.dumps(job.to_dict())
         self.main(["checks", "--root", str(self.tmp), "--out", str(out)], {"cmd_checks": mock.Mock(return_value=0)})
         recs = self.records()
-        self.assertEqual([(r["action"], r["result"], r["reason"]) for r in recs],
+        self.assertEqual([(r["action"], r["result"], r["reason"]) for r in recs[:3]],
                          [("checks.check", "done", "check 1: exit 0"), ("checks.check", "failed", "check 2: exit 2"),
-                          ("checks.check", "failed", "check 3: exit not run")])
+                          ("checks.check", "failed", f"landing check 1 on main at {'b' * 12}: exit 1")])
         self.assertEqual(recs[0]["actor"]["name"], "mission-checks")
+        self.assertEqual(recs[0]["inputs"], {"commit": producer.text_digest(job.base_sha)})
+        self.assertEqual(recs[2]["inputs"]["head"], producer.text_digest("b" * 40))
+        env = recs[3]
+        self.assertEqual((env["action"], env["class"]), ("checks.environment", "read"))
+        self.assertIn("python ", env["reason"])
+        self.assertIn("network closed (blast radius enforce)", env["reason"])
+        self.assertEqual(len(recs), 4)
+
+    def test_vector_277_a_landing_that_does_not_merge_is_recorded_as_not_run(self):
+        job, _, out = self.checks_out(landing_merged=False)
+        self.env["JOB"] = json.dumps(job.to_dict())
+        self.main(["checks", "--root", str(self.tmp), "--out", str(out)], {"cmd_checks": mock.Mock(return_value=0)})
+        self.assertIn(("failed", "landing checks not run: the commit does not merge onto main"),
+                      [(r["result"], r["reason"]) for r in self.records()])
+
+    def test_vector_277_the_baseline_job_records_its_results(self):
+        from mission_dispatch import dispatch
+        job, tree, out = self.checks_out()
+        base_out = self.tmp / "baseline"
+        dispatch.run_baseline(job, tree, out, base_out, {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                              ["python3 -c 'raise SystemExit(1)'"], timeout=30)
+        self.env["JOB"] = json.dumps(job.to_dict())
+        self.main(["baseline", "--root", str(tree), "--checks", str(out), "--out", str(base_out)],
+                  {"cmd_baseline": mock.Mock(return_value=0)})
+        recs = self.records()
+        self.assertTrue(recs and all(r["action"] in ("checks.check", "checks.environment") for r in recs), recs)
+        self.assertTrue(any(r["reason"].startswith("baseline check 1 on ") for r in recs), [r["reason"] for r in recs])
+
+    def test_vector_277_no_results_file_is_recorded_as_a_failure(self):
+        out = self.tmp / "checks"
+        out.mkdir()
+        self.main(["checks", "--root", str(self.tmp), "--out", str(out)], {"cmd_checks": mock.Mock(return_value=0)})
+        (rec,) = self.records()
+        self.assertEqual((rec["action"], rec["result"]), ("checks.check", "failed"))
+        self.assertIn("no results file (checks.json)", rec["reason"])
 
     def test_a_registry_check_is_recorded_only_when_it_refuses(self):
         self.main(["registry-check", "--runtime", "claude-code", "--package", "p"],

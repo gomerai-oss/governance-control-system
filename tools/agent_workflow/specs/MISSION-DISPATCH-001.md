@@ -730,6 +730,218 @@ schedules.
 
 Vector 275.
 
+**Amendment 059 (2026-11-27, HITL direction: "F16 then the medium & lows"):** the merge gate's proof is set again
+when a deleted run takes it, and the gate's hold is proven live.
+- **What was found:** the evidence audit's F16 and F19 (evidence E-5, E-7 and E-9).
+  - F16: on 2026-11-23 three failed seal runs were deleted by hand, which deleted their check suites, and
+    `evidence-sealed` vanished from Core #300's head; mark was re-run by hand.
+  - F19: no evidence item recorded the router holding a stage PR for want of a seal (`_evidence_hold`), so the audit
+    could not call the gate proven.
+- **F16 is met, and is now tested as such:** since Amendment 049 the sweep names the run that published an open stage
+  PR with no `evidence-sealed` on its head, even when every chain is sealed, and `seal --resume` hands that PR to the
+  mark job: deleting a seal or mark run no longer strands a PR. Since Amendment 057 the daily deep sweep does the same
+  for a PR held longer than the 2-day lookback, and since Amendment 058 the seal sweep runs while any stage PR is open.
+  Vector 276 drives the 2026-11-23 case through both sweeps.
+- **What is still not set again:** a deleted Mission Agent run takes its chain artifacts with it, so nothing names
+  its PR. The PR stays held and says why: it is never merged unsealed. From the code (`dispatch.py`, `_plan_one`),
+  the stage is published again only once its branch is gone, so HITL closes the PR and deletes the branch; this is
+  not tried live.
+- **F19 is proven live:** the router's hold comment ("the run that published this PR is not sealed and stored
+  yet") is on 19 governance and 5 Core stage PRs. For example, governance #1399 was held at 2026-11-26 00:59:58Z, its
+  `evidence-sealed` was set at 01:15:01Z and it merged at 01:30:44Z. Core #312 was held at 2026-11-23 18:25:53Z,
+  sealed at 18:28:08Z and merged at 18:29:02Z.
+
+Vector 276.
+
+**Amendment 060 (2026-11-27, HITL direction: "begin implementing the EPAP retrieval routines"):** the checks' and the
+baseline's results reach the sealed evidence, with the machine they ran on.
+- **What was found:** building EPAP retrieval (an auditor rerunning a mission's process from its evidence pack)
+  needs each check's recorded result. None was ever recorded.
+  - **The checks job** writes `checks.json` as an object: `results` (the plan's checks), `landing` (the landing checks
+    on the merged tree, Amendment 048) and `network` (the checks account's network). Since ring 6 part 2
+    (2026-11-07) the dispatcher read it as a bare list, which neither job ever wrote, so it recorded nothing. Its test
+    wrote a bare list by hand, so it passed. Neither store (governance's, Core's) holds a single `checks.check` record.
+  - **The baseline job** (Amendment 052) keeps an evidence chain, but its step was not one the dispatcher records.
+- **The fix:**
+  - **Each result is recorded.** One `checks.check` record per command, read from each job's own result file: the
+    plan's checks (`check N`), the landing checks (`landing check N on <branch> at <head>`, or one failed record when
+    the commit does not merge onto the landing branch) and the baseline's (`baseline check N on <branch> at <head>`).
+    Each record keeps the exit code in its reason, the command's and its output's digests, and the commit, branch
+    and head it ran on by digest.
+  - **A job with no results file** records that as a failure.
+  - **The machine is recorded.** One `checks.environment` record per job (a new action, class `read`) names what the
+    checks ran on: the runner image and its version, OS and architecture, Python's and git's versions, and the checks
+    account's network. A replay on another machine can then tell a different environment from a different result.
+  - **The tests use the real writers** (`dispatch.run_checks`, `dispatch.run_baseline`), not a hand-written file.
+- **What it does not do:** missions run before it have no recorded check results. Their packs say so, and a replay can
+  rerun their checks without a recorded result to compare.
+
+Vector 277.
+
+**Amendment 061 (2026-11-27, HITL direction: "begin implementing the EPAP retrieval routines"):** EPAP can be
+summoned: the evidence pack of one PR, for an outside auditor.
+- **What was found:** HITL: "the EPAP system is designed to be able to give an outside auditor the evidence they need
+  to recreate the actions being audited ... If it cannot be summoned, it does not meet the objective." The evidence was
+  produced, sealed, stored and checked (§3m), but nothing could hand it to anyone: no command or workflow assembled the
+  evidence of one PR.
+  - **What the evidence already binds:** recreating governance #1399 by hand showed it. Its A3 run's `dispatch.collect`
+    record holds the commit the agent started from and the SHA-256 of its `change.patch`; its `dispatch.publish` record
+    holds the SHA-256 of the PR head's commit id. Applying the patch to that commit gives the PR head's exact tree.
+  - **Git regenerates the change:** `git diff --binary --no-renames --no-ext-diff --no-textconv <base> <head>` gives
+    the same bytes, so git, which keeps every PR's head, carries each change for good. The run's 7-day patch artifact
+    is not needed.
+- **Summon** (`evidence/summon.py`, `python3 -m evidence summon`): the pack of PR N.
+  - **Its scope:** the PR's whole mission, read from a clone of the store, a clone of the repository with its PR heads,
+    and GitHub's PR metadata.
+  - **The evidence:** every sealed chain holding a record of the mission, byte for byte, with its seal and its state
+    (verified, not sealed, or refused and why). The mission's landing attestations, and the pinned public evidence keys.
+  - **The stages:** each agent stage (A2, A3, AR) that published a PR, with its start commit and its head. The head is
+    bound when its SHA-256 is the sealed `dispatch.publish` digest.
+  - **The changes:** each stage's change, regenerated from git, is proven when its SHA-256 is the sealed
+    `dispatch.collect` digest. A run that collected a change but published no PR is listed as such, with the run that
+    published that stage.
+  - **The approvals and merges:** HITL's approvals (account, account id and the exact commit, and where it carried)
+    and the router's merges and landings, from the records.
+  - **The bundle:** a git bundle of every commit the pack names, with its history, so each change can be rebuilt with
+    no access to the repository. A merge commit is included only for a PR that merged: an unmerged PR's
+    `merge_commit_sha` is GitHub's test merge.
+  - **Unsealed:** GitHub's metadata of the PRs (`github/`).
+  - **The index:** a README for the auditor, and `manifest.json` with the SHA-256 of every file.
+
+  Nothing the pack cannot show is trusted. A chain that does not verify, a head that does not match its record, or a
+  change that does not match its digest is reported in the pack, which is still written so the auditor sees it.
+- **The limits each pack states:**
+  - no recorded check results before Amendment 060;
+  - the plan (A1) and HITL's approvals are bound by commit id and account, not by a sealed patch;
+  - `github/` is not sealed;
+  - a PR outside the mission flow has no evidence record at all, and its pack says so.
+- **Evidence Pack** (`evidence-pack.yml`), started by hand with the PR number: the pack job reads the store with the
+  evidence reader App in the `evidence-verify` environment, with `contents: read` and `pull-requests: read` here. It
+  uploads the pack as `epap-pack-pr-<N>`, kept 90 days. Who summoned which pack is recorded (`evidence.summon`, class
+  `read`, with the manifest's SHA-256), and Evidence Seal seals it.
+- **Proven on the live stores before it was built in:**
+  - governance #1399: M-AUDIT-DISPATCH-001, 51 chains, 9 published stages;
+  - Core #312: M-GCS-DEMO-PROOF-003, 21 chains, 4 stages;
+  - governance #1294: M-INDEP-REVIEW-001, 27 chains, 6 stages, its runs' patch artifacts long expired.
+
+  Every chain verified, every head was bound and every change proven. From each pack's bundle alone, offline, all 19
+  changes regenerated to their sealed digests. Governance #1413, a hand-built PR, gave a pack saying it is outside
+  the mission flow.
+- **What comes next:** the auditor's replay (`recreate`), which reruns the process from a pack in a sandbox.
+
+Vectors 278, 279 and 280.
+
+**Amendment 062 (2026-11-27, HITL direction: "The auditor should be able to rerun the evidence in a sandboxed
+environment to verify the process"):** EPAP can be replayed: an outside auditor reruns a summoned pack, with no network
+and no access to the repository, its store or GitHub, and gets each step of the mission reproduced or the first
+divergence.
+- **What was found:** a pack (Amendment 061) holds what was recorded and proves each change against its digest. Nothing
+  did the process again: who approved what, whether the gates would accept each change, whether the router's
+  decisions follow from the facts, whether the checks give the results recorded.
+- **Replay** (`evidence/replay.py`, `python3 -m evidence replay --pack DIR --work DIR`). It takes nothing the pack
+  says on trust, and runs the tooling's own code, not a copy of it:
+  1. **The pack:** each file matches the manifest's SHA-256, and nothing is added. The manifest is only an index: a
+     forger can rewrite it, so the seals are what prove the evidence.
+  2. **Git:** the bundle unbundles (git checks every object's id), and holds every commit the pack names.
+  3. **The keys:** seals are checked against the evidence keys the repository itself pins
+     (`tools/agent_workflow/evidence/key.json` at the pack's commits), or the auditor's own pin (`--keys`), never
+     against the pack's `key.json` alone. A pack key the repository does not pin diverges.
+  4. **The chains:** each is replayed record by record and its seal checked. Only sealed records that verify are
+     facts for the steps below, less any HITL withdrew.
+  5. **The attestations:** this mission's landing attestations verify and cite the records as sealed. One of a
+     landing HITL withdrew is named and not counted. One of another mission is named and not checked (see below).
+  6. **The authority:** the plan the router merged is the exact commit an account `config.json` names as HITL (at
+     that commit) approved. The approved plan is read at the merge commit, as the router reads it.
+  7. **Each stage:** its sealed change is applied with the dispatcher's own publish path (`Checkout.prepare` and
+     `apply`) to the commit its sealed `dispatch.collect` record names. It must rebuild the PR head's tree, and the
+     head must be the commit the sealed `dispatch.publish` record names. The dispatcher's own gates then run again on
+     the rebuilt change: `check_changes` (scope, modes, the verdict or the challenge), `instruction_files` (refused
+     under enforce), the secrets boundary's patterns, and the size limit.
+  8. **The router:** its own gate (`gate.evaluate`) decides again on each PR it merged, from the sealed facts and git:
+     - the files compared as the router compares them;
+     - who could act, from the identity registry and `config.json` at the commit;
+     - the HITL approvals.
+
+     Its own state machine (`state.derive_state`), replayed over the sealed merges, must end where the mission did.
+  9. **The result:** each recorded merge is made again from the integration branch's start, HITL's plan and the rebuilt
+     changes, and must give the recorded merge's tree, up to the commit that landed.
+  10. **The checks:** the plan's checks and the landing checks run again, as the dispatcher runs a check
+      (`dispatch.check_argv`: capped, a clean environment), and each is compared with its sealed `checks.check`
+      record:
+      - the plan's checks on the commit A3 reviewed;
+      - the landing checks on that commit merged onto the landing head the record names.
+
+      A record counts only for that very command and commit (their SHA-256s). By default the last review is rerun;
+      `--checks all` reruns every review, and `--checks none` reruns none. A review from before Amendment 060 is rerun
+      too, with nothing sealed to compare, and its landing checks run on the commit that landed.
+- **The sandbox.** The checks run the repository's own code, so they run only in a sandbox the replay has probed
+  can reach no public address:
+  - **`unshare`:** a user, network and mount namespace of their own; no network but the namespace's own loopback,
+    which reaches nothing outside (the checks' local servers use it); the replaying account unprivileged outside
+    them; its home hidden under an empty tmpfs unless `--keep-home`.
+  - **`offline`:** the machine itself has no network, such as a container started with `--network none`.
+  - **None available:** the checks are not run, said so, and every other step still runs. The replay itself never uses
+    the network and writes only in its work directory.
+- **AI work:** what an AI agent produced (A2's build, A3's review, AR's challenge) cannot be generated again byte for
+  byte. Each is reported `output verified, not re-generated`: it is proven to be exactly what was sealed and published,
+  and the gates accept it.
+- **The report** (`replay-report.json` and `replay-report.md` in the work directory):
+  - **Each step:** `reproduced`, `diverged` (with what differs), `not replayable` (with why), or `output verified,
+    not re-generated`.
+  - **The verdict:** `REPRODUCED`, `DIVERGED` (naming the first divergence) or `NOTHING TO REPLAY` (a PR outside the
+    mission flow).
+  - **The CLI:** exits 1 on a divergence.
+- **Summon, corrected:**
+  - **Attestations:** a pack held every landing attestation whose landing record was in one of its chains. A router
+    chain holds several missions' records, so the governance #1399 pack carried three other missions' attestations,
+    which cite chains it does not hold. It now holds the mission's own only.
+  - **The bundle:** it now also holds the landing head that the landing checks ran on.
+  - **The README:** it now tells the auditor how to replay the pack.
+- **Proven on the live packs before it was built in.** The packs summoned for Amendment 061 were replayed in the
+  `unshare` sandbox, the home hidden:
+  - **governance #1399:** REPRODUCED in 10 seconds:
+    - all 51 chains, and HITL's authority over the plan;
+    - all 9 published stages, rebuilt and accepted by the gates;
+    - the router's gate deciding MERGE again on its 5 merges, and its state machine ending DONE;
+    - every merge rebuilt to its tree, up to the landed commit;
+    - its plan check rerun to exit 0, with nothing sealed to compare (before Amendment 060). No landing checks were
+      named then.
+
+    It is the pack that showed summon's attestation bug.
+  - **Core #312:** REPRODUCED. Its 10 plan checks and its 8 landing checks, Core's whole suite among them, were rerun
+    to exit 0 with no network.
+  - **governance #1294:** REPRODUCED, though its runs' patch artifacts expired long ago. Its 7 merges were rebuilt and
+    its 6 plan checks, its whole suite among them, rerun to exit 0.
+  - **governance #1413:** NOTHING TO REPLAY: it was built by hand.
+
+  The replays also showed two ways the sandbox differed from the dispatcher's runner, both fixed:
+  - the checks need `origin/<landing branch>`, because the dispatcher's checkout is a full clone;
+  - the namespace's own loopback must be up, because the repositories' tests run local servers. It reaches nothing
+    outside.
+
+Vectors 281, 282, 283 and 284.
+
+**Amendment 063 (2026-11-27, found by Core's CI on the companion of Amendments 059 to 062):** a pack's
+bundle clones on every git version.
+- **What was found:** summon bundled the pack's commits under `refs/epap-pack/<i>`, which are not branches.
+  - **What a clone does:** a plain `git clone repo.bundle` fetches branches and tags only. Git 2.34 still kept every
+    object of the bundle; git 2.56, on GitHub's runners now, keeps none.
+  - **The effect:** the pack README's own instruction then gave a repository without the stage commits, and Core's CI
+    failed vector 278 there.
+  - **Why only Core's CI saw it:** governance's PR checks do not run this suite, so it had run only on git 2.34.
+  - **The replay was not affected:** it fetches the bundle's refs by name.
+- **The fix:**
+  - **Branches:** summon bundles the commits as branches (`refs/heads/epap-pack/<i>`), so a plain clone takes every
+    one on any git version.
+  - **Nothing is overwritten:** a branch of that name already in the clone refuses the summon; the temporary
+    branches are created only where none exists, and only those are removed.
+  - **Older packs:** the replay fetches both forms, so a pack summoned before this still replays. For such a pack by
+    hand: `git init repo && git -C repo fetch <pack>/repo.bundle '+refs/epap-pack/*:refs/heads/epap-pack/*'`.
+  - **The tests:** they check that every commit is on a branch of a plain clone. That fails on the old bundle with
+    any git version, not only where objects are dropped.
+
+Vector 285.
+
 Vector 194.
 
 ## 1. Purpose
@@ -2994,6 +3206,15 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
     in the PR can try to steer it toward "clean" (SECURITY-SCAN-SPEC-001 §7). No project file is passed, so the
     checkout cannot configure the scan, but its text is still read. A green scan narrows risk; it proves nothing.
 
+48. **A replay reruns the steps, not the AI (Amendment 062).** What an agent produced is proven to be what was sealed
+    and published and accepted by the gates, not shown to be what the agent would produce again. A replay runs the
+    auditor's copy of the tooling: gates changed since the mission may decide otherwise, and the report says which
+    tooling ran. The plan PR's author, and the base branch each PR named, are GitHub's word (unsealed); who pushed each
+    stage branch is the sealed publish record's agent. The integration branch is taken to be where the router's
+    sealed merges put it. The `unshare` sandbox hides the home but not the rest of the file system: a container or a
+    disposable machine isolates more. A check that depends on tools outside the auditor's machine (or under a hidden
+    home) diverges for that reason, and its output says so.
+
 ## 8. Predicted vectors (A3 verifies)
 
 | # | Input | Expected |
@@ -3268,3 +3489,13 @@ merges). After 3 failures in a row the stage is recorded as `BLOCKED` for HITL r
 | 273 | A chain 30 days old and unsealed; a chain that expired unsealed, one sealed in time, one of another workflow; more than 50 runs | Named by the deep sweep only, oldest first; only the first named lost; the 50 oldest (Amendment 057) |
 | 274 | The seal workflow; the CLI with `--deep --lost` | The deep sweep daily, a blank line skipped, one failed download leaving the others, lost evidence failing the job; the lost runs written to the file (Amendment 057) |
 | 275 | The Mission Agent and seal workflows; the router with the clock on | No 10-minute schedule; the seal sweep by `sweep=true`, the backfill by hand without it; the router starts each at most every 10 minutes, never while one is going (Amendment 058) |
+| 276 | An open stage PR whose `evidence-sealed` went with a deleted run, its publishing run 5 days old; after it is set again | Not named by the routine sweep, named by the deep sweep; not named (Amendment 059) |
+| 277 | The checks job's results with a passing and a failing check, a failing landing check, and its network; a landing that does not merge; the baseline job's results; no results file | One `checks.check` per command and one `checks.environment`, each as the job wrote it; one failed "not run"; one per baseline command; one failure (Amendment 060) |
+| 278 | The pack of a mission's merged A2 PR | Only its chains, each verified; the stage bound and its change proven; HITL's approval and the merge; every file's SHA-256; the bundle alone rebuilds the change; the merge commit of the merged PR only (Amendment 061) |
+| 279 | A head pushed after publish; an edited chain; a PR outside the mission flow; no check results; an existing output; an unknown PR | Not bound, not proven, both named; refused and why, the pack still written; said so; a stated limit; refused; refused (Amendment 061) |
+| 280 | The CLI; the Evidence Pack workflow | `evidence.summon` recorded with the summoner's account and the manifest's digest; by hand only, the PR number only through the environment and only as a number, the reader App, read only, the substrate check, the pack as `epap-pack-pr-<N>`, its own chain sealed (Amendment 061) |
+| 281 | A genuine pack of a mission that landed on a main that had moved on | REPRODUCED: the files, the bundle, the keys the repository pins, the chains, the mission's own attestation, HITL's authority, each stage rebuilt by the dispatcher's own code and accepted by its gates, the router's gate MERGE on each PR and its state machine DONE at the landed commit, every merge rebuilt to its tree, the plan's and landing checks rerun with the sealed results (the landing check needs main's file: it ran on the merged tree); the agents' work `output verified, not re-generated`; only this mission's attestation in the pack (Amendment 062) |
+| 282 | A changed change with the manifest rewritten; a changed file and an added one; a changed record; a key the repository does not pin, and the auditor's own pin; a check sealed as passed that fails; a plan no HITL account approved; a change outside build_scope | First divergence: the stage (the manifest proves nothing); the pack files, naming both; the chains, and the approval in it is not used; the keys, and under the auditor's pin the seals do not verify; the checks; the authority; the dispatcher's gates, and the router's gate refuses it too (Amendment 062) |
+| 283 | No sandbox can be made; the unshare sandbox; a sandbox that reaches the network; a PR outside the mission flow | The checks are not run and nothing of the repository's code ran, the rest still runs; no network inside and the home hidden, the work directory reachable; refused; NOTHING TO REPLAY (Amendment 062) |
+| 284 | The CLI; an existing work directory, a directory that is no pack, an unknown --checks | Exit 0 and the report on a reproduction, exit 1 naming the first divergence; refused, refused, refused (Amendment 062) |
+| 285 | A plain clone of a pack's bundle; a branch of the bundle's name already in the clone; a pack summoned before its bundle had branches | Every commit is on a branch of the clone and the temporary branches are gone; the summon is refused and the branch untouched; it still replays, REPRODUCED (Amendment 063) |

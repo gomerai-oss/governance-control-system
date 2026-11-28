@@ -63,9 +63,12 @@ ACTIONS: Mapping[str, str] = {
     "harness.draft": "write",  # Amendment 031: a drafted call writes the run's drafted list, never the app
     "harness.refusal": "refuse",
     "checks.check": "decide",
+    "checks.environment": "read",  # Amendment 060: the machine a job's checks ran on, for a replay to match
     "credentials.finding": "decide",
     # withdrawal (§3m item 4)
     "evidence.withdraw": "withdraw",
+    # EPAP (Amendment 061): who summoned the evidence pack of which PR, and the pack's manifest by digest
+    "evidence.summon": "read",
     # the checker (§3m item 7): one record per verification of the whole store
     "evidence.verify": "decide",
 }
