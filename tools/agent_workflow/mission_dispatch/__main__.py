@@ -36,7 +36,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Mapping, Optional, Tuple
 
 from mission_router.github import GitHub, GitHubError
 from mission_router.gate import classify_or_raise
@@ -52,6 +52,7 @@ from mcp_gateway import app_gateway as mcp_app_gateway
 from .runtimes import BINARIES
 from .dispatch import (
     BOUNDARY_OUT,
+    BASELINE_JSON,
     CHECKS_JSON,
     MESSAGE_OUT,
     PATCH_FILE,
@@ -1012,6 +1013,74 @@ def record_scan(recorder, step: str, result: str, reason: str) -> None:
                     authority_kind="spec_rule", authority_ref=f"SECURITY-SCAN-SPEC-001 §3, {job.kind} {job.subject}")
 
 
+def _record_checks(recorder, step: str, path: Path, base: Mapping[str, object]) -> None:
+    """The checks job's and the baseline job's results (``checks.json``, ``baseline.json``), one ``checks.check``
+    record per command, and one ``checks.environment`` record of the machine they ran on (MISSION-DISPATCH-001
+    Amendment 060). Each file is an object whose ``results`` list holds the commands; the checks job's also holds
+    ``landing`` (the landing checks on the merged tree) and ``network`` (the checks account's network). Until
+    Amendment 060 this read a bare list, which neither job ever wrote, so no check result was recorded."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() and not path.is_symlink() else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        recorder.record(actor=CHECKS_ACTOR, account_id=None, action="checks.check", result="failed",
+                        reason=f"{step}: no results file ({path.name}) to record", **base)
+        return
+
+    def each(results: object, label: str, extra: Mapping[str, str]) -> None:
+        for r in results if isinstance(results, list) else []:
+            if not isinstance(r, dict):
+                continue
+            code = r.get("exit_code")
+            recorder.record(actor=CHECKS_ACTOR, account_id=None, action="checks.check",
+                            result="done" if r.get("passed") is True else "failed",
+                            reason=f"{label.replace('{index}', str(r.get('index')))}: exit {code if code is not None else 'not run'}",
+                            inputs=dict(extra),
+                            outputs={"command": evidence_producer.text_digest(str(r.get("command", ""))),
+                                     "output": evidence_producer.text_digest(str(r.get("output_tail", "")))},
+                            **base)
+
+    if step == "checks":
+        each(data.get("results"), "check {index}", {"commit": evidence_producer.text_digest(str(data.get("commit", "")))})
+        landing = data.get("landing")
+        if isinstance(landing, dict):
+            where = {"branch": evidence_producer.text_digest(str(landing.get("branch", ""))),
+                     "head": evidence_producer.text_digest(str(landing.get("head", "")))}
+            if landing.get("merged") is True:
+                each(landing.get("results"), "landing check {index} on " + str(landing.get("branch", ""))[:40]
+                     + " at " + str(landing.get("head") or "")[:12], where)
+            else:
+                recorder.record(actor=CHECKS_ACTOR, account_id=None, action="checks.check", result="failed",
+                                reason="landing checks not run: the commit does not merge onto "
+                                       f"{str(landing.get('branch', ''))[:40]}", inputs=where, **base)
+    else:
+        each(data.get("results"), "baseline check {index} on " + str(data.get("branch", ""))[:40]
+             + " at " + str(data.get("head") or "")[:12],
+             {"branch": evidence_producer.text_digest(str(data.get("branch", ""))),
+              "head": evidence_producer.text_digest(str(data.get("head", "")))})
+    env = environment(os.environ, data.get("network") if isinstance(data.get("network"), dict) else None)
+    recorder.record(actor=CHECKS_ACTOR, account_id=None, action="checks.environment", result="done",
+                    reason=env, outputs={"environment": evidence_producer.text_digest(env)}, **base)
+
+
+def environment(environ: Mapping[str, str], network: Optional[Mapping[str, object]] = None) -> str:
+    """One line naming the machine a job's checks ran on, for a replay to match (Amendment 060): the runner image
+    and its version, the OS and architecture, Python's and git's versions, and the checks account's network."""
+    import platform
+    import subprocess
+    try:
+        git = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        git = "git unknown"
+    parts = [f"image {environ.get('ImageOS', 'unknown')} {environ.get('ImageVersion', '')}".strip(),
+             f"{environ.get('RUNNER_OS', platform.system())} {environ.get('RUNNER_ARCH', platform.machine())}",
+             f"python {platform.python_version()}", git.replace("git version ", "git ")]
+    if network is not None:
+        parts.append(f"network {network.get('network', 'unknown')} (blast radius {network.get('mode', 'unknown')})")
+    return "; ".join(parts)
+
+
 def record_step(recorder, args, result: str, reason: str) -> None:
     """This step's records (§3m item 1, ring 6 part 2): one for the step, with the digests of what it wrote; under
     ``checks``, one per check; after ``collect``, one per gateway decision and per egress decision. Never fails
@@ -1021,7 +1090,7 @@ def record_step(recorder, args, result: str, reason: str) -> None:
         if recorder.enabled:
             record_scan(recorder, step, result, reason)
         return
-    if not recorder.enabled or (step not in STEP_ACTIONS and step != "checks"):
+    if not recorder.enabled or (step not in STEP_ACTIONS and step not in ("checks", "baseline")):
         return
     if step == "registry-check" and result == "done":
         return  # only its refusal is recorded; a passed check shows in prepare's run
@@ -1032,22 +1101,8 @@ def record_step(recorder, args, result: str, reason: str) -> None:
     base = dict(mission=job.mission_id, round_n=job.round, commit=job.build_sha or job.base_sha,
                 authority_kind="plan", authority_ref=f"{job.mission_id} {job.role} round {job.round}")
     root = Path(getattr(args, "root", "") or ".")
-    if step == "checks":
-        path = Path(args.out) / CHECKS_JSON
-        try:
-            results = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-        except ValueError:
-            results = []
-        for r in results if isinstance(results, list) else []:
-            if not isinstance(r, dict):
-                continue
-            code = r.get("exit_code")
-            recorder.record(actor=CHECKS_ACTOR, account_id=None, action="checks.check",
-                            result="done" if r.get("passed") else "failed",
-                            reason=f"check {r.get('index')}: exit {code if code is not None else 'not run'}",
-                            outputs={"command": evidence_producer.text_digest(str(r.get("command", ""))),
-                                     "output": evidence_producer.text_digest(str(r.get("output_tail", "")))},
-                            **base)
+    if step in ("checks", "baseline"):
+        _record_checks(recorder, step, Path(args.out) / (CHECKS_JSON if step == "checks" else BASELINE_JSON), base)
         return
     outputs = {}
     if step == "prepare":

@@ -36,6 +36,7 @@ WORKFLOWS = {
     "Mission Clock": "mission-clock.yml",  # the router's sweep while a mission is open (router Amendment 028)
     "Credentials Check": "credentials-check.yml",
     "Evidence Verify": "evidence-verify.yml",
+    "Evidence Pack": "evidence-pack.yml",  # who summoned which pack (Amendment 061)
 }
 LOOKBACK_DAYS = 2
 # The daily deep sweep (Amendment 057) looks back a week further than GitHub keeps a chain artifact (each evidence
@@ -48,7 +49,7 @@ MAX_RUNS = 50
 EVIDENCE_PREFIX = "evidence-"
 # The evidence chain artifacts the sealed workflows upload (Amendment 057). Another workflow's artifact that happens to
 # start with "evidence-" (Policy CI's evidence-graph) is not a chain: it is not counted, and its run is never read.
-CHAIN_ARTIFACT = re.compile(r"evidence-(router|credentials|verify|withdraw|agent-.+|baseline-.+|checks-.+|perform-.+|"
+CHAIN_ARTIFACT = re.compile(r"evidence-(router|credentials|verify|withdraw|summon|agent-.+|baseline-.+|checks-.+|perform-.+|"
                             r"publish-.+|report-.+|secscan-.+)")
 
 

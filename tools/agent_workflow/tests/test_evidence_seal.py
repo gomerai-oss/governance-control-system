@@ -572,6 +572,23 @@ class SweepTests(Base):
         self.assertNotIn(f"/commits/{'4' * 40}/check-runs?check_name=evidence-sealed&per_page=100", actions.paths,
                          "a PR no publishing run names is not read")
 
+    def test_vector_276_a_deleted_evidence_sealed_check_is_set_again(self):
+        """Audit M-AUDIT-EVIDENCE-001 F16 (E-7, 2026-11-23): deleting failed seal runs deleted their check suites, and
+        evidence-sealed vanished from Core #300's head; mark was re-run by hand. Since Amendment 049 the sweep names
+        the run that published an open stage PR with no evidence-sealed on its head, and seal --resume hands its PR
+        to mark. Since Amendment 057 the daily deep sweep does so for a PR held longer than the 2-day lookback."""
+        from evidence import sweep
+        old = "2026-11-05T04:00:00Z"  # 5 days back: the PR has been held since
+        pub = "evidence-publish-M-DEMO-001-A3-r1"
+        actions = self.Actions([self.run_(81)], [(81, pub, old)],
+                               pulls=[("mission/M-DEMO-001/a3-r1", "8" * 40, "2026-11-05T03:00:00Z")],
+                               checks={})  # its evidence-sealed went with the deleted run
+        store_ = self.Trees({f"gh-81-1-{pub[9:]}": True})
+        self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW), [], "past the routine lookback")
+        self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW, deep=True), [{"id": 81, "attempt": 1}])
+        actions.checks["8" * 40] = [{"app": {"slug": "github-actions"}, "conclusion": "success"}]
+        self.assertEqual(sweep.unsealed_runs(actions, store_, self.NOW, deep=True), [], "set again: not named")
+
     def test_v247_an_earlier_attempt_at_the_stage_is_not_the_pr_s_run(self):
         from evidence import sweep
         actions = self.Actions([self.run_(61)], [(61, "evidence-publish-M-DEMO-001-A2-r2", self.T)],

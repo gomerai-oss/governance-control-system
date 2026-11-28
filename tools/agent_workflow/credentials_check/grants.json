@@ -52,6 +52,15 @@
         "seal": [{"contents": "write", "(repositories)": "${{ steps.store.outputs.name }}"}]
       }
     },
+    "evidence-pack.yml": {
+      "top level": {},
+      "jobs": {
+        "pack": {"contents": "read", "pull-requests": "read"}
+      },
+      "app_tokens": {
+        "pack": [{"contents": "read", "(repositories)": "${{ steps.store.outputs.name }}"}]
+      }
+    },
     "evidence-verify.yml": {
       "top level": {},
       "jobs": {
